@@ -67,7 +67,6 @@ Allocator *allocator();
 
 void TsanCheckFailed(const char *file, int line, const char *cond,
                      u64 v1, u64 v2);
-void TsanPrintf(const char *format, ...);
 
 // FastState (from most significant bit):
 //   unused          : 1
@@ -231,10 +230,6 @@ class Shadow : public FastState {
     return false;
   }
 };
-
-// Freed memory.
-// As if 8-byte write by thread 0xff..f at epoch 0xff..f, races with everything.
-const u64 kShadowFreed = 0xfffffffffffffff8ull;
 
 struct SignalContext;
 
@@ -440,6 +435,7 @@ void ALWAYS_INLINE INLINE StatInc(ThreadState *thr, StatType typ, u64 n = 1) {
     thr->stat[typ] += n;
 }
 
+void MapShadow(uptr addr, uptr size);
 void InitializeShadowMemory();
 void InitializeInterceptors();
 void InitializeDynamicAnnotations();
@@ -454,13 +450,13 @@ bool IsFiredSuppression(Context *ctx,
 bool IsExpectedReport(uptr addr, uptr size);
 
 #if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 1
-# define DPrintf TsanPrintf
+# define DPrintf Printf
 #else
 # define DPrintf(...)
 #endif
 
 #if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 2
-# define DPrintf2 TsanPrintf
+# define DPrintf2 Printf
 #else
 # define DPrintf2(...)
 #endif
@@ -474,7 +470,7 @@ int Finalize(ThreadState *thr);
 void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
     int kAccessSizeLog, bool kAccessIsWrite);
 void MemoryAccessImpl(ThreadState *thr, uptr addr,
-    int kAccessSizeLog, bool kAccessIsWrite, FastState fast_state,
+    int kAccessSizeLog, bool kAccessIsWrite,
     u64 *shadow_mem, Shadow cur);
 void MemoryRead1Byte(ThreadState *thr, uptr pc, uptr addr);
 void MemoryWrite1Byte(ThreadState *thr, uptr pc, uptr addr);
@@ -497,7 +493,8 @@ int ThreadTid(ThreadState *thr, uptr pc, uptr uid);
 void ThreadJoin(ThreadState *thr, uptr pc, int tid);
 void ThreadDetach(ThreadState *thr, uptr pc, int tid);
 void ThreadFinalize(ThreadState *thr);
-void ThreadFinalizerGoroutine(ThreadState *thr);
+int ThreadCount(ThreadState *thr);
+void ProcessPendingSignals(ThreadState *thr);
 
 void MutexCreate(ThreadState *thr, uptr pc, uptr addr,
                  bool rw, bool recursive, bool linker_init);
@@ -509,6 +506,7 @@ void MutexReadUnlock(ThreadState *thr, uptr pc, uptr addr);
 void MutexReadOrWriteUnlock(ThreadState *thr, uptr pc, uptr addr);
 
 void Acquire(ThreadState *thr, uptr pc, uptr addr);
+void AcquireGlobal(ThreadState *thr, uptr pc);
 void Release(ThreadState *thr, uptr pc, uptr addr);
 void ReleaseStore(ThreadState *thr, uptr pc, uptr addr);
 void AfterSleep(ThreadState *thr, uptr pc);
