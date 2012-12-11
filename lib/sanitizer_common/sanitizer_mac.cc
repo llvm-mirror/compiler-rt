@@ -126,6 +126,10 @@ void ReExec() {
   UNIMPLEMENTED();
 }
 
+void PrepareForSandboxing() {
+  // Nothing here for now.
+}
+
 // ----------------- sanitizer_procmaps.h
 
 MemoryMappingLayout::MemoryMappingLayout() {
@@ -160,6 +164,15 @@ void MemoryMappingLayout::Reset() {
   current_load_cmd_addr_ = 0;
   current_magic_ = 0;
   current_filetype_ = 0;
+}
+
+// static
+void MemoryMappingLayout::CacheMemoryMappings() {
+  // No-op on Mac for now.
+}
+
+void MemoryMappingLayout::LoadFromCache() {
+  // No-op on Mac for now.
 }
 
 // Next and NextSegmentLoad were inspired by base/sysinfo.cc in

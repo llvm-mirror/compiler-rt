@@ -36,6 +36,8 @@ static uptr patch_pc(uptr pc) {
 #if defined(__powerpc__) || defined(__powerpc64__)
   // PCs are always 4 byte aligned.
   return pc - 4;
+#elif defined(__sparc__)
+  return pc - 8;
 #else
   return pc - 1;
 #endif
@@ -65,7 +67,7 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
                             bool symbolize, const char *strip_file_prefix,
                             SymbolizeCallback symbolize_callback ) {
   MemoryMappingLayout proc_maps;
-  InternalScopedBuffer<char> buff(kPageSize * 2);
+  InternalScopedBuffer<char> buff(GetPageSizeCached() * 2);
   InternalScopedBuffer<AddressInfo> addr_frames(64);
   uptr frame_num = 0;
   for (uptr i = 0; i < size && addr[i]; i++) {

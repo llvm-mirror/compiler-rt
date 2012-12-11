@@ -10,7 +10,7 @@
 // The primary purpose of this file is an end-to-end integration test
 // for CombinedAllocator.
 //===----------------------------------------------------------------------===//
-#include "sanitizer_common/sanitizer_allocator64.h"
+#include "sanitizer_common/sanitizer_allocator.h"
 #include <stddef.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -75,13 +75,13 @@ int posix_memalign(void **memptr, size_t alignment, size_t size) {
 
 void *valloc(size_t size) {
   assert(inited);
-  return allocator.Allocate(&cache, size, kPageSize);
+  return allocator.Allocate(&cache, size, GetPageSizeCached());
 }
 
 void *pvalloc(size_t size) {
   assert(inited);
-  if (size == 0) size = kPageSize;
-  return allocator.Allocate(&cache, size, kPageSize);
+  if (size == 0) size = GetPageSizeCached();
+  return allocator.Allocate(&cache, size, GetPageSizeCached());
 }
 }
 #endif

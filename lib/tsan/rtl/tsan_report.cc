@@ -25,7 +25,12 @@ ReportDesc::ReportDesc()
     , sleep() {
 }
 
+ReportMop::ReportMop()
+    : mset(MBlockReportMutex) {
+}
+
 ReportDesc::~ReportDesc() {
+  // FIXME(dvyukov): it must be leaking a lot of memory.
 }
 
 #ifndef TSAN_GO
@@ -51,7 +56,7 @@ static void PrintHeader(ReportType typ) {
 
 void PrintStack(const ReportStack *ent) {
   if (ent == 0) {
-    Printf("    [failed to restore the stack]\n");
+    Printf("    [failed to restore the stack]\n\n");
     return;
   }
   for (int i = 0; ent; ent = ent->next, i++) {
@@ -66,46 +71,61 @@ void PrintStack(const ReportStack *ent) {
   Printf("\n");
 }
 
+static void PrintMutexSet(Vector<ReportMopMutex> const& mset) {
+  for (uptr i = 0; i < mset.Size(); i++) {
+    if (i == 0)
+      Printf(" (mutexes:");
+    const ReportMopMutex m = mset[i];
+    Printf(" %s M%llu", m.write ? "write" : "read", m.id);
+    Printf(i == mset.Size() - 1 ? ")" : ",");
+  }
+}
+
 static void PrintMop(const ReportMop *mop, bool first) {
   Printf("  %s of size %d at %p",
       (first ? (mop->write ? "Write" : "Read")
              : (mop->write ? "Previous write" : "Previous read")),
       mop->size, (void*)mop->addr);
   if (mop->tid == 0)
-    Printf(" by main thread:\n");
+    Printf(" by main thread");
   else
-    Printf(" by thread %d:\n", mop->tid);
+    Printf(" by thread T%d", mop->tid);
+  PrintMutexSet(mop->mset);
+  Printf(":\n");
   PrintStack(mop->stack);
 }
 
 static void PrintLocation(const ReportLocation *loc) {
   if (loc->type == ReportLocationGlobal) {
-    Printf("  Location is global '%s' of size %zu at %zx %s:%d\n",
-               loc->name, loc->size, loc->addr, loc->file, loc->line);
+    Printf("  Location is global '%s' of size %zu at %zx %s:%d (%s+%p)\n\n",
+               loc->name, loc->size, loc->addr, loc->file, loc->line,
+               loc->module, loc->offset);
   } else if (loc->type == ReportLocationHeap) {
     Printf("  Location is heap block of size %zu at %p allocated",
         loc->size, loc->addr);
     if (loc->tid == 0)
       Printf(" by main thread:\n");
     else
-      Printf(" by thread %d:\n", loc->tid);
+      Printf(" by thread T%d:\n", loc->tid);
     PrintStack(loc->stack);
   } else if (loc->type == ReportLocationStack) {
-    Printf("  Location is stack of thread %d:\n", loc->tid);
+    Printf("  Location is stack of thread T%d:\n\n", loc->tid);
   }
 }
 
 static void PrintMutex(const ReportMutex *rm) {
-  if (rm->stack == 0)
-    return;
-  Printf("  Mutex %d created at:\n", rm->id);
-  PrintStack(rm->stack);
+  if (rm->destroyed) {
+    Printf("  Mutex M%llu is already destroyed.\n\n", rm->id);
+  } else {
+    Printf("  Mutex M%llu created at:\n", rm->id);
+    PrintStack(rm->stack);
+  }
 }
 
 static void PrintThread(const ReportThread *rt) {
   if (rt->id == 0)  // Little sense in describing the main thread.
     return;
-  Printf("  Thread %d", rt->id);
+  Printf("  Thread T%d", rt->id);
   if (rt->name)
     Printf(" '%s'", rt->name);
   Printf(" (tid=%zu, %s)", rt->pid, rt->running ? "running" : "finished");
@@ -151,6 +171,10 @@ void PrintReport(const ReportDesc *rep) {
 #else
 
 void PrintStack(const ReportStack *ent) {
+  if (ent == 0) {
+    Printf("  [failed to restore the stack]\n\n");
+    return;
+  }
   for (int i = 0; ent; ent = ent->next, i++) {
     Printf("  %s()\n      %s:%d +0x%zx\n",
         ent->func, ent->file, ent->line, (void*)ent->offset);

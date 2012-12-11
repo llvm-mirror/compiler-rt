@@ -16,6 +16,13 @@
 
 namespace __sanitizer {
 
+uptr GetPageSizeCached() {
+  static uptr PageSize;
+  if (!PageSize)
+    PageSize = GetPageSize();
+  return PageSize;
+}
+
 // By default, dump to stderr. If report_fd is kInvalidFd, try to obtain file
 // descriptor by opening file in report_path.
 static fd_t report_fd = kStderrFd;
@@ -77,7 +84,8 @@ void RawWrite(const char *buffer) {
 
 uptr ReadFileToBuffer(const char *file_name, char **buff,
                       uptr *buff_size, uptr max_len) {
-  const uptr kMinFileLen = kPageSize;
+  uptr PageSize = GetPageSizeCached();
+  uptr kMinFileLen = PageSize;
   uptr read_len = 0;
   *buff = 0;
   *buff_size = 0;
@@ -91,8 +99,8 @@ uptr ReadFileToBuffer(const char *file_name, char **buff,
     // Read up to one page at a time.
     read_len = 0;
     bool reached_eof = false;
-    while (read_len + kPageSize <= size) {
-      uptr just_read = internal_read(fd, *buff + read_len, kPageSize);
+    while (read_len + PageSize <= size) {
+      uptr just_read = internal_read(fd, *buff + read_len, PageSize);
       if (just_read == 0) {
         reached_eof = true;
         break;
@@ -147,6 +155,27 @@ void SortArray(uptr *array, uptr size) {
   }
 }
 
+// We want to map a chunk of address space aligned to 'alignment'.
+// We do it by maping a bit more and then unmaping redundant pieces.
+// We probably can do it with fewer syscalls in some OS-dependent way.
+void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type) {
+// uptr PageSize = GetPageSizeCached();
+  CHECK(IsPowerOfTwo(size));
+  CHECK(IsPowerOfTwo(alignment));
+  uptr map_size = size + alignment;
+  uptr map_res = (uptr)MmapOrDie(map_size, mem_type);
+  uptr map_end = map_res + map_size;
+  uptr res = map_res;
+  if (res & (alignment - 1))  // Not aligned.
+    res = (map_res + alignment) & ~(alignment - 1);
+  uptr end = res + size;
+  if (res != map_res)
+    UnmapOrDie((void*)map_res, res - map_res);
+  if (end != map_end)
+    UnmapOrDie((void*)end, map_end - end);
+  return (void*)res;
+}
+
 }  // namespace __sanitizer
 
 using namespace __sanitizer;  // NOLINT
@@ -172,4 +201,10 @@ void __sanitizer_set_report_fd(int fd) {
     internal_close(report_fd);
   report_fd = fd;
 }
+
+void NOINLINE __sanitizer_sandbox_on_notify(void *reserved) {
+  (void)reserved;
+  PrepareForSandboxing();
+}
+
 }  // extern "C"

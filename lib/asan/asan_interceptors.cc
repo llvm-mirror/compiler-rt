@@ -136,6 +136,28 @@ DEFINE_REAL(int, sigaction, int signum, const struct sigaction *act,
     struct sigaction *oldact);
 #endif  // ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
 
+#if ASAN_INTERCEPT_SWAPCONTEXT
+INTERCEPTOR(int, swapcontext, struct ucontext_t *oucp,
+            struct ucontext_t *ucp) {
+  static bool reported_warning = false;
+  if (!reported_warning) {
+    Report("WARNING: ASan doesn't fully support makecontext/swapcontext "
+           "functions and may produce false positives in some cases!\n");
+    reported_warning = true;
+  }
+  // Clear shadow memory for new context (it may share stack
+  // with current context).
+  ClearShadowMemoryForContext(ucp);
+  int res = REAL(swapcontext)(oucp, ucp);
+  // swapcontext technically does not return, but program may swap context to
+  // "oucp" later, that would look as if swapcontext() returned 0.
+  // We need to clear shadow for ucp once again, as it may be in arbitrary
+  // state.
+  ClearShadowMemoryForContext(ucp);
+  return res;
+}
+#endif
+
 INTERCEPTOR(void, longjmp, void *env, int val) {
   __asan_handle_no_return();
   REAL(longjmp)(env, val);
@@ -152,6 +174,25 @@ INTERCEPTOR(void, _longjmp, void *env, int val) {
 INTERCEPTOR(void, siglongjmp, void *env, int val) {
   __asan_handle_no_return();
   REAL(siglongjmp)(env, val);
+}
+#endif
+
+#if ASAN_INTERCEPT_PRCTL
+#define PR_SET_NAME 15
+INTERCEPTOR(int, prctl, int option,
+            unsigned long arg2, unsigned long arg3,  // NOLINT
+            unsigned long arg4, unsigned long arg5) {  // NOLINT
+  int res = REAL(prctl(option, arg2, arg3, arg4, arg5));
+  if (option == PR_SET_NAME) {
+    AsanThread *t = asanThreadRegistry().GetCurrent();
+    if (t) {
+      char buff[17];
+      internal_strncpy(buff, (char*)arg2, 16);
+      buff[16] = 0;
+      t->summary()->set_name(buff);
+    }
+  }
+  return res;
 }
 #endif
 
@@ -236,8 +277,8 @@ INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
       // See http://llvm.org/bugs/show_bug.cgi?id=11763.
       CHECK_RANGES_OVERLAP("memcpy", to, size, from, size);
     }
-    ASAN_WRITE_RANGE(from, size);
-    ASAN_READ_RANGE(to, size);
+    ASAN_READ_RANGE(from, size);
+    ASAN_WRITE_RANGE(to, size);
   }
 #if MAC_INTERPOSE_FUNCTIONS
   // Interposing of resolver functions is broken on Mac OS 10.7 and 10.8.
@@ -255,8 +296,8 @@ INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) {
   }
   ENSURE_ASAN_INITED();
   if (flags()->replace_intrin) {
-    ASAN_WRITE_RANGE(from, size);
-    ASAN_READ_RANGE(to, size);
+    ASAN_READ_RANGE(from, size);
+    ASAN_WRITE_RANGE(to, size);
   }
 #if MAC_INTERPOSE_FUNCTIONS
   // Interposing of resolver functions is broken on Mac OS 10.7 and 10.8.
@@ -689,11 +730,17 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(sigaction);
   ASAN_INTERCEPT_FUNC(signal);
 #endif
+#if ASAN_INTERCEPT_SWAPCONTEXT
+  ASAN_INTERCEPT_FUNC(swapcontext);
+#endif
 #if ASAN_INTERCEPT__LONGJMP
   ASAN_INTERCEPT_FUNC(_longjmp);
 #endif
 #if ASAN_INTERCEPT_SIGLONGJMP
   ASAN_INTERCEPT_FUNC(siglongjmp);
+#endif
+#if ASAN_INTERCEPT_PRCTL
+  ASAN_INTERCEPT_FUNC(prctl);
 #endif
 
   // Intercept exception handling functions.

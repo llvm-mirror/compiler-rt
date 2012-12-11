@@ -1,4 +1,4 @@
-//===-- sanitizer_allocator64.h ---------------------------------*- C++ -*-===//
+//===-- sanitizer_allocator.h -----------------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -6,22 +6,15 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
-// Specialized allocator which works only in 64-bit address space.
-// To be used by ThreadSanitizer, MemorySanitizer and possibly other tools.
-// The main feature of this allocator is that the header is located far away
-// from the user memory region, so that the tool does not use extra shadow
-// for the header.
 //
-// Status: not yet ready.
+// Specialized memory allocator for ThreadSanitizer, MemorySanitizer, etc.
+//
 //===----------------------------------------------------------------------===//
+
 #ifndef SANITIZER_ALLOCATOR_H
 #define SANITIZER_ALLOCATOR_H
 
 #include "sanitizer_internal_defs.h"
-#if SANITIZER_WORDSIZE != 64
-# error "sanitizer_allocator64.h can only be used on 64-bit platforms"
-#endif
-
 #include "sanitizer_common.h"
 #include "sanitizer_libc.h"
 #include "sanitizer_list.h"
@@ -30,7 +23,10 @@
 namespace __sanitizer {
 
 // Maps size class id to size and back.
-class DefaultSizeClassMap {
+template <uptr l0, uptr l1, uptr l2, uptr l3, uptr l4, uptr l5,
+          uptr s0, uptr s1, uptr s2, uptr s3, uptr s4,
+          uptr c0, uptr c1, uptr c2, uptr c3, uptr c4>
+class SplineSizeClassMap {
  private:
   // Here we use a spline composed of 5 polynomials of oder 1.
   // The first size class is l0, then the classes go with step s0
@@ -38,38 +34,20 @@ class DefaultSizeClassMap {
   // Steps should be powers of two for cheap division.
   // The size of the last size class should be a power of two.
   // There should be at most 256 size classes.
-  static const uptr l0 = 1 << 4;
-  static const uptr l1 = 1 << 9;
-  static const uptr l2 = 1 << 12;
-  static const uptr l3 = 1 << 15;
-  static const uptr l4 = 1 << 18;
-  static const uptr l5 = 1 << 21;
-
-  static const uptr s0 = 1 << 4;
-  static const uptr s1 = 1 << 6;
-  static const uptr s2 = 1 << 9;
-  static const uptr s3 = 1 << 12;
-  static const uptr s4 = 1 << 15;
-
   static const uptr u0 = 0  + (l1 - l0) / s0;
   static const uptr u1 = u0 + (l2 - l1) / s1;
   static const uptr u2 = u1 + (l3 - l2) / s2;
   static const uptr u3 = u2 + (l4 - l3) / s3;
   static const uptr u4 = u3 + (l5 - l4) / s4;
 
-  // Max cached in local cache blocks.
-  static const uptr c0 = 256;
-  static const uptr c1 = 64;
-  static const uptr c2 = 16;
-  static const uptr c3 = 4;
-  static const uptr c4 = 1;
-
  public:
+  // The number of size classes should be a power of two for fast division.
   static const uptr kNumClasses = u4 + 1;
   static const uptr kMaxSize = l5;
   static const uptr kMinSize = l0;
 
   COMPILER_CHECK(kNumClasses <= 256);
+  COMPILER_CHECK((kNumClasses & (kNumClasses - 1)) == 0);
   COMPILER_CHECK((kMaxSize & (kMaxSize - 1)) == 0);
 
   static uptr Size(uptr class_id) {
@@ -99,13 +77,52 @@ class DefaultSizeClassMap {
   }
 };
 
+class DefaultSizeClassMap: public SplineSizeClassMap<
+  /* l: */1 << 4, 1 << 9,  1 << 12, 1 << 15, 1 << 18, 1 << 21,
+  /* s: */1 << 4, 1 << 6,  1 << 9,  1 << 12, 1 << 15,
+  /* c: */256,    64,      16,      4,       1> {
+ private:
+  COMPILER_CHECK(kNumClasses == 256);
+};
+
+class CompactSizeClassMap: public SplineSizeClassMap<
+  /* l: */1 << 3, 1 << 4,  1 << 7, 1 << 8, 1 << 12, 1 << 15,
+  /* s: */1 << 3, 1 << 4,  1 << 7, 1 << 8, 1 << 12,
+  /* c: */256,    64,      16,      4,       1> {
+ private:
+  COMPILER_CHECK(kNumClasses <= 32);
+};
+
 struct AllocatorListNode {
   AllocatorListNode *next;
 };
 
 typedef IntrusiveList<AllocatorListNode> AllocatorFreeList;
 
+// Move at most max_count chunks from allocate_from to allocate_to.
+// This function is better be a method of AllocatorFreeList, but we can't
+// inherit it from IntrusiveList as the ancient gcc complains about non-PODness.
+static inline void BulkMove(uptr max_count,
+                            AllocatorFreeList *allocate_from,
+                            AllocatorFreeList *allocate_to) {
+  CHECK(!allocate_from->empty());
+  CHECK(allocate_to->empty());
+  if (allocate_from->size() <= max_count) {
+    allocate_to->append_front(allocate_from);
+    CHECK(allocate_from->empty());
+  } else {
+    for (uptr i = 0; i < max_count; i++) {
+      AllocatorListNode *node = allocate_from->front();
+      allocate_from->pop_front();
+      allocate_to->push_front(node);
+    }
+    CHECK(!allocate_from->empty());
+  }
+  CHECK(!allocate_to->empty());
+}
 
+// SizeClassAllocator64 -- allocator for 64-bit address space.
+//
 // Space: a portion of address space of kSpaceSize bytes starting at
 // a fixed address (kSpaceBeg). Both constants are powers of two and
 // kSpaceBeg is kSpaceSize-aligned.
@@ -133,8 +150,9 @@ class SizeClassAllocator64 {
   }
 
   void *Allocate(uptr size, uptr alignment) {
+    if (size < alignment) size = alignment;
     CHECK(CanAllocate(size, alignment));
-    return AllocateBySizeClass(SizeClassMap::ClassID(size));
+    return AllocateBySizeClass(ClassID(size));
   }
 
   void Deallocate(void *p) {
@@ -150,18 +168,7 @@ class SizeClassAllocator64 {
     if (region->free_list.empty()) {
       PopulateFreeList(class_id, region);
     }
-    CHECK(!region->free_list.empty());
-    uptr count = SizeClassMap::MaxCached(class_id);
-    if (region->free_list.size() <= count) {
-      free_list->append_front(&region->free_list);
-    } else {
-      for (uptr i = 0; i < count; i++) {
-        AllocatorListNode *node = region->free_list.front();
-        region->free_list.pop_front();
-        free_list->push_front(node);
-      }
-    }
-    CHECK(!free_list->empty());
+    BulkMove(SizeClassMap::MaxCached(class_id), &region->free_list, free_list);
   }
 
   // Swallow the entire free_list for the given class_id.
@@ -186,7 +193,7 @@ class SizeClassAllocator64 {
     uptr chunk_idx = GetChunkIdx((uptr)p, size);
     uptr reg_beg = (uptr)p & ~(kRegionSize - 1);
     uptr begin = reg_beg + chunk_idx * size;
-    return (void*)begin;
+    return reinterpret_cast<void*>(begin);
   }
 
   static uptr GetActuallyAllocatedSize(void *p) {
@@ -217,17 +224,16 @@ class SizeClassAllocator64 {
   }
 
   static uptr AllocBeg()  { return kSpaceBeg; }
-  static uptr AllocEnd()  { return kSpaceBeg  + kSpaceSize + AdditionalSize(); }
   static uptr AllocSize() { return kSpaceSize + AdditionalSize(); }
 
-  static const uptr kNumClasses = 256;  // Power of two <= 256
   typedef SizeClassMap SizeClassMapT;
+  static const uptr kNumClasses = SizeClassMap::kNumClasses;  // 2^k <= 256
 
  private:
-  COMPILER_CHECK(kSpaceBeg % kSpaceSize == 0);
-  COMPILER_CHECK(kNumClasses <= SizeClassMap::kNumClasses);
   static const uptr kRegionSize = kSpaceSize / kNumClasses;
-  COMPILER_CHECK((kRegionSize >> 32) > 0);  // kRegionSize must be >= 2^32.
+  COMPILER_CHECK(kSpaceBeg % kSpaceSize == 0);
+  // kRegionSize must be >= 2^32.
+  COMPILER_CHECK((kRegionSize) >= (1ULL << (SANITIZER_WORDSIZE / 2)));
   // Populate the free list with at most this number of bytes at once
   // or with one element if its size is greater.
   static const uptr kPopulateSize = 1 << 18;
@@ -242,8 +248,9 @@ class SizeClassAllocator64 {
   COMPILER_CHECK(sizeof(RegionInfo) == kCacheLineSize);
 
   static uptr AdditionalSize() {
-    uptr res = sizeof(RegionInfo) * kNumClasses;
-    CHECK_EQ(res % kPageSize, 0);
+    uptr PageSize = GetPageSizeCached();
+    uptr res = Max(sizeof(RegionInfo) * kNumClasses, PageSize);
+    CHECK_EQ(res % PageSize, 0);
     return res;
   }
 
@@ -262,10 +269,10 @@ class SizeClassAllocator64 {
   }
 
   void PopulateFreeList(uptr class_id, RegionInfo *region) {
+    CHECK(region->free_list.empty());
     uptr size = SizeClassMap::Size(class_id);
     uptr beg_idx = region->allocated_user;
     uptr end_idx = beg_idx + kPopulateSize;
-    region->free_list.clear();
     uptr region_beg = kSpaceBeg + kRegionSize * class_id;
     uptr idx = beg_idx;
     uptr i = 0;
@@ -277,7 +284,12 @@ class SizeClassAllocator64 {
     } while (idx < end_idx);
     region->allocated_user += idx - beg_idx;
     region->allocated_meta += i * kMetadataSize;
-    CHECK_LT(region->allocated_user + region->allocated_meta, kRegionSize);
+    if (region->allocated_user + region->allocated_meta > kRegionSize) {
+      Printf("Out of memory. Dying.\n");
+      Printf("The process has exhausted %zuMB for size class %zu.\n",
+          kRegionSize / 1024 / 1024, size);
+      Die();
+    }
   }
 
   void *AllocateBySizeClass(uptr class_id) {
@@ -300,11 +312,198 @@ class SizeClassAllocator64 {
   }
 };
 
+// SizeClassAllocator32 -- allocator for 32-bit address space.
+// This allocator can theoretically be used on 64-bit arch, but there it is less
+// efficient than SizeClassAllocator64.
+//
+// [kSpaceBeg, kSpaceBeg + kSpaceSize) is the range of addresses which can
+// be returned by MmapOrDie().
+//
+// Region:
+//   a result of a single call to MmapAlignedOrDie(kRegionSize, kRegionSize).
+// Since the regions are aligned by kRegionSize, there are exactly
+// kNumPossibleRegions possible regions in the address space and so we keep
+// an u8 array possible_regions_[kNumPossibleRegions] to store the size classes.
+// 0 size class means the region is not used by the allocator.
+//
+// One Region is used to allocate chunks of a single size class.
+// A Region looks like this:
+// UserChunk1 .. UserChunkN <gap> MetaChunkN .. MetaChunk1
+//
+// In order to avoid false sharing the objects of this class should be
+// chache-line aligned.
+template <const uptr kSpaceBeg, const u64 kSpaceSize,
+          const uptr kMetadataSize, class SizeClassMap>
+class SizeClassAllocator32 {
+ public:
+  // Don't need to call Init if the object is a global (i.e. zero-initialized).
+  void Init() {
+    internal_memset(this, 0, sizeof(*this));
+  }
+
+  bool CanAllocate(uptr size, uptr alignment) {
+    return size <= SizeClassMap::kMaxSize &&
+      alignment <= SizeClassMap::kMaxSize;
+  }
+
+  void *Allocate(uptr size, uptr alignment) {
+    if (size < alignment) size = alignment;
+    CHECK(CanAllocate(size, alignment));
+    return AllocateBySizeClass(ClassID(size));
+  }
+
+  void Deallocate(void *p) {
+    CHECK(PointerIsMine(p));
+    DeallocateBySizeClass(p, GetSizeClass(p));
+  }
+
+  void *GetMetaData(void *p) {
+    CHECK(PointerIsMine(p));
+    uptr mem = reinterpret_cast<uptr>(p);
+    uptr beg = ComputeRegionBeg(mem);
+    uptr size = SizeClassMap::Size(GetSizeClass(p));
+    u32 offset = mem - beg;
+    uptr n = offset / (u32)size;  // 32-bit division
+    uptr meta = (beg + kRegionSize) - (n + 1) * kMetadataSize;
+    return reinterpret_cast<void*>(meta);
+  }
+
+  // Allocate several chunks of the given class_id.
+  void BulkAllocate(uptr class_id, AllocatorFreeList *free_list) {
+    SizeClassInfo *sci = GetSizeClassInfo(class_id);
+    SpinMutexLock l(&sci->mutex);
+    EnsureSizeClassHasAvailableChunks(sci, class_id);
+    CHECK(!sci->free_list.empty());
+    BulkMove(SizeClassMap::MaxCached(class_id), &sci->free_list, free_list);
+  }
+
+  // Swallow the entire free_list for the given class_id.
+  void BulkDeallocate(uptr class_id, AllocatorFreeList *free_list) {
+    SizeClassInfo *sci = GetSizeClassInfo(class_id);
+    SpinMutexLock l(&sci->mutex);
+    sci->free_list.append_front(free_list);
+  }
+
+  bool PointerIsMine(void *p) {
+    return possible_regions_[ComputeRegionId(reinterpret_cast<uptr>(p))] != 0;
+  }
+
+  uptr GetSizeClass(void *p) {
+    return possible_regions_[ComputeRegionId(reinterpret_cast<uptr>(p))] - 1;
+  }
+
+  void *GetBlockBegin(void *p) {
+    CHECK(PointerIsMine(p));
+    uptr mem = reinterpret_cast<uptr>(p);
+    uptr beg = ComputeRegionBeg(mem);
+    uptr size = SizeClassMap::Size(GetSizeClass(p));
+    u32 offset = mem - beg;
+    u32 n = offset / (u32)size;  // 32-bit division
+    uptr res = beg + (n * (u32)size);
+    return reinterpret_cast<void*>(res);
+  }
+
+  uptr GetActuallyAllocatedSize(void *p) {
+    CHECK(PointerIsMine(p));
+    return SizeClassMap::Size(GetSizeClass(p));
+  }
+
+  uptr ClassID(uptr size) { return SizeClassMap::ClassID(size); }
+
+  uptr TotalMemoryUsed() {
+    // No need to lock here.
+    uptr res = 0;
+    for (uptr i = 0; i < kNumPossibleRegions; i++)
+      if (possible_regions_[i])
+        res += kRegionSize;
+    return res;
+  }
+
+  void TestOnlyUnmap() {
+    for (uptr i = 0; i < kNumPossibleRegions; i++)
+      if (possible_regions_[i])
+        UnmapOrDie(reinterpret_cast<void*>(i * kRegionSize), kRegionSize);
+  }
+
+  typedef SizeClassMap SizeClassMapT;
+  static const uptr kNumClasses = SizeClassMap::kNumClasses;  // 2^k <= 128
+
+ private:
+  static const uptr kRegionSizeLog = SANITIZER_WORDSIZE == 64 ? 24 : 20;
+  static const uptr kRegionSize = 1 << kRegionSizeLog;
+  static const uptr kNumPossibleRegions = kSpaceSize / kRegionSize;
+  COMPILER_CHECK(kNumClasses <= 128);
+
+  struct SizeClassInfo {
+    SpinMutex mutex;
+    AllocatorFreeList free_list;
+    char padding[kCacheLineSize - sizeof(uptr) - sizeof(AllocatorFreeList)];
+  };
+  COMPILER_CHECK(sizeof(SizeClassInfo) == kCacheLineSize);
+
+  uptr ComputeRegionId(uptr mem) {
+    uptr res = mem >> kRegionSizeLog;
+    CHECK_LT(res, kNumPossibleRegions);
+    return res;
+  }
+
+  uptr ComputeRegionBeg(uptr mem) {
+    return mem & ~(kRegionSize - 1);
+  }
+
+  uptr AllocateRegion(uptr class_id) {
+    CHECK_LT(class_id, kNumClasses);
+    uptr res = reinterpret_cast<uptr>(MmapAlignedOrDie(kRegionSize, kRegionSize,
+                                      "SizeClassAllocator32"));
+    CHECK_EQ(0U, (res & (kRegionSize - 1)));
+    CHECK_EQ(0U, possible_regions_[ComputeRegionId(res)]);
+    possible_regions_[ComputeRegionId(res)] = class_id + 1;
+    return res;
+  }
+
+  SizeClassInfo *GetSizeClassInfo(uptr class_id) {
+    CHECK_LT(class_id, kNumClasses);
+    return &size_class_info_array_[class_id];
+  }
+
+  void EnsureSizeClassHasAvailableChunks(SizeClassInfo *sci, uptr class_id) {
+    if (!sci->free_list.empty()) return;
+    uptr size = SizeClassMap::Size(class_id);
+    uptr reg = AllocateRegion(class_id);
+    uptr n_chunks = kRegionSize / (size + kMetadataSize);
+    for (uptr i = reg; i < reg + n_chunks * size; i += size)
+      sci->free_list.push_back(reinterpret_cast<AllocatorListNode*>(i));
+  }
+
+  void *AllocateBySizeClass(uptr class_id) {
+    CHECK_LT(class_id, kNumClasses);
+    SizeClassInfo *sci = GetSizeClassInfo(class_id);
+    SpinMutexLock l(&sci->mutex);
+    EnsureSizeClassHasAvailableChunks(sci, class_id);
+    CHECK(!sci->free_list.empty());
+    AllocatorListNode *node = sci->free_list.front();
+    sci->free_list.pop_front();
+    return reinterpret_cast<void*>(node);
+  }
+
+  void DeallocateBySizeClass(void *p, uptr class_id) {
+    CHECK_LT(class_id, kNumClasses);
+    SizeClassInfo *sci = GetSizeClassInfo(class_id);
+    SpinMutexLock l(&sci->mutex);
+    sci->free_list.push_front(reinterpret_cast<AllocatorListNode*>(p));
+  }
+
+  u8 possible_regions_[kNumPossibleRegions];
+  SizeClassInfo size_class_info_array_[kNumClasses];
+};
+
 // Objects of this type should be used as local caches for SizeClassAllocator64.
 // Since the typical use of this class is to have one object per thread in TLS,
 // is has to be POD.
-template<const uptr kNumClasses, class SizeClassAllocator>
+template<class SizeClassAllocator>
 struct SizeClassAllocatorLocalCache {
+  typedef SizeClassAllocator Allocator;
+  static const uptr kNumClasses = SizeClassAllocator::kNumClasses;
   // Don't need to call Init if the object is a global (i.e. zero-initialized).
   void Init() {
     internal_memset(this, 0, sizeof(*this));
@@ -361,17 +560,18 @@ class LargeMmapAllocator {
  public:
   void Init() {
     internal_memset(this, 0, sizeof(*this));
+    page_size_ = GetPageSizeCached();
   }
   void *Allocate(uptr size, uptr alignment) {
     CHECK(IsPowerOfTwo(alignment));
     uptr map_size = RoundUpMapSize(size);
-    if (alignment > kPageSize)
+    if (alignment > page_size_)
       map_size += alignment;
     if (map_size < size) return 0;  // Overflow.
     uptr map_beg = reinterpret_cast<uptr>(
         MmapOrDie(map_size, "LargeMmapAllocator"));
     uptr map_end = map_beg + map_size;
-    uptr res = map_beg + kPageSize;
+    uptr res = map_beg + page_size_;
     if (res & (alignment - 1))  // Align.
       res += alignment - (res & (alignment - 1));
     CHECK_EQ(0, res & (alignment - 1));
@@ -418,7 +618,7 @@ class LargeMmapAllocator {
 
   bool PointerIsMine(void *p) {
     // Fast check.
-    if ((reinterpret_cast<uptr>(p) % kPageSize) != 0) return false;
+    if ((reinterpret_cast<uptr>(p) & (page_size_ - 1))) return false;
     SpinMutexLock l(&mutex_);
     for (Header *l = list_; l; l = l->next) {
       if (GetUser(l) == p) return true;
@@ -427,10 +627,10 @@ class LargeMmapAllocator {
   }
 
   uptr GetActuallyAllocatedSize(void *p) {
-    return RoundUpMapSize(GetHeader(p)->size) - kPageSize;
+    return RoundUpMapSize(GetHeader(p)->size) - page_size_;
   }
 
-  // At least kPageSize/2 metadata bytes is available.
+  // At least page_size_/2 metadata bytes is available.
   void *GetMetaData(void *p) {
     return GetHeader(p) + 1;
   }
@@ -454,17 +654,22 @@ class LargeMmapAllocator {
     Header *prev;
   };
 
-  Header *GetHeader(uptr p) { return reinterpret_cast<Header*>(p - kPageSize); }
+  Header *GetHeader(uptr p) {
+    CHECK_EQ(p % page_size_, 0);
+    return reinterpret_cast<Header*>(p - page_size_);
+  }
   Header *GetHeader(void *p) { return GetHeader(reinterpret_cast<uptr>(p)); }
 
   void *GetUser(Header *h) {
-    return reinterpret_cast<void*>(reinterpret_cast<uptr>(h) + kPageSize);
+    CHECK_EQ((uptr)h % page_size_, 0);
+    return reinterpret_cast<void*>(reinterpret_cast<uptr>(h) + page_size_);
   }
 
   uptr RoundUpMapSize(uptr size) {
-    return RoundUpTo(size, kPageSize) + kPageSize;
+    return RoundUpTo(size, page_size_) + page_size_;
   }
 
+  uptr page_size_;
   Header *list_;
   SpinMutex mutex_;
 };
@@ -573,3 +778,4 @@ class CombinedAllocator {
 }  // namespace __sanitizer
 
 #endif  // SANITIZER_ALLOCATOR_H
+

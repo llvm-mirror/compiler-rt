@@ -23,25 +23,16 @@ namespace __sanitizer {
 // Constants.
 const uptr kWordSize = SANITIZER_WORDSIZE / 8;
 const uptr kWordSizeInBits = 8 * kWordSize;
+
 #if defined(__powerpc__) || defined(__powerpc64__)
-// Current PPC64 kernels use 64K pages sizes, but they can be
-// configured with 4K or even other sizes.
-// We may want to use getpagesize() or sysconf(_SC_PAGESIZE) here rather than
-// hardcoding the values, but today these values need to be compile-time
-// constants.
-const uptr kPageSize = 1UL << 16;
 const uptr kCacheLineSize = 128;
-const uptr kMmapGranularity = kPageSize;
-#elif !defined(_WIN32)
-const uptr kPageSize = 1UL << 12;
-const uptr kCacheLineSize = 64;
-const uptr kMmapGranularity = kPageSize;
 #else
-const uptr kPageSize = 1UL << 12;
 const uptr kCacheLineSize = 64;
-const uptr kMmapGranularity = 1UL << 16;
 #endif
 
+uptr GetPageSize();
+uptr GetPageSizeCached();
+uptr GetMmapGranularity();
 // Threads
 int GetPid();
 uptr GetTid();
@@ -54,15 +45,14 @@ void *MmapOrDie(uptr size, const char *mem_type);
 void UnmapOrDie(void *addr, uptr size);
 void *MmapFixedNoReserve(uptr fixed_addr, uptr size);
 void *Mprotect(uptr fixed_addr, uptr size);
+// Map aligned chunk of address space; size and alignment are powers of two.
+void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type);
 // Used to check if we can map shadow memory to a fixed location.
 bool MemoryRangeIsAvailable(uptr range_start, uptr range_end);
 
 // Internal allocator
 void *InternalAlloc(uptr size);
 void InternalFree(void *p);
-// Given the pointer p into a valid allocated block,
-// returns a pointer to the beginning of the block.
-void *InternalAllocBlock(void *p);
 
 // InternalScopedBuffer can be used instead of large stack arrays to
 // keep frame size low.
@@ -133,6 +123,7 @@ const char *GetPwd();
 void ReExec();
 bool StackSizeIsUnlimited();
 void SetStackSizeLimitInBytes(uptr limit);
+void PrepareForSandboxing();
 
 // Other
 void SleepForSeconds(int seconds);
@@ -146,6 +137,13 @@ void NORETURN Exit(int exitcode);
 void NORETURN Die();
 void NORETURN SANITIZER_INTERFACE_ATTRIBUTE
 CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2);
+
+// Set the name of the current thread to 'name', return true on succees.
+// The name may be truncated to a system-dependent limit.
+bool SanitizerSetThreadName(const char *name);
+// Get the name of the current thread (no more than max_len bytes),
+// return true on succees. name should have space for at least max_len+1 bytes.
+bool SanitizerGetThreadName(char *name, int max_len);
 
 // Specific tools may override behavior of "Die" and "CheckFailed" functions
 // to do tool-specific job.

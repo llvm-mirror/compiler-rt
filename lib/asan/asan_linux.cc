@@ -158,7 +158,9 @@ void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp) {
   stack->trace[0] = pc;
   if ((max_s) > 1) {
     stack->max_size = max_s;
-#if defined(__arm__) || defined(__powerpc__) || defined(__powerpc64__)
+#if defined(__arm__) || \
+    defined(__powerpc__) || defined(__powerpc64__) || \
+    defined(__sparc__)
     _Unwind_Backtrace(Unwind_Trace, stack);
     // Pop off the two ASAN functions from the backtrace.
     stack->PopStackFrames(2);
@@ -169,6 +171,24 @@ void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp) {
 #endif
   }
 }
+
+#if !ASAN_ANDROID
+void ClearShadowMemoryForContext(void *context) {
+  ucontext_t *ucp = (ucontext_t*)context;
+  uptr sp = (uptr)ucp->uc_stack.ss_sp;
+  uptr size = ucp->uc_stack.ss_size;
+  // Align to page size.
+  uptr PageSize = GetPageSizeCached();
+  uptr bottom = sp & ~(PageSize - 1);
+  size += sp - bottom;
+  size = RoundUpTo(size, PageSize);
+  PoisonShadow(bottom, size, 0);
+}
+#else
+void ClearShadowMemoryForContext(void *context) {
+  UNIMPLEMENTED();
+}
+#endif
 
 }  // namespace __asan
 

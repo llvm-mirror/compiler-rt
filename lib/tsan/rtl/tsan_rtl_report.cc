@@ -14,6 +14,7 @@
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
+#include "sanitizer_common/sanitizer_common.h"
 #include "tsan_platform.h"
 #include "tsan_rtl.h"
 #include "tsan_suppressions.h"
@@ -24,6 +25,8 @@
 #include "tsan_flags.h"
 
 namespace __tsan {
+
+using namespace __sanitizer;  // NOLINT
 
 void TsanCheckFailed(const char *file, int line, const char *cond,
                      u64 v1, u64 v2) {
@@ -125,8 +128,7 @@ ScopedReport::ScopedReport(ReportType typ) {
 
 ScopedReport::~ScopedReport() {
   ctx_->report_mtx.Unlock();
-  rep_->~ReportDesc();
-  internal_free(rep_);
+  DestroyAndFree(rep_);
 }
 
 void ScopedReport::AddStack(const StackTrace *stack) {
@@ -135,7 +137,7 @@ void ScopedReport::AddStack(const StackTrace *stack) {
 }
 
 void ScopedReport::AddMemoryAccess(uptr addr, Shadow s,
-                                   const StackTrace *stack) {
+    const StackTrace *stack, const MutexSet *mset) {
   void *mem = internal_alloc(MBlockReportMop, sizeof(ReportMop));
   ReportMop *mop = new(mem) ReportMop;
   rep_->mops.PushBack(mop);
@@ -143,8 +145,27 @@ void ScopedReport::AddMemoryAccess(uptr addr, Shadow s,
   mop->addr = addr + s.addr0();
   mop->size = s.size();
   mop->write = s.is_write();
-  mop->nmutex = 0;
   mop->stack = SymbolizeStack(*stack);
+  for (uptr i = 0; i < mset->Size(); i++) {
+    MutexSet::Desc d = mset->Get(i);
+    u64 uid = 0;
+    uptr addr = SyncVar::SplitId(d.id, &uid);
+    SyncVar *s = ctx_->synctab.GetIfExistsAndLock(addr, false);
+    // Check that the mutex is still alive.
+    // Another mutex can be created at the same address,
+    // so check uid as well.
+    if (s && s->CheckId(uid)) {
+      ReportMopMutex mtx = {s->uid, d.write};
+      mop->mset.PushBack(mtx);
+      AddMutex(s);
+    } else {
+      ReportMopMutex mtx = {d.id, d.write};
+      mop->mset.PushBack(mtx);
+      AddMutex(d.id);
+    }
+    if (s)
+      s->mtx.ReadUnlock();
+  }
 }
 
 void ScopedReport::AddThread(const ThreadContext *tctx) {
@@ -158,6 +179,7 @@ void ScopedReport::AddThread(const ThreadContext *tctx) {
   rt->id = tctx->tid;
   rt->pid = tctx->os_id;
   rt->running = (tctx->status == ThreadStatusRunning);
+  rt->name = tctx->name ? internal_strdup(tctx->name) : 0;
   rt->stack = SymbolizeStack(tctx->creation_stack);
 }
 
@@ -175,11 +197,29 @@ static ThreadContext *FindThread(int unique_id) {
 #endif
 
 void ScopedReport::AddMutex(const SyncVar *s) {
+  for (uptr i = 0; i < rep_->mutexes.Size(); i++) {
+    if (rep_->mutexes[i]->id == s->uid)
+      return;
+  }
   void *mem = internal_alloc(MBlockReportMutex, sizeof(ReportMutex));
   ReportMutex *rm = new(mem) ReportMutex();
   rep_->mutexes.PushBack(rm);
-  rm->id = 42;
+  rm->id = s->uid;
+  rm->destroyed = false;
   rm->stack = SymbolizeStack(s->creation_stack);
+}
+
+void ScopedReport::AddMutex(u64 id) {
+  for (uptr i = 0; i < rep_->mutexes.Size(); i++) {
+    if (rep_->mutexes[i]->id == id)
+      return;
+  }
+  void *mem = internal_alloc(MBlockReportMutex, sizeof(ReportMutex));
+  ReportMutex *rm = new(mem) ReportMutex();
+  rep_->mutexes.PushBack(rm);
+  rm->id = id;
+  rm->destroyed = true;
+  rm->stack = 0;
 }
 
 void ScopedReport::AddLocation(uptr addr, uptr size) {
@@ -220,9 +260,11 @@ void ScopedReport::AddLocation(uptr addr, uptr size) {
     loc->type = ReportLocationGlobal;
     loc->addr = addr;
     loc->size = size;
+    loc->module = symb->module ? internal_strdup(symb->module) : 0;
+    loc->offset = symb->offset;
     loc->tid = 0;
-    loc->name = symb->func;
-    loc->file = symb->file;
+    loc->name = symb->func ? internal_strdup(symb->func) : 0;
+    loc->file = symb->file ? internal_strdup(symb->file) : 0;
     loc->line = symb->line;
     loc->stack = 0;
     internal_free(symb);
@@ -246,7 +288,10 @@ const ReportDesc *ScopedReport::GetReport() const {
   return rep_;
 }
 
-void RestoreStack(int tid, const u64 epoch, StackTrace *stk) {
+void RestoreStack(int tid, const u64 epoch, StackTrace *stk, MutexSet *mset) {
+  // This function restores stack trace and mutex set for the thread/epoch.
+  // It does so by getting stack trace and mutex set at the beginning of
+  // trace part, and then replaying the trace till the given epoch.
   ThreadContext *tctx = CTX()->threads[tid];
   if (tctx == 0)
     return;
@@ -263,12 +308,13 @@ void RestoreStack(int tid, const u64 epoch, StackTrace *stk) {
     return;
   }
   Lock l(&trace->mtx);
-  const int partidx = (epoch / (kTraceSize / kTraceParts)) % kTraceParts;
+  const int partidx = (epoch / kTracePartSize) % TraceParts();
   TraceHeader* hdr = &trace->headers[partidx];
   if (epoch < hdr->epoch0)
     return;
-  const u64 eend = epoch % kTraceSize;
-  const u64 ebegin = eend / kTracePartSize * kTracePartSize;
+  const u64 epoch0 = RoundDown(epoch, TraceSize());
+  const u64 eend = epoch % TraceSize();
+  const u64 ebegin = RoundDown(eend, kTracePartSize);
   DPrintf("#%d: RestoreStack epoch=%zu ebegin=%zu eend=%zu partidx=%d\n",
           tid, (uptr)epoch, (uptr)ebegin, (uptr)eend, partidx);
   InternalScopedBuffer<uptr> stack(1024);  // FIXME: de-hardcode 1024
@@ -276,11 +322,14 @@ void RestoreStack(int tid, const u64 epoch, StackTrace *stk) {
     stack[i] = hdr->stack0.Get(i);
     DPrintf2("  #%02lu: pc=%zx\n", i, stack[i]);
   }
+  if (mset)
+    *mset = hdr->mset0;
   uptr pos = hdr->stack0.Size();
+  Event *events = (Event*)GetThreadTrace(tid);
   for (uptr i = ebegin; i <= eend; i++) {
-    Event ev = trace->events[i];
+    Event ev = events[i];
     EventType typ = (EventType)(ev >> 61);
-    uptr pc = (uptr)(ev & 0xffffffffffffull);
+    uptr pc = (uptr)(ev & ((1ull << 61) - 1));
     DPrintf2("  %zu typ=%d pc=%zx\n", i, typ, pc);
     if (typ == EventTypeMop) {
       stack[pos] = pc;
@@ -289,6 +338,17 @@ void RestoreStack(int tid, const u64 epoch, StackTrace *stk) {
     } else if (typ == EventTypeFuncExit) {
       if (pos > 0)
         pos--;
+    }
+    if (mset) {
+      if (typ == EventTypeLock) {
+        mset->Add(pc, true, epoch0 + i);
+      } else if (typ == EventTypeUnlock) {
+        mset->Del(pc, true);
+      } else if (typ == EventTypeRLock) {
+        mset->Add(pc, false, epoch0 + i);
+      } else if (typ == EventTypeRUnlock) {
+        mset->Del(pc, false);
+      }
     }
     for (uptr j = 0; j <= pos; j++)
       DPrintf2("      #%zu: %zx\n", j, stack[j]);
@@ -384,6 +444,42 @@ bool IsFiredSuppression(Context *ctx,
   return false;
 }
 
+// On programs that use Java we see weird reports like:
+// WARNING: ThreadSanitizer: data race (pid=22512)
+//   Read of size 8 at 0x7d2b00084318 by thread 100:
+//     #0 memcpy tsan_interceptors.cc:406 (foo+0x00000d8dfae3)
+//     #1 <null> <null>:0 (0x7f7ad9b40193)
+//   Previous write of size 8 at 0x7d2b00084318 by thread 105:
+//     #0 strncpy tsan_interceptors.cc:501 (foo+0x00000d8e0919)
+//     #1 <null> <null>:0 (0x7f7ad9b42707)
+static bool IsJavaNonsense(const ReportDesc *rep) {
+  for (uptr i = 0; i < rep->mops.Size(); i++) {
+    ReportMop *mop = rep->mops[i];
+    ReportStack *frame = mop->stack;
+    if (frame != 0 && frame->func != 0
+        && (internal_strcmp(frame->func, "memset") == 0
+        || internal_strcmp(frame->func, "memcpy") == 0
+        || internal_strcmp(frame->func, "memmove") == 0
+        || internal_strcmp(frame->func, "strcmp") == 0
+        || internal_strcmp(frame->func, "strncpy") == 0
+        || internal_strcmp(frame->func, "strlen") == 0
+        || internal_strcmp(frame->func, "free") == 0
+        || internal_strcmp(frame->func, "pthread_mutex_lock") == 0)) {
+      frame = frame->next;
+      if (frame == 0
+          || (frame->func == 0 && frame->file == 0 && frame->line == 0
+            && frame->module == 0)) {
+        if (frame) {
+          FiredSuppression supp = {rep->typ, frame->pc};
+          CTX()->fired_suppressions.PushBack(supp);
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void ReportRace(ThreadState *thr) {
   if (!flags()->report_bugs)
     return;
@@ -416,21 +512,26 @@ void ReportRace(ThreadState *thr) {
   ScopedReport rep(freed ? ReportTypeUseAfterFree : ReportTypeRace);
   const uptr kMop = 2;
   StackTrace traces[kMop];
-  const uptr toppc = thr->trace.events[thr->fast_state.epoch() % kTraceSize]
-      & ((1ull << 61) - 1);
+  const uptr toppc = TraceTopPC(thr);
   traces[0].ObtainCurrent(thr, toppc);
   if (IsFiredSuppression(ctx, rep, traces[0]))
     return;
+  InternalScopedBuffer<MutexSet> mset2(1);
+  new(mset2.data()) MutexSet();
   Shadow s2(thr->racy_state[1]);
-  RestoreStack(s2.tid(), s2.epoch(), &traces[1]);
+  RestoreStack(s2.tid(), s2.epoch(), &traces[1], mset2.data());
 
   if (HandleRacyStacks(thr, traces, addr_min, addr_max))
     return;
 
   for (uptr i = 0; i < kMop; i++) {
     Shadow s(thr->racy_state[i]);
-    rep.AddMemoryAccess(addr, s, &traces[i]);
+    rep.AddMemoryAccess(addr, s, &traces[i],
+                        i == 0 ? &thr->mset : mset2.data());
   }
+
+  if (flags()->suppress_java && IsJavaNonsense(rep.GetReport()))
+    return;
 
   for (uptr i = 0; i < kMop; i++) {
     FastState s(thr->racy_state[i]);

@@ -20,6 +20,10 @@
 #include <setjmp.h>
 #include <assert.h>
 
+#ifdef __linux__
+# include <sys/prctl.h>
+#endif
+
 #if defined(__i386__) || defined(__x86_64__)
 #include <emmintrin.h>
 #endif
@@ -129,6 +133,8 @@ NOINLINE void uaf_test(int size, int off) {
 TEST(AddressSanitizer, HasFeatureAddressSanitizerTest) {
 #if defined(__has_feature) && __has_feature(address_sanitizer)
   bool asan = 1;
+#elif defined(__SANITIZE_ADDRESS__)
+  bool asan = 1;
 #else
   bool asan = 0;
 #endif
@@ -208,8 +214,8 @@ void *TSDWorker(void *test_key) {
 void TSDDestructor(void *tsd) {
   // Spawning a thread will check that the current thread id is not -1.
   pthread_t th;
-  pthread_create(&th, NULL, TSDWorker, NULL);
-  pthread_join(th, NULL);
+  PTHREAD_CREATE(&th, NULL, TSDWorker, NULL);
+  PTHREAD_JOIN(th, NULL);
 }
 
 // This tests triggers the thread-specific data destruction fiasco which occurs
@@ -223,8 +229,8 @@ TEST(AddressSanitizer, DISABLED_TSDTest) {
   pthread_t th;
   pthread_key_t test_key;
   pthread_key_create(&test_key, TSDDestructor);
-  pthread_create(&th, NULL, TSDWorker, &test_key);
-  pthread_join(th, NULL);
+  PTHREAD_CREATE(&th, NULL, TSDWorker, &test_key);
+  PTHREAD_JOIN(th, NULL);
   pthread_key_delete(test_key);
 }
 
@@ -461,11 +467,11 @@ TEST(AddressSanitizer, ThreadedMallocStressTest) {
   const int kNumIterations = (ASAN_LOW_MEMORY) ? 10000 : 100000;
   pthread_t t[kNumThreads];
   for (int i = 0; i < kNumThreads; i++) {
-    pthread_create(&t[i], 0, (void* (*)(void *x))MallocStress,
+    PTHREAD_CREATE(&t[i], 0, (void* (*)(void *x))MallocStress,
         (void*)kNumIterations);
   }
   for (int i = 0; i < kNumThreads; i++) {
-    pthread_join(t[i], 0);
+    PTHREAD_JOIN(t[i], 0);
   }
 }
 
@@ -479,13 +485,14 @@ void *ManyThreadsWorker(void *a) {
 }
 
 TEST(AddressSanitizer, ManyThreadsTest) {
-  const size_t kNumThreads = SANITIZER_WORDSIZE == 32 ? 30 : 1000;
+  const size_t kNumThreads =
+      (SANITIZER_WORDSIZE == 32 || ASAN_AVOID_EXPENSIVE_TESTS) ? 30 : 1000;
   pthread_t t[kNumThreads];
   for (size_t i = 0; i < kNumThreads; i++) {
-    pthread_create(&t[i], 0, (void* (*)(void *x))ManyThreadsWorker, (void*)i);
+    PTHREAD_CREATE(&t[i], 0, ManyThreadsWorker, (void*)i);
   }
   for (size_t i = 0; i < kNumThreads; i++) {
-    pthread_join(t[i], 0);
+    PTHREAD_JOIN(t[i], 0);
   }
 }
 
@@ -637,6 +644,17 @@ NOINLINE void LongJmpFunc1(jmp_buf buf) {
   longjmp(buf, 1);
 }
 
+NOINLINE void BuiltinLongJmpFunc1(jmp_buf buf) {
+  // create three red zones for these two stack objects.
+  int a;
+  int b;
+
+  int *A = Ident(&a);
+  int *B = Ident(&b);
+  *A = *B;
+  __builtin_longjmp((void**)buf, 1);
+}
+
 NOINLINE void UnderscopeLongJmpFunc1(jmp_buf buf) {
   // create three red zones for these two stack objects.
   int a;
@@ -676,6 +694,17 @@ TEST(AddressSanitizer, LongJmpTest) {
     TouchStackFunc();
   }
 }
+
+#if not defined(__ANDROID__)
+TEST(AddressSanitizer, BuiltinLongJmpTest) {
+  static jmp_buf buf;
+  if (!__builtin_setjmp((void**)buf)) {
+    BuiltinLongJmpFunc1(buf);
+  } else {
+    TouchStackFunc();
+  }
+}
+#endif  // not defined(__ANDROID__)
 
 TEST(AddressSanitizer, UnderscopeLongJmpTest) {
   static jmp_buf buf;
@@ -737,10 +766,10 @@ void *ThreadStackReuseFunc2(void *unused) {
 
 TEST(AddressSanitizer, ThreadStackReuseTest) {
   pthread_t t;
-  pthread_create(&t, 0, ThreadStackReuseFunc1, 0);
-  pthread_join(t, 0);
-  pthread_create(&t, 0, ThreadStackReuseFunc2, 0);
-  pthread_join(t, 0);
+  PTHREAD_CREATE(&t, 0, ThreadStackReuseFunc1, 0);
+  PTHREAD_JOIN(t, 0);
+  PTHREAD_CREATE(&t, 0, ThreadStackReuseFunc2, 0);
+  PTHREAD_JOIN(t, 0);
 }
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -952,6 +981,7 @@ TEST(AddressSanitizer, StrLenOOBTest) {
   size_t length = Ident(10);
   char *heap_string = Ident((char*)malloc(length + 1));
   char stack_string[10 + 1];
+  break_optimization(&stack_string);
   for (size_t i = 0; i < length; i++) {
     heap_string[i] = 'a';
     stack_string[i] = 'b';
@@ -1580,7 +1610,7 @@ NOINLINE static int LargeFunction(bool do_bad_access) {
 TEST(AddressSanitizer, DISABLED_LargeFunctionSymbolizeTest) {
   int failing_line = LargeFunction(false);
   char expected_warning[128];
-  sprintf(expected_warning, "LargeFunction.*asan_test.cc:%d", failing_line);
+  sprintf(expected_warning, "LargeFunction.*asan_test.*:%d", failing_line);
   EXPECT_DEATH(LargeFunction(true), expected_warning);
 }
 
@@ -1593,19 +1623,28 @@ TEST(AddressSanitizer, DISABLED_MallocFreeUnwindAndSymbolizeTest) {
                "malloc_fff.*malloc_eee.*malloc_ddd");
 }
 
+static void TryToSetThreadName(const char *name) {
+#ifdef __linux__
+  prctl(PR_SET_NAME, (unsigned long)name, 0, 0, 0);
+#endif
+}
+
 void *ThreadedTestAlloc(void *a) {
+  TryToSetThreadName("AllocThr");
   int **p = (int**)a;
   *p = new int;
   return 0;
 }
 
 void *ThreadedTestFree(void *a) {
+  TryToSetThreadName("FreeThr");
   int **p = (int**)a;
   delete *p;
   return 0;
 }
 
 void *ThreadedTestUse(void *a) {
+  TryToSetThreadName("UseThr");
   int **p = (int**)a;
   **p = 1;
   return 0;
@@ -1614,12 +1653,12 @@ void *ThreadedTestUse(void *a) {
 void ThreadedTestSpawn() {
   pthread_t t;
   int *x;
-  pthread_create(&t, 0, ThreadedTestAlloc, &x);
-  pthread_join(t, 0);
-  pthread_create(&t, 0, ThreadedTestFree, &x);
-  pthread_join(t, 0);
-  pthread_create(&t, 0, ThreadedTestUse, &x);
-  pthread_join(t, 0);
+  PTHREAD_CREATE(&t, 0, ThreadedTestAlloc, &x);
+  PTHREAD_JOIN(t, 0);
+  PTHREAD_CREATE(&t, 0, ThreadedTestFree, &x);
+  PTHREAD_JOIN(t, 0);
+  PTHREAD_CREATE(&t, 0, ThreadedTestUse, &x);
+  PTHREAD_JOIN(t, 0);
 }
 
 TEST(AddressSanitizer, ThreadedTest) {
@@ -1629,6 +1668,21 @@ TEST(AddressSanitizer, ThreadedTest) {
                ".*Thread T.*created"
                ".*Thread T.*created");
 }
+
+#ifdef __linux__
+TEST(AddressSanitizer, ThreadNamesTest) {
+  // ThreadedTestSpawn();
+  EXPECT_DEATH(ThreadedTestSpawn(),
+               ASAN_PCRE_DOTALL
+               "WRITE .*thread T3 .UseThr."
+               ".*freed by thread T2 .FreeThr. here:"
+               ".*previously allocated by thread T1 .AllocThr. here:"
+               ".*Thread T3 .UseThr. created by T0 here:"
+               ".*Thread T2 .FreeThr. created by T0 here:"
+               ".*Thread T1 .AllocThr. created by T0 here:"
+               "");
+}
+#endif
 
 #if ASAN_NEEDS_SEGV
 TEST(AddressSanitizer, ShadowGapTest) {
@@ -1724,7 +1778,7 @@ TEST(AddressSanitizer, FileNameInGlobalReportTest) {
   static char zoo[10];
   const char *p = Ident(zoo);
   // The file name should be present in the report.
-  EXPECT_DEATH(Ident(p[15]), "zoo.*asan_test.cc");
+  EXPECT_DEATH(Ident(p[15]), "zoo.*asan_test.");
 }
 
 int *ReturnsPointerToALocalObject() {
@@ -1777,10 +1831,10 @@ TEST(AddressSanitizer, ThreadedStressStackReuseTest) {
   const int kNumThreads = 20;
   pthread_t t[kNumThreads];
   for (int i = 0; i < kNumThreads; i++) {
-    pthread_create(&t[i], 0, (void* (*)(void *x))LotsOfStackReuse, 0);
+    PTHREAD_CREATE(&t[i], 0, (void* (*)(void *x))LotsOfStackReuse, 0);
   }
   for (int i = 0; i < kNumThreads; i++) {
-    pthread_join(t[i], 0);
+    PTHREAD_JOIN(t[i], 0);
   }
 }
 
@@ -1792,8 +1846,8 @@ static void *PthreadExit(void *a) {
 TEST(AddressSanitizer, PthreadExitTest) {
   pthread_t t;
   for (int i = 0; i < 1000; i++) {
-    pthread_create(&t, 0, PthreadExit, 0);
-    pthread_join(t, 0);
+    PTHREAD_CREATE(&t, 0, PthreadExit, 0);
+    PTHREAD_JOIN(t, 0);
   }
 }
 
@@ -1862,8 +1916,8 @@ TEST(AddressSanitizer, DISABLED_DemoStackTest) {
 
 TEST(AddressSanitizer, DISABLED_DemoThreadStackTest) {
   pthread_t t;
-  pthread_create(&t, 0, SimpleBugOnSTack, 0);
-  pthread_join(t, 0);
+  PTHREAD_CREATE(&t, 0, SimpleBugOnSTack, 0);
+  PTHREAD_JOIN(t, 0);
 }
 
 TEST(AddressSanitizer, DISABLED_DemoUAFLowIn) {
@@ -1953,8 +2007,8 @@ TEST(AddressSanitizerMac, CFAllocatorDefaultDoubleFree) {
 
 void CFAllocator_DoubleFreeOnPthread() {
   pthread_t child;
-  pthread_create(&child, NULL, CFAllocatorDefaultDoubleFree, NULL);
-  pthread_join(child, NULL);  // Shouldn't be reached.
+  PTHREAD_CREATE(&child, NULL, CFAllocatorDefaultDoubleFree, NULL);
+  PTHREAD_JOIN(child, NULL);  // Shouldn't be reached.
 }
 
 TEST(AddressSanitizerMac, CFAllocatorDefaultDoubleFree_ChildPhread) {
@@ -1979,10 +2033,10 @@ void *CFAllocatorDeallocateFromGlob(void *unused) {
 
 void CFAllocator_PassMemoryToAnotherThread() {
   pthread_t th1, th2;
-  pthread_create(&th1, NULL, CFAllocatorAllocateToGlob, NULL);
-  pthread_join(th1, NULL);
-  pthread_create(&th2, NULL, CFAllocatorDeallocateFromGlob, NULL);
-  pthread_join(th2, NULL);
+  PTHREAD_CREATE(&th1, NULL, CFAllocatorAllocateToGlob, NULL);
+  PTHREAD_JOIN(th1, NULL);
+  PTHREAD_CREATE(&th2, NULL, CFAllocatorDeallocateFromGlob, NULL);
+  PTHREAD_JOIN(th2, NULL);
 }
 
 TEST(AddressSanitizerMac, CFAllocator_PassMemoryToAnotherThread) {
@@ -2098,13 +2152,13 @@ TEST(AddressSanitizerMac, MallocIntrospectionLock) {
   for (iter = 0; iter < kNumIterations; iter++) {
     pthread_t workers[kNumWorkers], forker;
     for (i = 0; i < kNumWorkers; i++) {
-      pthread_create(&workers[i], 0, MallocIntrospectionLockWorker, 0);
+      PTHREAD_CREATE(&workers[i], 0, MallocIntrospectionLockWorker, 0);
     }
-    pthread_create(&forker, 0, MallocIntrospectionLockForker, 0);
+    PTHREAD_CREATE(&forker, 0, MallocIntrospectionLockForker, 0);
     for (i = 0; i < kNumWorkers; i++) {
-      pthread_join(workers[i], 0);
+      PTHREAD_JOIN(workers[i], 0);
     }
-    pthread_join(forker, 0);
+    PTHREAD_JOIN(forker, 0);
   }
 }
 
@@ -2120,8 +2174,8 @@ TEST(AddressSanitizerMac, DISABLED_TSDWorkqueueTest) {
   pthread_t th;
   pthread_key_t test_key;
   pthread_key_create(&test_key, CallFreeOnWorkqueue);
-  pthread_create(&th, NULL, TSDAllocWorker, &test_key);
-  pthread_join(th, NULL);
+  PTHREAD_CREATE(&th, NULL, TSDAllocWorker, &test_key);
+  PTHREAD_JOIN(th, NULL);
   pthread_key_delete(test_key);
 }
 

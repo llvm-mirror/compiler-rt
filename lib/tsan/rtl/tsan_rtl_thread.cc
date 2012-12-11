@@ -98,6 +98,7 @@ int ThreadCreate(ThreadState *thr, uptr pc, uptr uid, bool detached) {
   ThreadContext *tctx = 0;
   if (ctx->dead_list_size > kThreadQuarantineSize
       || ctx->thread_seq >= kMaxTid) {
+    // Reusing old thread descriptor and tid.
     if (ctx->dead_list_size == 0) {
       Printf("ThreadSanitizer: %d thread limit exceeded. Dying.\n",
                  kMaxTid);
@@ -117,12 +118,18 @@ int ThreadCreate(ThreadState *thr, uptr pc, uptr uid, bool detached) {
     tctx->sync.Reset();
     tid = tctx->tid;
     DestroyAndFree(tctx->dead_info);
+    if (tctx->name) {
+      internal_free(tctx->name);
+      tctx->name = 0;
+    }
   } else {
+    // Allocating new thread descriptor and tid.
     StatInc(thr, StatThreadMaxTid);
     tid = ctx->thread_seq++;
     void *mem = internal_alloc(MBlockThreadContex, sizeof(ThreadContext));
     tctx = new(mem) ThreadContext(tid);
     ctx->threads[tid] = tctx;
+    MapThreadTrace(GetThreadTrace(tid), TraceSize() * sizeof(Event));
   }
   CHECK_NE(tctx, 0);
   CHECK_GE(tid, 0);
@@ -143,12 +150,11 @@ int ThreadCreate(ThreadState *thr, uptr pc, uptr uid, bool detached) {
   if (tid) {
     thr->fast_state.IncrementEpoch();
     // Can't increment epoch w/o writing to the trace as well.
-    TraceAddEvent(thr, thr->fast_state.epoch(), EventTypeMop, 0);
+    TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);
     thr->clock.set(thr->tid, thr->fast_state.epoch());
     thr->fast_synch_epoch = thr->fast_state.epoch();
     thr->clock.release(&tctx->sync);
     StatInc(thr, StatSyncRelease);
-
     tctx->creation_stack.ObtainCurrent(thr, pc);
   }
   return tid;
@@ -187,7 +193,9 @@ void ThreadStart(ThreadState *thr, int tid, uptr os_id) {
   CHECK_EQ(tctx->status, ThreadStatusCreated);
   tctx->status = ThreadStatusRunning;
   tctx->os_id = os_id;
-  tctx->epoch0 = tctx->epoch1 + 1;
+  // RoundUp so that one trace part does not contain events
+  // from different threads.
+  tctx->epoch0 = RoundUp(tctx->epoch1 + 1, kTracePartSize);
   tctx->epoch1 = (u64)-1;
   new(thr) ThreadState(CTX(), tid, tctx->unique_id,
       tctx->epoch0, stk_addr, stk_size,
@@ -204,6 +212,9 @@ void ThreadStart(ThreadState *thr, int tid, uptr os_id) {
   thr->fast_synch_epoch = tctx->epoch0;
   thr->clock.set(tid, tctx->epoch0);
   thr->clock.acquire(&tctx->sync);
+  thr->fast_state.SetHistorySize(flags()->history_size);
+  const uptr trace = (tctx->epoch0 / kTracePartSize) % TraceParts();
+  thr->trace.headers[trace].epoch0 = tctx->epoch0;
   StatInc(thr, StatSyncAcquire);
   DPrintf("#%d: ThreadStart epoch=%zu stk_addr=%zx stk_size=%zx "
           "tls_addr=%zx tls_size=%zx\n",
@@ -238,7 +249,7 @@ void ThreadFinish(ThreadState *thr) {
   } else {
     thr->fast_state.IncrementEpoch();
     // Can't increment epoch w/o writing to the trace as well.
-    TraceAddEvent(thr, thr->fast_state.epoch(), EventTypeMop, 0);
+    TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);
     thr->clock.set(thr->tid, thr->fast_state.epoch());
     thr->fast_synch_epoch = thr->fast_state.epoch();
     thr->clock.release(&tctx->sync);
@@ -249,9 +260,8 @@ void ThreadFinish(ThreadState *thr) {
   // Save from info about the thread.
   tctx->dead_info = new(internal_alloc(MBlockDeadInfo, sizeof(ThreadDeadInfo)))
       ThreadDeadInfo();
-  internal_memcpy(&tctx->dead_info->trace.events[0],
-      &thr->trace.events[0], sizeof(thr->trace.events));
-  for (int i = 0; i < kTraceParts; i++) {
+  for (uptr i = 0; i < TraceParts(); i++) {
+    tctx->dead_info->trace.headers[i].epoch0 = thr->trace.headers[i].epoch0;
     tctx->dead_info->trace.headers[i].stack0.CopyFrom(
         thr->trace.headers[i].stack0);
   }
@@ -295,6 +305,7 @@ void ThreadJoin(ThreadState *thr, uptr pc, int tid) {
     Printf("ThreadSanitizer: join of non-existent thread\n");
     return;
   }
+  // FIXME(dvyukov): print message and continue (it's user error).
   CHECK_EQ(tctx->detached, false);
   CHECK_EQ(tctx->status, ThreadStatusFinished);
   thr->clock.acquire(&tctx->sync);
@@ -318,6 +329,20 @@ void ThreadDetach(ThreadState *thr, uptr pc, int tid) {
   } else {
     tctx->detached = true;
   }
+}
+
+void ThreadSetName(ThreadState *thr, const char *name) {
+  Context *ctx = CTX();
+  Lock l(&ctx->thread_mtx);
+  ThreadContext *tctx = ctx->threads[thr->tid];
+  CHECK_NE(tctx, 0);
+  CHECK_EQ(tctx->status, ThreadStatusRunning);
+  if (tctx->name) {
+    internal_free(tctx->name);
+    tctx->name = 0;
+  }
+  if (name)
+    tctx->name = internal_strdup(name);
 }
 
 void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr,
@@ -358,7 +383,7 @@ void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr,
 
   fast_state.IncrementEpoch();
   thr->fast_state = fast_state;
-  TraceAddEvent(thr, fast_state.epoch(), EventTypeMop, pc);
+  TraceAddEvent(thr, fast_state, EventTypeMop, pc);
 
   bool unaligned = (addr % kShadowCell) != 0;
 
