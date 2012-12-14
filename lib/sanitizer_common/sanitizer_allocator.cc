@@ -49,13 +49,6 @@ void InternalFree(void *addr) {
   LIBC_FREE(addr);
 }
 
-void *InternalAllocBlock(void *p) {
-  CHECK_NE(p, (void*)0);
-  u64 *pp = (u64*)((uptr)p & ~0x7);
-  for (; pp[0] != kBlockMagic; pp--) {}
-  return pp + 1;
-}
-
 // LowLevelAllocator
 static LowLevelAllocateCallback low_level_alloc_callback;
 
@@ -63,7 +56,7 @@ void *LowLevelAllocator::Allocate(uptr size) {
   // Align allocation size.
   size = RoundUpTo(size, 8);
   if (allocated_end_ - allocated_current_ < (sptr)size) {
-    uptr size_to_allocate = Max(size, kPageSize);
+    uptr size_to_allocate = Max(size, GetPageSizeCached());
     allocated_current_ =
         (char*)MmapOrDie(size_to_allocate, __FUNCTION__);
     allocated_end_ = allocated_current_ + size_to_allocate;

@@ -1,4 +1,4 @@
-// RUN: %clang -fcatch-undefined-behavior %s -o %t && %t 2>&1 | FileCheck %s
+// RUN: %clang -fsanitize=signed-integer-overflow %s -o %t && %t 2>&1 | FileCheck %s
 
 #include <stdint.h>
 
@@ -9,6 +9,6 @@ int main() {
   (void)(uint16_t(0xffff) * int16_t(0x7fff));
   (void)(uint16_t(0xffff) * uint16_t(0x8000));
 
-  // CHECK: mul-overflow.cpp:13:27: fatal error: signed integer overflow: 65535 * 32769 cannot be represented in type 'int'
+  // CHECK: mul-overflow.cpp:13:27: runtime error: signed integer overflow: 65535 * 32769 cannot be represented in type 'int'
   (void)(uint16_t(0xffff) * uint16_t(0x8001));
 }

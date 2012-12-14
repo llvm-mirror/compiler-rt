@@ -21,17 +21,18 @@
 namespace __sanitizer {
 
 // Constants.
-const uptr kWordSize = __WORDSIZE / 8;
+const uptr kWordSize = SANITIZER_WORDSIZE / 8;
 const uptr kWordSizeInBits = 8 * kWordSize;
-const uptr kPageSizeBits = 12;
-const uptr kPageSize = 1UL << kPageSizeBits;
-const uptr kCacheLineSize = 64;
-#ifndef _WIN32
-const uptr kMmapGranularity = kPageSize;
+
+#if defined(__powerpc__) || defined(__powerpc64__)
+const uptr kCacheLineSize = 128;
 #else
-const uptr kMmapGranularity = 1UL << 16;
+const uptr kCacheLineSize = 64;
 #endif
 
+uptr GetPageSize();
+uptr GetPageSizeCached();
+uptr GetMmapGranularity();
 // Threads
 int GetPid();
 uptr GetTid();
@@ -44,15 +45,14 @@ void *MmapOrDie(uptr size, const char *mem_type);
 void UnmapOrDie(void *addr, uptr size);
 void *MmapFixedNoReserve(uptr fixed_addr, uptr size);
 void *Mprotect(uptr fixed_addr, uptr size);
+// Map aligned chunk of address space; size and alignment are powers of two.
+void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type);
 // Used to check if we can map shadow memory to a fixed location.
 bool MemoryRangeIsAvailable(uptr range_start, uptr range_end);
 
 // Internal allocator
 void *InternalAlloc(uptr size);
 void InternalFree(void *p);
-// Given the pointer p into a valid allocated block,
-// returns a pointer to the beginning of the block.
-void *InternalAllocBlock(void *p);
 
 // InternalScopedBuffer can be used instead of large stack arrays to
 // keep frame size low.
@@ -98,6 +98,7 @@ void SetLowLevelAllocateCallback(LowLevelAllocateCallback callback);
 
 // IO
 void RawWrite(const char *buffer);
+bool PrintsToTty();
 void Printf(const char *format, ...);
 void Report(const char *format, ...);
 void SetPrintfAndReportCallback(void (*callback)(const char *));
@@ -116,11 +117,13 @@ void *MapFileToMemory(const char *file_name, uptr *buff_size);
 // OS
 void DisableCoreDumper();
 void DumpProcessMap();
+bool FileExists(const char *filename);
 const char *GetEnv(const char *name);
 const char *GetPwd();
 void ReExec();
 bool StackSizeIsUnlimited();
 void SetStackSizeLimitInBytes(uptr limit);
+void PrepareForSandboxing();
 
 // Other
 void SleepForSeconds(int seconds);
@@ -134,6 +137,13 @@ void NORETURN Exit(int exitcode);
 void NORETURN Die();
 void NORETURN SANITIZER_INTERFACE_ATTRIBUTE
 CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2);
+
+// Set the name of the current thread to 'name', return true on succees.
+// The name may be truncated to a system-dependent limit.
+bool SanitizerSetThreadName(const char *name);
+// Get the name of the current thread (no more than max_len bytes),
+// return true on succees. name should have space for at least max_len+1 bytes.
+bool SanitizerGetThreadName(char *name, int max_len);
 
 // Specific tools may override behavior of "Die" and "CheckFailed" functions
 // to do tool-specific job.
@@ -172,7 +182,7 @@ INLINE int ToLower(int c) {
   return (c >= 'A' && c <= 'Z') ? (c + 'a' - 'A') : c;
 }
 
-#if __WORDSIZE == 64
+#if SANITIZER_WORDSIZE == 64
 # define FIRST_32_SECOND_64(a, b) (b)
 #else
 # define FIRST_32_SECOND_64(a, b) (a)

@@ -16,7 +16,16 @@
 
 namespace __sanitizer {
 
-static fd_t report_fd = 2;  // By default, dump to stderr.
+uptr GetPageSizeCached() {
+  static uptr PageSize;
+  if (!PageSize)
+    PageSize = GetPageSize();
+  return PageSize;
+}
+
+// By default, dump to stderr. If report_fd is kInvalidFd, try to obtain file
+// descriptor by opening file in report_path.
+static fd_t report_fd = kStderrFd;
 static char report_path[4096];  // Set via __sanitizer_set_report_path.
 
 static void (*DieCallback)(void);
@@ -46,18 +55,27 @@ void NORETURN CheckFailed(const char *file, int line, const char *cond,
   Die();
 }
 
+static void MaybeOpenReportFile() {
+  if (report_fd != kInvalidFd)
+    return;
+  fd_t fd = internal_open(report_path, true);
+  if (fd == kInvalidFd) {
+    report_fd = kStderrFd;
+    Report("ERROR: Can't open file: %s\n", report_path);
+    Die();
+  }
+  report_fd = fd;
+}
+
+bool PrintsToTty() {
+  MaybeOpenReportFile();
+  return internal_isatty(report_fd);
+}
+
 void RawWrite(const char *buffer) {
   static const char *kRawWriteError = "RawWrite can't output requested buffer!";
   uptr length = (uptr)internal_strlen(buffer);
-  if (report_fd == kInvalidFd) {
-    fd_t fd = internal_open(report_path, true);
-    if (fd == kInvalidFd) {
-      report_fd = 2;
-      Report("ERROR: Can't open file: %s\n", report_path);
-      Die();
-    }
-    report_fd = fd;
-  }
+  MaybeOpenReportFile();
   if (length != internal_write(report_fd, buffer, length)) {
     internal_write(report_fd, kRawWriteError, internal_strlen(kRawWriteError));
     Die();
@@ -66,7 +84,8 @@ void RawWrite(const char *buffer) {
 
 uptr ReadFileToBuffer(const char *file_name, char **buff,
                       uptr *buff_size, uptr max_len) {
-  const uptr kMinFileLen = kPageSize;
+  uptr PageSize = GetPageSizeCached();
+  uptr kMinFileLen = PageSize;
   uptr read_len = 0;
   *buff = 0;
   *buff_size = 0;
@@ -80,8 +99,8 @@ uptr ReadFileToBuffer(const char *file_name, char **buff,
     // Read up to one page at a time.
     read_len = 0;
     bool reached_eof = false;
-    while (read_len + kPageSize <= size) {
-      uptr just_read = internal_read(fd, *buff + read_len, kPageSize);
+    while (read_len + PageSize <= size) {
+      uptr just_read = internal_read(fd, *buff + read_len, PageSize);
       if (just_read == 0) {
         reached_eof = true;
         break;
@@ -136,18 +155,56 @@ void SortArray(uptr *array, uptr size) {
   }
 }
 
+// We want to map a chunk of address space aligned to 'alignment'.
+// We do it by maping a bit more and then unmaping redundant pieces.
+// We probably can do it with fewer syscalls in some OS-dependent way.
+void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type) {
+// uptr PageSize = GetPageSizeCached();
+  CHECK(IsPowerOfTwo(size));
+  CHECK(IsPowerOfTwo(alignment));
+  uptr map_size = size + alignment;
+  uptr map_res = (uptr)MmapOrDie(map_size, mem_type);
+  uptr map_end = map_res + map_size;
+  uptr res = map_res;
+  if (res & (alignment - 1))  // Not aligned.
+    res = (map_res + alignment) & ~(alignment - 1);
+  uptr end = res + size;
+  if (res != map_res)
+    UnmapOrDie((void*)map_res, res - map_res);
+  if (end != map_end)
+    UnmapOrDie((void*)end, map_end - end);
+  return (void*)res;
+}
+
 }  // namespace __sanitizer
 
+using namespace __sanitizer;  // NOLINT
+
+extern "C" {
 void __sanitizer_set_report_path(const char *path) {
   if (!path) return;
   uptr len = internal_strlen(path);
-  if (len > sizeof(__sanitizer::report_path) - 100) {
+  if (len > sizeof(report_path) - 100) {
     Report("ERROR: Path is too long: %c%c%c%c%c%c%c%c...\n",
            path[0], path[1], path[2], path[3],
            path[4], path[5], path[6], path[7]);
     Die();
   }
-  internal_snprintf(__sanitizer::report_path,
-                    sizeof(__sanitizer::report_path), "%s.%d", path, GetPid());
-  __sanitizer::report_fd = kInvalidFd;
+  internal_snprintf(report_path, sizeof(report_path), "%s.%d", path, GetPid());
+  report_fd = kInvalidFd;
 }
+
+void __sanitizer_set_report_fd(int fd) {
+  if (report_fd != kStdoutFd &&
+      report_fd != kStderrFd &&
+      report_fd != kInvalidFd)
+    internal_close(report_fd);
+  report_fd = fd;
+}
+
+void NOINLINE __sanitizer_sandbox_on_notify(void *reserved) {
+  (void)reserved;
+  PrepareForSandboxing();
+}
+
+}  // extern "C"

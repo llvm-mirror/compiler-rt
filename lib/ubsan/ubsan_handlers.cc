@@ -19,18 +19,6 @@
 using namespace __sanitizer;
 using namespace __ubsan;
 
-NORETURN void __sanitizer::Die() {
-  __builtin_trap();
-}
-
-NORETURN void __sanitizer::CheckFailed(const char *File, int Line,
-                                       const char *Cond, u64 V1, u64 V2) {
-  Diag(SourceLocation(File, Line, 0),
-       "CHECK failed: %0 (with values %1 and %2)")
-    << Cond << V1 << V2;
-  Die();
-}
-
 namespace __ubsan {
   const char *TypeCheckKinds[] = {
     "load of", "store to", "reference binding to", "member access within",
@@ -52,33 +40,55 @@ void __ubsan::__ubsan_handle_type_mismatch(TypeMismatchData *Data,
     Diag(Data->Loc, "%0 address %1 with insufficient space "
                     "for an object of type %2")
       << TypeCheckKinds[Data->TypeCheckKind] << (void*)Pointer << Data->Type;
+}
+void __ubsan::__ubsan_handle_type_mismatch_abort(TypeMismatchData *Data,
+                                                  ValueHandle Pointer) {
+  __ubsan_handle_type_mismatch(Data, Pointer);
   Die();
 }
 
-/// \brief Common diagnostic emission for various forms of signed overflow.
-template<typename T> static void HandleSignedOverflow(OverflowData *Data,
+/// \brief Common diagnostic emission for various forms of integer overflow.
+template<typename T> static void HandleIntegerOverflow(OverflowData *Data,
                                                       ValueHandle LHS,
                                                       const char *Operator,
                                                       T RHS) {
-  Diag(Data->Loc, "signed integer overflow: "
-                  "%0 %1 %2 cannot be represented in type %3")
+  Diag(Data->Loc, "%0 integer overflow: "
+                  "%1 %2 %3 cannot be represented in type %4")
+    << (Data->Type.isSignedIntegerTy() ? "signed" : "unsigned")
     << Value(Data->Type, LHS) << Operator << RHS << Data->Type;
-  Die();
 }
 
 void __ubsan::__ubsan_handle_add_overflow(OverflowData *Data,
                                           ValueHandle LHS, ValueHandle RHS) {
-  HandleSignedOverflow(Data, LHS, "+", Value(Data->Type, RHS));
+  HandleIntegerOverflow(Data, LHS, "+", Value(Data->Type, RHS));
+}
+void __ubsan::__ubsan_handle_add_overflow_abort(OverflowData *Data,
+                                                 ValueHandle LHS,
+                                                 ValueHandle RHS) {
+  __ubsan_handle_add_overflow(Data, LHS, RHS);
+  Die();
 }
 
 void __ubsan::__ubsan_handle_sub_overflow(OverflowData *Data,
                                           ValueHandle LHS, ValueHandle RHS) {
-  HandleSignedOverflow(Data, LHS, "-", Value(Data->Type, RHS));
+  HandleIntegerOverflow(Data, LHS, "-", Value(Data->Type, RHS));
+}
+void __ubsan::__ubsan_handle_sub_overflow_abort(OverflowData *Data,
+                                                 ValueHandle LHS,
+                                                 ValueHandle RHS) {
+  __ubsan_handle_sub_overflow(Data, LHS, RHS);
+  Die();
 }
 
 void __ubsan::__ubsan_handle_mul_overflow(OverflowData *Data,
                                           ValueHandle LHS, ValueHandle RHS) {
-  HandleSignedOverflow(Data, LHS, "*", Value(Data->Type, RHS));
+  HandleIntegerOverflow(Data, LHS, "*", Value(Data->Type, RHS));
+}
+void __ubsan::__ubsan_handle_mul_overflow_abort(OverflowData *Data,
+                                                 ValueHandle LHS,
+                                                 ValueHandle RHS) {
+  __ubsan_handle_mul_overflow(Data, LHS, RHS);
+  Die();
 }
 
 void __ubsan::__ubsan_handle_negate_overflow(OverflowData *Data,
@@ -86,6 +96,10 @@ void __ubsan::__ubsan_handle_negate_overflow(OverflowData *Data,
   Diag(Data->Loc, "negation of %0 cannot be represented in type %1; "
                   "cast to an unsigned type to negate this value to itself")
     << Value(Data->Type, OldVal) << Data->Type;
+}
+void __ubsan::__ubsan_handle_negate_overflow_abort(OverflowData *Data,
+                                                    ValueHandle OldVal) {
+  __ubsan_handle_negate_overflow(Data, OldVal);
   Die();
 }
 
@@ -98,6 +112,11 @@ void __ubsan::__ubsan_handle_divrem_overflow(OverflowData *Data,
       << LHSVal << Data->Type;
   else
     Diag(Data->Loc, "division by zero");
+}
+void __ubsan::__ubsan_handle_divrem_overflow_abort(OverflowData *Data,
+                                                    ValueHandle LHS,
+                                                    ValueHandle RHS) {
+  __ubsan_handle_divrem_overflow(Data, LHS, RHS);
   Die();
 }
 
@@ -116,6 +135,12 @@ void __ubsan::__ubsan_handle_shift_out_of_bounds(ShiftOutOfBoundsData *Data,
   else
     Diag(Data->Loc, "left shift of %0 by %1 places cannot be represented "
                     "in type %2") << LHSVal << RHSVal << Data->LHSType;
+}
+void __ubsan::__ubsan_handle_shift_out_of_bounds_abort(
+                                                     ShiftOutOfBoundsData *Data,
+                                                     ValueHandle LHS,
+                                                     ValueHandle RHS) {
+  __ubsan_handle_shift_out_of_bounds(Data, LHS, RHS);
   Die();
 }
 
@@ -135,6 +160,10 @@ void __ubsan::__ubsan_handle_vla_bound_not_positive(VLABoundData *Data,
   Diag(Data->Loc, "variable length array bound evaluates to "
                   "non-positive value %0")
     << Value(Data->Type, Bound);
+}
+void __ubsan::__ubsan_handle_vla_bound_not_positive_abort(VLABoundData *Data,
+                                                           ValueHandle Bound) {
+  __ubsan_handle_vla_bound_not_positive(Data, Bound);
   Die();
 }
 
@@ -143,5 +172,10 @@ void __ubsan::__ubsan_handle_float_cast_overflow(FloatCastOverflowData *Data,
   Diag(SourceLocation(), "value %0 is outside the range of representable "
                          "values of type %2")
     << Value(Data->FromType, From) << Data->FromType << Data->ToType;
+}
+void __ubsan::__ubsan_handle_float_cast_overflow_abort(
+                                                    FloatCastOverflowData *Data,
+                                                    ValueHandle From) {
+  __ubsan_handle_float_cast_overflow(Data, From);
   Die();
 }

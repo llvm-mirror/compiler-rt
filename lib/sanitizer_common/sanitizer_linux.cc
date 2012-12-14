@@ -16,6 +16,7 @@
 #include "sanitizer_common.h"
 #include "sanitizer_internal_defs.h"
 #include "sanitizer_libc.h"
+#include "sanitizer_mutex.h"
 #include "sanitizer_placement_new.h"
 #include "sanitizer_procmaps.h"
 
@@ -30,13 +31,23 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/prctl.h>
+
+// Are we using 32-bit or 64-bit syscalls?
+// x32 (which defines __x86_64__) has SANITIZER_WORDSIZE == 32
+// but it still needs to use 64-bit syscalls.
+#if defined(__x86_64__) || SANITIZER_WORDSIZE == 64
+# define SANITIZER_LINUX_USES_64BIT_SYSCALLS 1
+#else
+# define SANITIZER_LINUX_USES_64BIT_SYSCALLS 0
+#endif
 
 namespace __sanitizer {
 
 // --------------- sanitizer_libc.h
 void *internal_mmap(void *addr, uptr length, int prot, int flags,
                     int fd, u64 offset) {
-#if __WORDSIZE == 64
+#if SANITIZER_LINUX_USES_64BIT_SYSCALLS
   return (void *)syscall(__NR_mmap, addr, length, prot, flags, fd, offset);
 #else
   return (void *)syscall(__NR_mmap2, addr, length, prot, flags, fd, offset);
@@ -69,7 +80,7 @@ uptr internal_write(fd_t fd, const void *buf, uptr count) {
 }
 
 uptr internal_filesize(fd_t fd) {
-#if __WORDSIZE == 64
+#if SANITIZER_LINUX_USES_64BIT_SYSCALLS
   struct stat st;
   if (syscall(__NR_fstat, fd, &st))
     return -1;
@@ -94,6 +105,20 @@ int internal_sched_yield() {
 }
 
 // ----------------- sanitizer_common.h
+bool FileExists(const char *filename) {
+#if SANITIZER_LINUX_USES_64BIT_SYSCALLS
+  struct stat st;
+  if (syscall(__NR_stat, filename, &st))
+    return false;
+#else
+  struct stat64 st;
+  if (syscall(__NR_stat64, filename, &st))
+    return false;
+#endif
+  // Sanity check: filename is a regular file.
+  return S_ISREG(st.st_mode);
+}
+
 uptr GetTid() {
   return syscall(__NR_gettid);
 }
@@ -193,22 +218,69 @@ void ReExec() {
   execv(argv[0], argv.data());
 }
 
+void PrepareForSandboxing() {
+  // Some kinds of sandboxes may forbid filesystem access, so we won't be able
+  // to read the file mappings from /proc/self/maps. Luckily, neither the
+  // process will be able to load additional libraries, so it's fine to use the
+  // cached mappings.
+  MemoryMappingLayout::CacheMemoryMappings();
+}
+
 // ----------------- sanitizer_procmaps.h
+// Linker initialized.
+ProcSelfMapsBuff MemoryMappingLayout::cached_proc_self_maps_;
+StaticSpinMutex MemoryMappingLayout::cache_lock_;  // Linker initialized.
+
 MemoryMappingLayout::MemoryMappingLayout() {
-  proc_self_maps_buff_len_ =
-      ReadFileToBuffer("/proc/self/maps", &proc_self_maps_buff_,
-                       &proc_self_maps_buff_mmaped_size_, 1 << 26);
-  CHECK_GT(proc_self_maps_buff_len_, 0);
-  // internal_write(2, proc_self_maps_buff_, proc_self_maps_buff_len_);
+  proc_self_maps_.len =
+      ReadFileToBuffer("/proc/self/maps", &proc_self_maps_.data,
+                       &proc_self_maps_.mmaped_size, 1 << 26);
+  if (proc_self_maps_.mmaped_size == 0) {
+    LoadFromCache();
+    CHECK_GT(proc_self_maps_.len, 0);
+  }
+  // internal_write(2, proc_self_maps_.data, proc_self_maps_.len);
   Reset();
+  // FIXME: in the future we may want to cache the mappings on demand only.
+  CacheMemoryMappings();
 }
 
 MemoryMappingLayout::~MemoryMappingLayout() {
-  UnmapOrDie(proc_self_maps_buff_, proc_self_maps_buff_mmaped_size_);
+  // Only unmap the buffer if it is different from the cached one. Otherwise
+  // it will be unmapped when the cache is refreshed.
+  if (proc_self_maps_.data != cached_proc_self_maps_.data) {
+    UnmapOrDie(proc_self_maps_.data, proc_self_maps_.mmaped_size);
+  }
 }
 
 void MemoryMappingLayout::Reset() {
-  current_ = proc_self_maps_buff_;
+  current_ = proc_self_maps_.data;
+}
+
+// static
+void MemoryMappingLayout::CacheMemoryMappings() {
+  SpinMutexLock l(&cache_lock_);
+  // Don't invalidate the cache if the mappings are unavailable.
+  ProcSelfMapsBuff old_proc_self_maps;
+  old_proc_self_maps = cached_proc_self_maps_;
+  cached_proc_self_maps_.len =
+      ReadFileToBuffer("/proc/self/maps", &cached_proc_self_maps_.data,
+                       &cached_proc_self_maps_.mmaped_size, 1 << 26);
+  if (cached_proc_self_maps_.mmaped_size == 0) {
+    cached_proc_self_maps_ = old_proc_self_maps;
+  } else {
+    if (old_proc_self_maps.mmaped_size) {
+      UnmapOrDie(old_proc_self_maps.data,
+                 old_proc_self_maps.mmaped_size);
+    }
+  }
+}
+
+void MemoryMappingLayout::LoadFromCache() {
+  SpinMutexLock l(&cache_lock_);
+  if (cached_proc_self_maps_.data) {
+    proc_self_maps_ = cached_proc_self_maps_;
+  }
 }
 
 // Parse a hex value in str and update str.
@@ -242,7 +314,7 @@ static bool IsDecimal(char c) {
 
 bool MemoryMappingLayout::Next(uptr *start, uptr *end, uptr *offset,
                                char filename[], uptr filename_size) {
-  char *last = proc_self_maps_buff_ + proc_self_maps_buff_len_;
+  char *last = proc_self_maps_.data + proc_self_maps_.len;
   if (current_ >= last) return false;
   uptr dummy;
   if (!start) start = &dummy;
@@ -291,6 +363,19 @@ bool MemoryMappingLayout::GetObjectNameAndOffset(uptr addr, uptr *offset,
                                                  char filename[],
                                                  uptr filename_size) {
   return IterateForObjectNameAndOffset(addr, offset, filename, filename_size);
+}
+
+bool SanitizerSetThreadName(const char *name) {
+  return 0 == prctl(PR_SET_NAME, (unsigned long)name, 0, 0, 0);  // NOLINT
+}
+
+bool SanitizerGetThreadName(char *name, int max_len) {
+  char buff[17];
+  if (prctl(PR_GET_NAME, (unsigned long)buff, 0, 0, 0))  // NOLINT
+    return false;
+  internal_strncpy(name, buff, max_len);
+  name[max_len] = 0;
+  return true;
 }
 
 }  // namespace __sanitizer

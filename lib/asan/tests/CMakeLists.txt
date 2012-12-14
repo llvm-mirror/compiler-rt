@@ -66,7 +66,7 @@ set(ASAN_BLACKLIST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/asan_test.ignore")
 set(ASAN_UNITTEST_INSTRUMENTED_CFLAGS
   ${ASAN_UNITTEST_COMMON_CFLAGS}
   ${ASAN_GTEST_INCLUDE_CFLAGS}
-  -faddress-sanitizer
+  -fsanitize=address
   -mllvm "-asan-blacklist=${ASAN_BLACKLIST_FILE}"
   -mllvm -asan-stack=1
   -mllvm -asan-globals=1
@@ -105,7 +105,6 @@ endfunction()
 
 set(ASAN_NOINST_TEST_SOURCES
   asan_noinst_test.cc
-  asan_break_optimization.cc
   asan_test_main.cc
 )
 
@@ -147,8 +146,7 @@ if("${CMAKE_HOST_SYSTEM}" STREQUAL "${CMAKE_SYSTEM}" AND UNIX AND NOT ANDROID)
   add_asan_compile_command(asan_benchmarks_test.cc "")
   add_custom_target(AsanBenchmarks)
   set_target_properties(AsanBenchmarks PROPERTIES FOLDER "Asan benchmarks")
-  add_asan_test(AsanBenchmarks AsanBenchmark asan_break_optimization.cc
-                                             asan_benchmarks_test.cc.asan.o)
+  add_asan_test(AsanBenchmarks AsanBenchmark asan_benchmarks_test.cc.asan.o)
 endif()
 
 # Main AddressSanitizer unit tests.

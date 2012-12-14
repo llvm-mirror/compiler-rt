@@ -83,45 +83,51 @@ static void ProtectRange(uptr beg, uptr end) {
   if (beg == end)
     return;
   if (beg != (uptr)Mprotect(beg, end - beg)) {
-    TsanPrintf("FATAL: ThreadSanitizer can not protect [%zx,%zx]\n", beg, end);
-    TsanPrintf("FATAL: Make sure you are not using unlimited stack\n");
+    Printf("FATAL: ThreadSanitizer can not protect [%zx,%zx]\n", beg, end);
+    Printf("FATAL: Make sure you are not using unlimited stack\n");
     Die();
   }
 }
 #endif
 
+#ifndef TSAN_GO
 void InitializeShadowMemory() {
   uptr shadow = (uptr)MmapFixedNoReserve(kLinuxShadowBeg,
     kLinuxShadowEnd - kLinuxShadowBeg);
   if (shadow != kLinuxShadowBeg) {
-    TsanPrintf("FATAL: ThreadSanitizer can not mmap the shadow memory\n");
-    TsanPrintf("FATAL: Make sure to compile with -fPIE and "
+    Printf("FATAL: ThreadSanitizer can not mmap the shadow memory\n");
+    Printf("FATAL: Make sure to compile with -fPIE and "
                "to link with -pie (%p, %p).\n", shadow, kLinuxShadowBeg);
     Die();
   }
-#ifndef TSAN_GO
   const uptr kClosedLowBeg  = 0x200000;
   const uptr kClosedLowEnd  = kLinuxShadowBeg - 1;
   const uptr kClosedMidBeg = kLinuxShadowEnd + 1;
-  const uptr kClosedMidEnd = kLinuxAppMemBeg - 1;
+  const uptr kClosedMidEnd = min(kLinuxAppMemBeg, kTraceMemBegin);
   ProtectRange(kClosedLowBeg, kClosedLowEnd);
   ProtectRange(kClosedMidBeg, kClosedMidEnd);
-#endif
-#ifndef TSAN_GO
   DPrintf("kClosedLow   %zx-%zx (%zuGB)\n",
       kClosedLowBeg, kClosedLowEnd, (kClosedLowEnd - kClosedLowBeg) >> 30);
-#endif
   DPrintf("kLinuxShadow %zx-%zx (%zuGB)\n",
       kLinuxShadowBeg, kLinuxShadowEnd,
       (kLinuxShadowEnd - kLinuxShadowBeg) >> 30);
-#ifndef TSAN_GO
   DPrintf("kClosedMid   %zx-%zx (%zuGB)\n",
       kClosedMidBeg, kClosedMidEnd, (kClosedMidEnd - kClosedMidBeg) >> 30);
-#endif
   DPrintf("kLinuxAppMem %zx-%zx (%zuGB)\n",
       kLinuxAppMemBeg, kLinuxAppMemEnd,
       (kLinuxAppMemEnd - kLinuxAppMemBeg) >> 30);
   DPrintf("stack        %zx\n", (uptr)&shadow);
+}
+#endif
+
+void MapThreadTrace(uptr addr, uptr size) {
+  DPrintf("Mapping trace at %p-%p(0x%zx)\n", addr, addr + size, size);
+  CHECK_GE(addr, kTraceMemBegin);
+  CHECK_LE(addr + size, kTraceMemBegin + kTraceMemSize);
+  if (addr != (uptr)MmapFixedNoReserve(addr, size)) {
+    Printf("FATAL: ThreadSanitizer can not mmap thread trace\n");
+    Die();
+  }
 }
 
 static uptr g_data_start;
@@ -135,10 +141,10 @@ static void CheckPIE() {
   if (proc_maps.Next(&start, &end,
                      /*offset*/0, /*filename*/0, /*filename_size*/0)) {
     if ((u64)start < kLinuxAppMemBeg) {
-      TsanPrintf("FATAL: ThreadSanitizer can not mmap the shadow memory ("
+      Printf("FATAL: ThreadSanitizer can not mmap the shadow memory ("
              "something is mapped at 0x%zx < 0x%zx)\n",
              start, kLinuxAppMemBeg);
-      TsanPrintf("FATAL: Make sure to compile with -fPIE"
+      Printf("FATAL: Make sure to compile with -fPIE"
              " and to link with -pie.\n");
       Die();
     }
@@ -196,34 +202,56 @@ static int InitTlsSize() {
 }
 #endif  // #ifndef TSAN_GO
 
+static rlim_t getlim(int res) {
+  rlimit rlim;
+  CHECK_EQ(0, getrlimit(res, &rlim));
+  return rlim.rlim_cur;
+}
+
+static void setlim(int res, rlim_t lim) {
+  // The following magic is to prevent clang from replacing it with memset.
+  volatile rlimit rlim;
+  rlim.rlim_cur = lim;
+  rlim.rlim_max = lim;
+  setrlimit(res, (rlimit*)&rlim);
+}
+
 const char *InitializePlatform() {
   void *p = 0;
   if (sizeof(p) == 8) {
     // Disable core dumps, dumping of 16TB usually takes a bit long.
-    // The following magic is to prevent clang from replacing it with memset.
-    volatile rlimit lim;
-    lim.rlim_cur = 0;
-    lim.rlim_max = 0;
-    setrlimit(RLIMIT_CORE, (rlimit*)&lim);
+    setlim(RLIMIT_CORE, 0);
   }
+  bool reexec = false;
   // TSan doesn't play well with unlimited stack size (as stack
   // overlaps with shadow memory). If we detect unlimited stack size,
   // we re-exec the program with limited stack size as a best effort.
-  if (StackSizeIsUnlimited()) {
-    const uptr kMaxStackSize = 32 * 1024 * 1024;  // 32 Mb
+  if (getlim(RLIMIT_STACK) == (rlim_t)-1) {
+    const uptr kMaxStackSize = 32 * 1024 * 1024;
     Report("WARNING: Program is run with unlimited stack size, which "
            "wouldn't work with ThreadSanitizer.\n");
     Report("Re-execing with stack size limited to %zd bytes.\n", kMaxStackSize);
     SetStackSizeLimitInBytes(kMaxStackSize);
-    ReExec();
+    reexec = true;
   }
+
+  if (getlim(RLIMIT_AS) != (rlim_t)-1) {
+    Report("WARNING: Program is run with limited virtual address space, which "
+           "wouldn't work with ThreadSanitizer.\n");
+    Report("Re-execing with unlimited virtual address space.\n");
+    setlim(RLIMIT_AS, -1);
+    reexec = true;
+  }
+
+  if (reexec)
+    ReExec();
 
 #ifndef TSAN_GO
   CheckPIE();
   g_tls_size = (uptr)InitTlsSize();
   InitDataSeg();
 #endif
-  return getenv("TSAN_OPTIONS");
+  return getenv(kTsanOptionsEnv);
 }
 
 void FinalizePlatform() {
