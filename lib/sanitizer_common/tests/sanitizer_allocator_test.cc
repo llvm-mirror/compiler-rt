@@ -17,8 +17,12 @@
 #include "gtest/gtest.h"
 
 #include <stdlib.h>
+#include <pthread.h>
 #include <algorithm>
 #include <vector>
+
+// Too slow for debug build
+#if TSAN_DEBUG == 0
 
 #if SANITIZER_WORDSIZE == 64
 static const uptr kAllocatorSpace = 0x700000000000ULL;
@@ -92,12 +96,15 @@ void TestSizeClassAllocator() {
       uptr size = sizes[s];
       if (!a->CanAllocate(size, 1)) continue;
       // printf("s = %ld\n", size);
-      uptr n_iter = std::max((uptr)2, 1000000 / size);
+      uptr n_iter = std::max((uptr)6, 1000000 / size);
       for (uptr i = 0; i < n_iter; i++) {
-        void *x = a->Allocate(size, 1);
+        char *x = (char*)a->Allocate(size, 1);
+        x[0] = 0;
+        x[size - 1] = 0;
+        x[size / 2] = 0;
         allocated.push_back(x);
         CHECK_EQ(x, a->GetBlockBegin(x));
-        CHECK_EQ(x, a->GetBlockBegin((char*)x + size - 1));
+        CHECK_EQ(x, a->GetBlockBegin(x + size - 1));
         CHECK(a->PointerIsMine(x));
         CHECK_GE(a->GetActuallyAllocatedSize(x), size);
         uptr class_id = a->GetSizeClass(x);
@@ -179,6 +186,62 @@ TEST(SanitizerCommon, SizeClassAllocator32CompactMetadataStress) {
   SizeClassAllocatorMetadataStress<Allocator32Compact>();
 }
 
+struct TestMapUnmapCallback {
+  static int map_count, unmap_count;
+  void OnMap(uptr p, uptr size) const { map_count++; }
+  void OnUnmap(uptr p, uptr size) const { unmap_count++; }
+};
+int TestMapUnmapCallback::map_count;
+int TestMapUnmapCallback::unmap_count;
+
+#if SANITIZER_WORDSIZE == 64
+TEST(SanitizerCommon, SizeClassAllocator64MapUnmapCallback) {
+  TestMapUnmapCallback::map_count = 0;
+  TestMapUnmapCallback::unmap_count = 0;
+  typedef SizeClassAllocator64<
+      kAllocatorSpace, kAllocatorSize, 16, DefaultSizeClassMap,
+      TestMapUnmapCallback> Allocator64WithCallBack;
+  Allocator64WithCallBack *a = new Allocator64WithCallBack;
+  a->Init();
+  EXPECT_EQ(TestMapUnmapCallback::map_count, 1);  // Allocator state.
+  a->Allocate(100, 1);
+  EXPECT_EQ(TestMapUnmapCallback::map_count, 3);  // State + alloc + metadata.
+  a->TestOnlyUnmap();
+  EXPECT_EQ(TestMapUnmapCallback::unmap_count, 1);  // The whole thing.
+  delete a;
+}
+#endif
+
+TEST(SanitizerCommon, SizeClassAllocator32MapUnmapCallback) {
+  TestMapUnmapCallback::map_count = 0;
+  TestMapUnmapCallback::unmap_count = 0;
+  typedef SizeClassAllocator32<
+      0, kAddressSpaceSize, 16, CompactSizeClassMap,
+      TestMapUnmapCallback> Allocator32WithCallBack;
+  Allocator32WithCallBack *a = new Allocator32WithCallBack;
+  a->Init();
+  EXPECT_EQ(TestMapUnmapCallback::map_count, 1);  // Allocator state.
+  a->Allocate(100, 1);
+  EXPECT_EQ(TestMapUnmapCallback::map_count, 2);  // alloc.
+  a->TestOnlyUnmap();
+  EXPECT_EQ(TestMapUnmapCallback::unmap_count, 2);  // The whole thing + alloc.
+  delete a;
+  // fprintf(stderr, "Map: %d Unmap: %d\n",
+  //         TestMapUnmapCallback::map_count,
+  //         TestMapUnmapCallback::unmap_count);
+}
+
+TEST(SanitizerCommon, LargeMmapAllocatorMapUnmapCallback) {
+  TestMapUnmapCallback::map_count = 0;
+  TestMapUnmapCallback::unmap_count = 0;
+  LargeMmapAllocator<TestMapUnmapCallback> a;
+  a.Init();
+  void *x = a.Allocate(1 << 20, 1);
+  EXPECT_EQ(TestMapUnmapCallback::map_count, 1);
+  a.Deallocate(x);
+  EXPECT_EQ(TestMapUnmapCallback::unmap_count, 1);
+}
+
 template<class Allocator>
 void FailInAssertionOnOOM() {
   Allocator a;
@@ -198,7 +261,7 @@ TEST(SanitizerCommon, SizeClassAllocator64Overflow) {
 #endif
 
 TEST(SanitizerCommon, LargeMmapAllocator) {
-  LargeMmapAllocator a;
+  LargeMmapAllocator<> a;
   a.Init();
 
   static const int kNumAllocs = 100;
@@ -304,20 +367,20 @@ void TestCombinedAllocator() {
 #if SANITIZER_WORDSIZE == 64
 TEST(SanitizerCommon, CombinedAllocator64) {
   TestCombinedAllocator<Allocator64,
-      LargeMmapAllocator,
+      LargeMmapAllocator<>,
       SizeClassAllocatorLocalCache<Allocator64> > ();
 }
 
 TEST(SanitizerCommon, CombinedAllocator64Compact) {
   TestCombinedAllocator<Allocator64Compact,
-      LargeMmapAllocator,
+      LargeMmapAllocator<>,
       SizeClassAllocatorLocalCache<Allocator64Compact> > ();
 }
 #endif
 
 TEST(SanitizerCommon, CombinedAllocator32Compact) {
   TestCombinedAllocator<Allocator32Compact,
-      LargeMmapAllocator,
+      LargeMmapAllocator<>,
       SizeClassAllocatorLocalCache<Allocator32Compact> > ();
 }
 
@@ -371,6 +434,36 @@ TEST(SanitizerCommon, SizeClassAllocator32CompactLocalCache) {
       SizeClassAllocatorLocalCache<Allocator32Compact> >();
 }
 
+#if SANITIZER_WORDSIZE == 64
+typedef SizeClassAllocatorLocalCache<Allocator64> AllocatorCache;
+static THREADLOCAL AllocatorCache static_allocator_cache;
+
+void *AllocatorLeakTestWorker(void *arg) {
+  typedef AllocatorCache::Allocator Allocator;
+  Allocator *a = (Allocator*)(arg);
+  static_allocator_cache.Allocate(a, 10);
+  static_allocator_cache.Drain(a);
+  return 0;
+}
+
+TEST(SanitizerCommon, AllocatorLeakTest) {
+  typedef AllocatorCache::Allocator Allocator;
+  Allocator a;
+  a.Init();
+  uptr total_used_memory = 0;
+  for (int i = 0; i < 100; i++) {
+    pthread_t t;
+    EXPECT_EQ(0, pthread_create(&t, 0, AllocatorLeakTestWorker, &a));
+    EXPECT_EQ(0, pthread_join(t, 0));
+    if (i == 0)
+      total_used_memory = a.TotalMemoryUsed();
+    EXPECT_EQ(a.TotalMemoryUsed(), total_used_memory);
+  }
+
+  a.TestOnlyUnmap();
+}
+#endif
+
 TEST(Allocator, Basic) {
   char *p = (char*)InternalAlloc(10);
   EXPECT_NE(p, (char*)0);
@@ -409,3 +502,5 @@ TEST(Allocator, ScopedBuffer) {
     EXPECT_EQ('c', char_buf[i]);
   }
 }
+
+#endif  // #if TSAN_DEBUG==0

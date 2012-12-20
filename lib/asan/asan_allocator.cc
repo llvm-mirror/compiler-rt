@@ -38,10 +38,6 @@
 #include "sanitizer/asan_interface.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 
-#if defined(_WIN32) && !defined(__clang__)
-#include <intrin.h>
-#endif
-
 namespace __asan {
 
 #define REDZONE ((uptr)(flags()->redzone))
@@ -60,11 +56,6 @@ static const uptr kMallocSizeClassStep = 1UL << kMallocSizeClassStepLog;
 
 static const uptr kMaxAllowedMallocSize =
     (SANITIZER_WORDSIZE == 32) ? 3UL << 30 : 8UL << 30;
-
-static inline bool IsAligned(uptr a, uptr alignment) {
-  return (a & (alignment - 1)) == 0;
-}
-
 
 static inline uptr SizeClassToSize(u8 size_class) {
   CHECK(size_class < kNumberOfSizeClasses);
@@ -187,33 +178,6 @@ void AsanChunkView::GetFreeStack(StackTrace *stack) {
                               chunk_->compressed_free_stack_size());
 }
 
-bool AsanChunkView::AddrIsInside(uptr addr, uptr access_size, uptr *offset) {
-  if (addr >= Beg() && (addr + access_size) <= End()) {
-    *offset = addr - Beg();
-    return true;
-  }
-  return false;
-}
-
-bool AsanChunkView::AddrIsAtLeft(uptr addr, uptr access_size, uptr *offset) {
-  if (addr < Beg()) {
-    *offset = Beg() - addr;
-    return true;
-  }
-  return false;
-}
-
-bool AsanChunkView::AddrIsAtRight(uptr addr, uptr access_size, uptr *offset) {
-  if (addr + access_size >= End()) {
-    if (addr <= End())
-      *offset = 0;
-    else
-      *offset = addr - End();
-    return true;
-  }
-  return false;
-}
-
 static AsanChunk *PtrToChunk(uptr ptr) {
   AsanChunk *m = (AsanChunk*)(ptr - REDZONE);
   if (m->chunk_state == CHUNK_MEMALIGN) {
@@ -224,34 +188,13 @@ static AsanChunk *PtrToChunk(uptr ptr) {
 
 void AsanChunkFifoList::PushList(AsanChunkFifoList *q) {
   CHECK(q->size() > 0);
-  if (last_) {
-    CHECK(first_);
-    CHECK(!last_->next);
-    last_->next = q->first_;
-    last_ = q->last_;
-  } else {
-    CHECK(!first_);
-    last_ = q->last_;
-    first_ = q->first_;
-    CHECK(first_);
-  }
-  CHECK(last_);
-  CHECK(!last_->next);
   size_ += q->size();
+  append_back(q);
   q->clear();
 }
 
 void AsanChunkFifoList::Push(AsanChunk *n) {
-  CHECK(n->next == 0);
-  if (last_) {
-    CHECK(first_);
-    CHECK(!last_->next);
-    last_->next = n;
-    last_ = n;
-  } else {
-    CHECK(!first_);
-    last_ = first_ = n;
-  }
+  push_back(n);
   size_ += n->Size();
 }
 
@@ -260,15 +203,9 @@ void AsanChunkFifoList::Push(AsanChunk *n) {
 // ago. Not sure if we can or want to do anything with this.
 AsanChunk *AsanChunkFifoList::Pop() {
   CHECK(first_);
-  AsanChunk *res = first_;
-  first_ = first_->next;
-  if (first_ == 0)
-    last_ = 0;
-  CHECK(size_ >= res->Size());
+  AsanChunk *res = front();
   size_ -= res->Size();
-  if (last_) {
-    CHECK(!last_->next);
-  }
+  pop_front();
   return res;
 }
 
@@ -855,7 +792,7 @@ uptr __asan_get_allocated_size(const void *p) {
   uptr allocated_size = malloc_info.AllocationSize((uptr)p);
   // Die if p is not malloced or if it is already freed.
   if (allocated_size == 0) {
-    GET_STACK_TRACE_HERE(kStackTraceMax);
+    GET_STACK_TRACE_FATAL_HERE;
     ReportAsanGetAllocatedSizeNotOwned((uptr)p, &stack);
   }
   return allocated_size;

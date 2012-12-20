@@ -68,7 +68,7 @@ const uptr kAllocatorSize  =  0x10000000000ULL;  // 1T.
 typedef SizeClassAllocator64<kAllocatorSpace, kAllocatorSize, sizeof(MBlock),
     DefaultSizeClassMap> PrimaryAllocator;
 typedef SizeClassAllocatorLocalCache<PrimaryAllocator> AllocatorCache;
-typedef LargeMmapAllocator SecondaryAllocator;
+typedef LargeMmapAllocator<> SecondaryAllocator;
 typedef CombinedAllocator<PrimaryAllocator, AllocatorCache,
     SecondaryAllocator> Allocator;
 Allocator *allocator();
@@ -377,6 +377,7 @@ struct ThreadContext {
   u64 epoch0;
   u64 epoch1;
   StackTrace creation_stack;
+  int creation_tid;
   ThreadDeadInfo *dead_info;
   ThreadContext *dead_next;  // In dead thread list.
   char *name;  // As annotated by user.
@@ -482,6 +483,7 @@ void ALWAYS_INLINE INLINE StatInc(ThreadState *thr, StatType typ, u64 n = 1) {
 }
 
 void MapShadow(uptr addr, uptr size);
+void MapThreadTrace(uptr addr, uptr size);
 void InitializeShadowMemory();
 void InitializeInterceptors();
 void InitializeDynamicAnnotations();
