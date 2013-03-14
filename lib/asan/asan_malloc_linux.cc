@@ -19,6 +19,7 @@
 #include "asan_interceptors.h"
 #include "asan_internal.h"
 #include "asan_stack.h"
+#include "asan_thread_registry.h"
 
 #if ASAN_ANDROID
 DECLARE_REAL_AND_INTERCEPTOR(void*, malloc, uptr size)
@@ -60,12 +61,12 @@ using namespace __asan;  // NOLINT
 
 INTERCEPTOR(void, free, void *ptr) {
   GET_STACK_TRACE_FREE;
-  asan_free(ptr, &stack);
+  asan_free(ptr, &stack, FROM_MALLOC);
 }
 
 INTERCEPTOR(void, cfree, void *ptr) {
   GET_STACK_TRACE_FREE;
-  asan_free(ptr, &stack);
+  asan_free(ptr, &stack, FROM_MALLOC);
 }
 
 INTERCEPTOR(void*, malloc, uptr size) {
@@ -96,7 +97,7 @@ INTERCEPTOR(void*, realloc, void *ptr, uptr size) {
 
 INTERCEPTOR(void*, memalign, uptr boundary, uptr size) {
   GET_STACK_TRACE_MALLOC;
-  return asan_memalign(boundary, size, &stack);
+  return asan_memalign(boundary, size, &stack, FROM_MALLOC);
 }
 
 INTERCEPTOR(void*, __libc_memalign, uptr align, uptr s)
@@ -139,6 +140,10 @@ INTERCEPTOR(void*, valloc, uptr size) {
 INTERCEPTOR(void*, pvalloc, uptr size) {
   GET_STACK_TRACE_MALLOC;
   return asan_pvalloc(size, &stack);
+}
+
+INTERCEPTOR(void, malloc_stats, void) {
+  __asan_print_accumulated_stats();
 }
 
 #endif  // __linux__

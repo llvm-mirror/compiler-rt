@@ -55,7 +55,7 @@ struct SyncVar {
   static const int kInvalidTid = -1;
 
   Mutex mtx;
-  const uptr addr;
+  uptr addr;
   const u64 uid;  // Globally unique id.
   SyncClock clock;
   SyncClock read_clock;  // Used for rw mutexes only.
@@ -95,6 +95,8 @@ class SyncTab {
 
   // If the SyncVar does not exist, returns 0.
   SyncVar* GetAndRemove(ThreadState *thr, uptr pc, uptr addr);
+
+  SyncVar* Create(ThreadState *thr, uptr pc, uptr addr);
 
   uptr GetMemoryConsumption(uptr *nsync);
 

@@ -38,8 +38,16 @@ void InitializeAllocator() {
   allocator()->Init();
 }
 
-void AlloctorThreadFinish(ThreadState *thr) {
-  allocator()->SwallowCache(&thr->alloc_cache);
+void AllocatorThreadStart(ThreadState *thr) {
+  allocator()->InitCache(&thr->alloc_cache);
+}
+
+void AllocatorThreadFinish(ThreadState *thr) {
+  allocator()->DestroyCache(&thr->alloc_cache);
+}
+
+void AllocatorPrintStats() {
+  allocator()->PrintStats();
 }
 
 static void SignalUnsafeCall(ThreadState *thr, uptr pc) {
@@ -48,6 +56,7 @@ static void SignalUnsafeCall(ThreadState *thr, uptr pc) {
   Context *ctx = CTX();
   StackTrace stack;
   stack.ObtainCurrent(thr, pc);
+  Lock l(&ctx->thread_mtx);
   ScopedReport rep(ReportTypeSignalUnsafe);
   if (!IsFiredSuppression(ctx, rep, stack)) {
     rep.AddStack(&stack);
@@ -118,10 +127,20 @@ void *user_realloc(ThreadState *thr, uptr pc, void *p, uptr sz) {
   return p2;
 }
 
+uptr user_alloc_usable_size(ThreadState *thr, uptr pc, void *p) {
+  CHECK_GT(thr->in_rtl, 0);
+  if (p == 0)
+    return 0;
+  MBlock *b = (MBlock*)allocator()->GetMetaData(p);
+  return (b) ? b->size : 0;
+}
+
 MBlock *user_mblock(ThreadState *thr, void *p) {
-  // CHECK_GT(thr->in_rtl, 0);
   CHECK_NE(p, (void*)0);
-  return (MBlock*)allocator()->GetMetaData(p);
+  Allocator *a = allocator();
+  void *b = a->GetBlockBegin(p);
+  CHECK_NE(b, 0);
+  return (MBlock*)a->GetMetaData(b);
 }
 
 void invoke_malloc_hook(void *ptr, uptr size) {
@@ -161,3 +180,49 @@ void internal_free(void *p) {
 }
 
 }  // namespace __tsan
+
+using namespace __tsan;
+
+extern "C" {
+uptr __tsan_get_current_allocated_bytes() {
+  u64 stats[AllocatorStatCount];
+  allocator()->GetStats(stats);
+  u64 m = stats[AllocatorStatMalloced];
+  u64 f = stats[AllocatorStatFreed];
+  return m >= f ? m - f : 1;
+}
+
+uptr __tsan_get_heap_size() {
+  u64 stats[AllocatorStatCount];
+  allocator()->GetStats(stats);
+  u64 m = stats[AllocatorStatMmapped];
+  u64 f = stats[AllocatorStatUnmapped];
+  return m >= f ? m - f : 1;
+}
+
+uptr __tsan_get_free_bytes() {
+  return 1;
+}
+
+uptr __tsan_get_unmapped_bytes() {
+  return 1;
+}
+
+uptr __tsan_get_estimated_allocated_size(uptr size) {
+  return size;
+}
+
+bool __tsan_get_ownership(void *p) {
+  return allocator()->GetBlockBegin(p) != 0;
+}
+
+uptr __tsan_get_allocated_size(void *p) {
+  if (p == 0)
+    return 0;
+  p = allocator()->GetBlockBegin(p);
+  if (p == 0)
+    return 0;
+  MBlock *b = (MBlock*)allocator()->GetMetaData(p);
+  return b->size;
+}
+}  // extern "C"

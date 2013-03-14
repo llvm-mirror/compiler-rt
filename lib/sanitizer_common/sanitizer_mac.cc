@@ -13,6 +13,12 @@
 //===----------------------------------------------------------------------===//
 
 #ifdef __APPLE__
+// Use 64-bit inodes in file operations. ASan does not support OS X 10.5, so
+// the clients will most certainly use 64-bit ones as well.
+#ifndef _DARWIN_USE_64_BIT_INODE
+#define _DARWIN_USE_64_BIT_INODE 1
+#endif
+#include <stdio.h>
 
 #include "sanitizer_common.h"
 #include "sanitizer_internal_defs.h"
@@ -30,6 +36,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <libkern/OSAtomic.h>
 
 namespace __sanitizer {
 
@@ -47,9 +54,17 @@ int internal_close(fd_t fd) {
   return close(fd);
 }
 
-fd_t internal_open(const char *filename, bool write) {
-  return open(filename,
-              write ? O_WRONLY | O_CREAT : O_RDONLY, 0660);
+fd_t internal_open(const char *filename, int flags) {
+  return open(filename, flags);
+}
+
+fd_t internal_open(const char *filename, int flags, u32 mode) {
+  return open(filename, flags, mode);
+}
+
+fd_t OpenFile(const char *filename, bool write) {
+  return internal_open(filename,
+      write ? O_WRONLY | O_CREAT : O_RDONLY, 0660);
 }
 
 uptr internal_read(fd_t fd, void *buf, uptr count) {
@@ -60,9 +75,21 @@ uptr internal_write(fd_t fd, const void *buf, uptr count) {
   return write(fd, buf, count);
 }
 
+int internal_stat(const char *path, void *buf) {
+  return stat(path, (struct stat *)buf);
+}
+
+int internal_lstat(const char *path, void *buf) {
+  return lstat(path, (struct stat *)buf);
+}
+
+int internal_fstat(fd_t fd, void *buf) {
+  return fstat(fd, (struct stat *)buf);
+}
+
 uptr internal_filesize(fd_t fd) {
   struct stat st;
-  if (fstat(fd, &st))
+  if (internal_fstat(fd, &st))
     return -1;
   return (uptr)st.st_size;
 }
@@ -77,6 +104,10 @@ uptr internal_readlink(const char *path, char *buf, uptr bufsize) {
 
 int internal_sched_yield() {
   return sched_yield();
+}
+
+void internal__exit(int exitcode) {
+  _exit(exitcode);
 }
 
 // ----------------- sanitizer_common.h
@@ -265,6 +296,29 @@ bool MemoryMappingLayout::GetObjectNameAndOffset(uptr addr, uptr *offset,
                                                  char filename[],
                                                  uptr filename_size) {
   return IterateForObjectNameAndOffset(addr, offset, filename, filename_size);
+}
+
+BlockingMutex::BlockingMutex(LinkerInitialized) {
+  // We assume that OS_SPINLOCK_INIT is zero
+}
+
+void BlockingMutex::Lock() {
+  CHECK(sizeof(OSSpinLock) <= sizeof(opaque_storage_));
+  CHECK_EQ(OS_SPINLOCK_INIT, 0);
+  CHECK_NE(owner_, (uptr)pthread_self());
+  OSSpinLockLock((OSSpinLock*)&opaque_storage_);
+  CHECK(!owner_);
+  owner_ = (uptr)pthread_self();
+}
+
+void BlockingMutex::Unlock() {
+  CHECK(owner_ == (uptr)pthread_self());
+  owner_ = 0;
+  OSSpinLockUnlock((OSSpinLock*)&opaque_storage_);
+}
+
+void BlockingMutex::CheckLocked() {
+  CHECK_EQ((uptr)pthread_self(), owner_);
 }
 
 }  // namespace __sanitizer

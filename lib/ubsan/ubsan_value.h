@@ -20,6 +20,7 @@
 #error "UBSan not supported for this platform!"
 #endif
 
+#include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
 
 // FIXME: Move this out to a config header.
@@ -46,7 +47,6 @@ typedef u64 UIntMax;
 /// \brief Largest floating-point type we support.
 typedef long double FloatMax;
 
-
 /// \brief A description of a source location. This corresponds to Clang's
 /// \c PresumedLoc type.
 class SourceLocation {
@@ -61,6 +61,21 @@ public:
 
   /// \brief Determine whether the source location is known.
   bool isInvalid() const { return !Filename; }
+
+  /// \brief Atomically acquire a copy, disabling original in-place.
+  /// Exactly one call to acquire() returns a copy that isn't disabled.
+  SourceLocation acquire() {
+    u32 OldColumn = __sanitizer::atomic_exchange(
+                        (__sanitizer::atomic_uint32_t *)&Column, ~u32(0),
+                        __sanitizer::memory_order_relaxed);
+    return SourceLocation(Filename, Line, OldColumn);
+  }
+
+  /// \brief Determine if this Location has been disabled.
+  /// Disabled SourceLocations are invalid to use.
+  bool isDisabled() {
+    return Column == ~u32(0);
+  }
 
   /// \brief Get the presumed filename for the source location.
   const char *getFilename() const { return Filename; }

@@ -29,14 +29,14 @@
 #if ASAN_ALLOCATOR_VERSION == 1
 #include "asan_interceptors.h"
 #include "asan_internal.h"
-#include "asan_lock.h"
 #include "asan_mapping.h"
 #include "asan_stats.h"
 #include "asan_report.h"
 #include "asan_thread.h"
 #include "asan_thread_registry.h"
-#include "sanitizer/asan_interface.h"
+#include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_atomic.h"
+#include "sanitizer_common/sanitizer_mutex.h"
 
 namespace __asan {
 
@@ -128,7 +128,8 @@ struct ChunkBase {
 
   // Second 8 bytes.
   uptr alignment_log : 8;
-  uptr used_size : FIRST_32_SECOND_64(32, 56);  // Size requested by the user.
+  uptr alloc_type    : 2;
+  uptr used_size : FIRST_32_SECOND_64(32, 54);  // Size requested by the user.
 
   // This field may overlap with the user area and thus should not
   // be used while the chunk is in CHUNK_ALLOCATED state.
@@ -228,7 +229,7 @@ class MallocInfo {
     AsanChunk *m = 0;
     AsanChunk **fl = &free_lists_[size_class];
     {
-      ScopedLock lock(&mu_);
+      BlockingMutexLock lock(&mu_);
       for (uptr i = 0; i < n_chunks; i++) {
         if (!(*fl)) {
           *fl = GetNewChunks(size_class);
@@ -246,7 +247,7 @@ class MallocInfo {
   void SwallowThreadLocalMallocStorage(AsanThreadLocalMallocStorage *x,
                                        bool eat_free_lists) {
     CHECK(flags()->quarantine_size > 0);
-    ScopedLock lock(&mu_);
+    BlockingMutexLock lock(&mu_);
     AsanChunkFifoList *q = &x->quarantine_;
     if (q->size() > 0) {
       quarantine_.PushList(q);
@@ -270,18 +271,18 @@ class MallocInfo {
   }
 
   void BypassThreadLocalQuarantine(AsanChunk *chunk) {
-    ScopedLock lock(&mu_);
+    BlockingMutexLock lock(&mu_);
     quarantine_.Push(chunk);
   }
 
   AsanChunk *FindChunkByAddr(uptr addr) {
-    ScopedLock lock(&mu_);
+    BlockingMutexLock lock(&mu_);
     return FindChunkByAddrUnlocked(addr);
   }
 
   uptr AllocationSize(uptr ptr) {
     if (!ptr) return 0;
-    ScopedLock lock(&mu_);
+    BlockingMutexLock lock(&mu_);
 
     // Make sure this is our chunk and |ptr| actually points to the beginning
     // of the allocated memory.
@@ -304,7 +305,7 @@ class MallocInfo {
   }
 
   void PrintStatus() {
-    ScopedLock lock(&mu_);
+    BlockingMutexLock lock(&mu_);
     uptr malloced = 0;
 
     Printf(" MallocInfo: in quarantine: %zu malloced: %zu; ",
@@ -322,7 +323,7 @@ class MallocInfo {
   }
 
   PageGroup *FindPageGroup(uptr addr) {
-    ScopedLock lock(&mu_);
+    BlockingMutexLock lock(&mu_);
     return FindPageGroupUnlocked(addr);
   }
 
@@ -368,7 +369,7 @@ class MallocInfo {
         left_chunk->chunk_state != CHUNK_AVAILABLE)
       return left_chunk;
     // Choose based on offset.
-    uptr l_offset = 0, r_offset = 0;
+    sptr l_offset = 0, r_offset = 0;
     CHECK(AsanChunkView(left_chunk).AddrIsAtRight(addr, 1, &l_offset));
     CHECK(AsanChunkView(right_chunk).AddrIsAtLeft(addr, 1, &r_offset));
     if (l_offset < r_offset)
@@ -388,7 +389,7 @@ class MallocInfo {
     CHECK(m->chunk_state == CHUNK_ALLOCATED ||
           m->chunk_state == CHUNK_AVAILABLE ||
           m->chunk_state == CHUNK_QUARANTINE);
-    uptr offset = 0;
+    sptr offset = 0;
     AsanChunkView m_view(m);
     if (m_view.AddrIsInside(addr, 1, &offset))
       return m;
@@ -480,7 +481,7 @@ class MallocInfo {
 
   AsanChunk *free_lists_[kNumberOfSizeClasses];
   AsanChunkFifoList quarantine_;
-  AsanLock mu_;
+  BlockingMutex mu_;
 
   PageGroup *page_groups_[kMaxAvailableRam / kMinMmapSize];
   atomic_uint32_t n_page_groups_;
@@ -497,7 +498,8 @@ AsanChunkView FindHeapChunkByAddress(uptr address) {
   return AsanChunkView(malloc_info.FindChunkByAddr(address));
 }
 
-static u8 *Allocate(uptr alignment, uptr size, StackTrace *stack) {
+static u8 *Allocate(uptr alignment, uptr size, StackTrace *stack,
+                    AllocType alloc_type) {
   __asan_init();
   CHECK(stack);
   if (size == 0) {
@@ -554,6 +556,7 @@ static u8 *Allocate(uptr alignment, uptr size, StackTrace *stack) {
   CHECK(m);
   CHECK(m->chunk_state == CHUNK_AVAILABLE);
   m->chunk_state = CHUNK_ALLOCATED;
+  m->alloc_type = alloc_type;
   m->next = 0;
   CHECK(m->Size() == size_to_allocate);
   uptr addr = (uptr)m + REDZONE;
@@ -588,7 +591,7 @@ static u8 *Allocate(uptr alignment, uptr size, StackTrace *stack) {
   return (u8*)addr;
 }
 
-static void Deallocate(u8 *ptr, StackTrace *stack) {
+static void Deallocate(u8 *ptr, StackTrace *stack, AllocType alloc_type) {
   if (!ptr) return;
   CHECK(stack);
 
@@ -609,6 +612,9 @@ static void Deallocate(u8 *ptr, StackTrace *stack) {
     ReportFreeNotMalloced((uptr)ptr, stack);
   }
   CHECK(old_chunk_state == CHUNK_ALLOCATED);
+  if (m->alloc_type != alloc_type && flags()->alloc_dealloc_mismatch)
+    ReportAllocTypeMismatch((uptr)ptr, stack,
+                            (AllocType)m->alloc_type, (AllocType)alloc_type);
   // With REDZONE==16 m->next is in the user area, otherwise it should be 0.
   CHECK(REDZONE <= 16 || !m->next);
   CHECK(m->free_tid == kInvalidTid);
@@ -653,11 +659,11 @@ static u8 *Reallocate(u8 *old_ptr, uptr new_size,
   CHECK(m->chunk_state == CHUNK_ALLOCATED);
   uptr old_size = m->used_size;
   uptr memcpy_size = Min(new_size, old_size);
-  u8 *new_ptr = Allocate(0, new_size, stack);
+  u8 *new_ptr = Allocate(0, new_size, stack, FROM_MALLOC);
   if (new_ptr) {
     CHECK(REAL(memcpy) != 0);
     REAL(memcpy)(new_ptr, old_ptr, memcpy_size);
-    Deallocate(old_ptr, stack);
+    Deallocate(old_ptr, stack, FROM_MALLOC);
   }
   return new_ptr;
 }
@@ -681,28 +687,35 @@ void __asan_free_hook(void *ptr) {
 
 namespace __asan {
 
+void InitializeAllocator() { }
+
+void PrintInternalAllocatorStats() {
+}
+
 SANITIZER_INTERFACE_ATTRIBUTE
-void *asan_memalign(uptr alignment, uptr size, StackTrace *stack) {
-  void *ptr = (void*)Allocate(alignment, size, stack);
+void *asan_memalign(uptr alignment, uptr size, StackTrace *stack,
+                    AllocType alloc_type) {
+  void *ptr = (void*)Allocate(alignment, size, stack, alloc_type);
   ASAN_MALLOC_HOOK(ptr, size);
   return ptr;
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-void asan_free(void *ptr, StackTrace *stack) {
+void asan_free(void *ptr, StackTrace *stack, AllocType alloc_type) {
   ASAN_FREE_HOOK(ptr);
-  Deallocate((u8*)ptr, stack);
+  Deallocate((u8*)ptr, stack, alloc_type);
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void *asan_malloc(uptr size, StackTrace *stack) {
-  void *ptr = (void*)Allocate(0, size, stack);
+  void *ptr = (void*)Allocate(0, size, stack, FROM_MALLOC);
   ASAN_MALLOC_HOOK(ptr, size);
   return ptr;
 }
 
 void *asan_calloc(uptr nmemb, uptr size, StackTrace *stack) {
-  void *ptr = (void*)Allocate(0, nmemb * size, stack);
+  if (__sanitizer::CallocShouldReturnNullDueToOverflow(size, nmemb)) return 0;
+  void *ptr = (void*)Allocate(0, nmemb * size, stack, FROM_MALLOC);
   if (ptr)
     REAL(memset)(ptr, 0, nmemb * size);
   ASAN_MALLOC_HOOK(ptr, size);
@@ -711,19 +724,19 @@ void *asan_calloc(uptr nmemb, uptr size, StackTrace *stack) {
 
 void *asan_realloc(void *p, uptr size, StackTrace *stack) {
   if (p == 0) {
-    void *ptr = (void*)Allocate(0, size, stack);
+    void *ptr = (void*)Allocate(0, size, stack, FROM_MALLOC);
     ASAN_MALLOC_HOOK(ptr, size);
     return ptr;
   } else if (size == 0) {
     ASAN_FREE_HOOK(p);
-    Deallocate((u8*)p, stack);
+    Deallocate((u8*)p, stack, FROM_MALLOC);
     return 0;
   }
   return Reallocate((u8*)p, size, stack);
 }
 
 void *asan_valloc(uptr size, StackTrace *stack) {
-  void *ptr = (void*)Allocate(GetPageSizeCached(), size, stack);
+  void *ptr = (void*)Allocate(GetPageSizeCached(), size, stack, FROM_MALLOC);
   ASAN_MALLOC_HOOK(ptr, size);
   return ptr;
 }
@@ -735,14 +748,14 @@ void *asan_pvalloc(uptr size, StackTrace *stack) {
     // pvalloc(0) should allocate one page.
     size = PageSize;
   }
-  void *ptr = (void*)Allocate(PageSize, size, stack);
+  void *ptr = (void*)Allocate(PageSize, size, stack, FROM_MALLOC);
   ASAN_MALLOC_HOOK(ptr, size);
   return ptr;
 }
 
 int asan_posix_memalign(void **memptr, uptr alignment, uptr size,
                           StackTrace *stack) {
-  void *ptr = Allocate(alignment, size, stack);
+  void *ptr = Allocate(alignment, size, stack, FROM_MALLOC);
   CHECK(IsAligned((uptr)ptr, alignment));
   ASAN_MALLOC_HOOK(ptr, size);
   *memptr = ptr;

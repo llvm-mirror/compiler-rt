@@ -10,9 +10,20 @@
 // This file is a part of ThreadSanitizer (TSan), a race detector.
 //
 //===----------------------------------------------------------------------===//
+#include <limits>
 #include "tsan_mman.h"
 #include "tsan_rtl.h"
 #include "gtest/gtest.h"
+
+extern "C" {
+uptr __tsan_get_current_allocated_bytes();
+uptr __tsan_get_heap_size();
+uptr __tsan_get_free_bytes();
+uptr __tsan_get_unmapped_bytes();
+uptr __tsan_get_estimated_allocated_size(uptr size);
+bool __tsan_get_ownership(void *p);
+uptr __tsan_get_allocated_size(void *p);
+}
 
 namespace __tsan {
 
@@ -104,6 +115,57 @@ TEST(Mman, UserRealloc) {
       EXPECT_EQ(((char*)p2)[i], (char)0xde);
     user_free(thr, pc, p2);
   }
+}
+
+TEST(Mman, UsableSize) {
+  ScopedInRtl in_rtl;
+  ThreadState *thr = cur_thread();
+  uptr pc = 0;
+  char *p = (char*)user_alloc(thr, pc, 10);
+  char *p2 = (char*)user_alloc(thr, pc, 20);
+  EXPECT_EQ(0U, user_alloc_usable_size(thr, pc, NULL));
+  EXPECT_EQ(10U, user_alloc_usable_size(thr, pc, p));
+  EXPECT_EQ(20U, user_alloc_usable_size(thr, pc, p2));
+  user_free(thr, pc, p);
+  user_free(thr, pc, p2);
+}
+
+TEST(Mman, Stats) {
+  ScopedInRtl in_rtl;
+  ThreadState *thr = cur_thread();
+
+  uptr alloc0 = __tsan_get_current_allocated_bytes();
+  uptr heap0 = __tsan_get_heap_size();
+  uptr free0 = __tsan_get_free_bytes();
+  uptr unmapped0 = __tsan_get_unmapped_bytes();
+
+  EXPECT_EQ(__tsan_get_estimated_allocated_size(10), (uptr)10);
+  EXPECT_EQ(__tsan_get_estimated_allocated_size(20), (uptr)20);
+  EXPECT_EQ(__tsan_get_estimated_allocated_size(100), (uptr)100);
+
+  char *p = (char*)user_alloc(thr, 0, 10);
+  EXPECT_EQ(__tsan_get_ownership(p), true);
+  EXPECT_EQ(__tsan_get_allocated_size(p), (uptr)10);
+
+  EXPECT_EQ(__tsan_get_current_allocated_bytes(), alloc0 + 16);
+  EXPECT_GE(__tsan_get_heap_size(), heap0);
+  EXPECT_EQ(__tsan_get_free_bytes(), free0);
+  EXPECT_EQ(__tsan_get_unmapped_bytes(), unmapped0);
+
+  user_free(thr, 0, p);
+
+  EXPECT_EQ(__tsan_get_current_allocated_bytes(), alloc0);
+  EXPECT_GE(__tsan_get_heap_size(), heap0);
+  EXPECT_EQ(__tsan_get_free_bytes(), free0);
+  EXPECT_EQ(__tsan_get_unmapped_bytes(), unmapped0);
+}
+
+TEST(Mman, CallocOverflow) {
+  size_t kArraySize = 4096;
+  volatile size_t kMaxSizeT = std::numeric_limits<size_t>::max();
+  volatile size_t kArraySize2 = kMaxSizeT / kArraySize + 10;
+  volatile void *p = calloc(kArraySize, kArraySize2);  // Should return 0.
+  EXPECT_EQ(0L, p);
 }
 
 }  // namespace __tsan

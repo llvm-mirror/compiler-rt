@@ -45,6 +45,7 @@ void InitializeFlags(Flags *f, const char *env) {
   f->report_thread_leaks = true;
   f->report_destroy_locked = true;
   f->report_signal_unsafe = true;
+  f->report_atomic_races = true;
   f->force_seq_cst_atomics = false;
   f->strip_path_prefix = "";
   f->suppressions = "";
@@ -58,6 +59,7 @@ void InitializeFlags(Flags *f, const char *env) {
   f->running_on_valgrind = false;
   f->external_symbolizer_path = "";
   f->history_size = kGoMode ? 1 : 2;  // There are a lot of goroutines in Go.
+  f->io_sync = 1;
 
   // Let a frontend override.
   OverrideFlags(f);
@@ -71,6 +73,7 @@ void InitializeFlags(Flags *f, const char *env) {
   ParseFlag(env, &f->report_thread_leaks, "report_thread_leaks");
   ParseFlag(env, &f->report_destroy_locked, "report_destroy_locked");
   ParseFlag(env, &f->report_signal_unsafe, "report_signal_unsafe");
+  ParseFlag(env, &f->report_atomic_races, "report_atomic_races");
   ParseFlag(env, &f->force_seq_cst_atomics, "force_seq_cst_atomics");
   ParseFlag(env, &f->strip_path_prefix, "strip_path_prefix");
   ParseFlag(env, &f->suppressions, "suppressions");
@@ -83,6 +86,7 @@ void InitializeFlags(Flags *f, const char *env) {
   ParseFlag(env, &f->stop_on_start, "stop_on_start");
   ParseFlag(env, &f->external_symbolizer_path, "external_symbolizer_path");
   ParseFlag(env, &f->history_size, "history_size");
+  ParseFlag(env, &f->io_sync, "io_sync");
 
   if (!f->report_bugs) {
     f->report_thread_leaks = false;
@@ -93,6 +97,12 @@ void InitializeFlags(Flags *f, const char *env) {
   if (f->history_size < 0 || f->history_size > 7) {
     Printf("ThreadSanitizer: incorrect value for history_size"
            " (must be [0..7])\n");
+    Die();
+  }
+
+  if (f->io_sync < 0 || f->io_sync > 2) {
+    Printf("ThreadSanitizer: incorrect value for io_sync"
+           " (must be [0..2])\n");
     Die();
   }
 }

@@ -6,6 +6,10 @@
 #include <unistd.h>
 
 static void handler(int, siginfo_t*, void*) {
+  // CHECK: WARNING: ThreadSanitizer: signal-unsafe call inside of a signal
+  // CHECK:     #0 malloc
+  // CHECK:     #{{(1|2)}} handler(int, siginfo{{(_t)?}}*, void*) {{.*}}signal_malloc.cc:[[@LINE+2]]
+  // CHECK: SUMMARY: ThreadSanitizer: signal-unsafe call inside of a signal{{.*}}handler
   volatile char *p = (char*)malloc(1);
   p[0] = 0;
   free((void*)p);
@@ -19,8 +23,4 @@ int main() {
   sleep(1);
   return 0;
 }
-
-// CHECK: WARNING: ThreadSanitizer: signal-unsafe call inside of a signal
-// CHECK:     #0 malloc
-// CHECK:     #1 handler(int, siginfo*, void*) {{.*}}signal_malloc.cc:9
 

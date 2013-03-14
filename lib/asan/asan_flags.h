@@ -15,13 +15,15 @@
 #ifndef ASAN_FLAGS_H
 #define ASAN_FLAGS_H
 
-#include "sanitizer/common_interface_defs.h"
+#include "sanitizer_common/sanitizer_internal_defs.h"
 
-// ASan flag values can be defined in three ways:
+// ASan flag values can be defined in four ways:
 // 1) initialized with default values at startup.
-// 2) overriden from string returned by user-specified function
+// 2) overriden during compilation of ASan runtime by providing
+//    compile definition ASAN_DEFAULT_OPTIONS.
+// 3) overriden from string returned by user-specified function
 //    __asan_default_options().
-// 3) overriden from env variable ASAN_OPTIONS.
+// 4) overriden from env variable ASAN_OPTIONS.
 
 namespace __asan {
 
@@ -52,8 +54,6 @@ struct Flags {
   bool replace_str;
   // If set, uses custom wrappers for memset/memcpy/memmove intinsics.
   bool replace_intrin;
-  // Used on Mac only. See comments in asan_mac.cc and asan_malloc_mac.cc.
-  bool replace_cfallocator;
   // Used on Mac only.
   bool mac_ignore_invalid_free;
   // ASan allocator flag. See asan_allocator.cc.
@@ -79,6 +79,10 @@ struct Flags {
   bool unmap_shadow_on_exit;
   // If set, calls abort() instead of _exit() after printing an error report.
   bool abort_on_error;
+  // Print various statistics after printing an error message or if atexit=1.
+  bool print_stats;
+  // Print the legend for the shadow bytes.
+  bool print_legend;
   // If set, prints ASan exit stats even after program terminates successfully.
   bool atexit;
   // By default, disable core dumper on 64-bit - it makes little sense
@@ -99,6 +103,16 @@ struct Flags {
   bool fast_unwind_on_fatal;
   // Use fast (frame-pointer-based) unwinder on malloc/free (if available).
   bool fast_unwind_on_malloc;
+  // Poison (or not) the heap memory on [de]allocation. Zero value is useful
+  // for benchmarking the allocator or instrumentator.
+  bool poison_heap;
+  // Report errors on malloc/delete, new/free, new/delete[], etc.
+  bool alloc_dealloc_mismatch;
+  // Use stack depot instead of storing stacks in the redzones.
+  bool use_stack_depot;
+  // If true, assume that memcmp(p1, p2, n) always reads n bytes before
+  // comparing p1 and p2.
+  bool strict_memcmp;
 };
 
 Flags *flags();

@@ -17,9 +17,7 @@
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_libc.h"
-#include "sanitizer_common/sanitizer_mutex.h"
 #include "sanitizer_common/sanitizer_procmaps.h"
-#include "sanitizer_common/sanitizer_stackdepot.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 
@@ -60,9 +58,10 @@ static THREADLOCAL struct {
   uptr stack_top, stack_bottom;
 } __msan_stack_bounds;
 
-static StaticSpinMutex report_mu;
+static THREADLOCAL bool is_in_symbolizer;
+static THREADLOCAL bool is_in_loader;
 
-extern const int __msan_track_origins;
+extern "C" const int __msan_track_origins;
 int __msan_get_track_origins() {
   return __msan_track_origins;
 }
@@ -85,6 +84,18 @@ static bool IsRunningUnderDr() {
   return result;
 }
 
+void EnterSymbolizer() { is_in_symbolizer = true; }
+void ExitSymbolizer()  { is_in_symbolizer = false; }
+bool IsInSymbolizer() { return is_in_symbolizer; }
+
+void EnterLoader() { is_in_loader = true; }
+void ExitLoader()  { is_in_loader = false; }
+
+extern "C" {
+SANITIZER_INTERFACE_ATTRIBUTE
+bool __msan_is_in_loader() { return is_in_loader; }
+}
+
 static Flags msan_flags;
 
 Flags *flags() {
@@ -93,6 +104,8 @@ Flags *flags() {
 
 int msan_inited = 0;
 bool msan_init_is_running;
+
+int msan_report_count = 0;
 
 // Array of stack origins.
 // FIXME: make it resizable.
@@ -113,6 +126,7 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->num_callers, "num_callers");
   ParseFlag(str, &f->report_umrs, "report_umrs");
   ParseFlag(str, &f->verbosity, "verbosity");
+  ParseFlag(str, &f->strip_path_prefix, "strip_path_prefix");
 }
 
 static void InitializeFlags(Flags *f, const char *options) {
@@ -125,7 +139,11 @@ static void InitializeFlags(Flags *f, const char *options) {
   f->num_callers = 20;
   f->report_umrs = true;
   f->verbosity = 0;
+  f->strip_path_prefix = "";
 
+  // Override from user-specified string.
+  if (__msan_default_options)
+    ParseFlagsFromString(f, __msan_default_options());
   ParseFlagsFromString(f, options);
 }
 
@@ -142,7 +160,14 @@ static void GetCurrentStackBounds(uptr *stack_top, uptr *stack_bottom) {
   *stack_bottom = __msan_stack_bounds.stack_bottom;
 }
 
-void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp) {
+void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp,
+                   bool fast) {
+  if (!fast) {
+    // Block reports from our interceptors during _Unwind_Backtrace.
+    SymbolizerScope sym_scope;
+    return stack->SlowUnwindStack(pc, max_s);
+  }
+
   uptr stack_top, stack_bottom;
   GetCurrentStackBounds(&stack_top, &stack_bottom);
   stack->size = 0;
@@ -151,18 +176,15 @@ void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp) {
   stack->FastUnwindStack(pc, bp, stack_top, stack_bottom);
 }
 
-static void PrintCurrentStackTrace(uptr pc, uptr bp) {
-  StackTrace stack;
-  GetStackTrace(&stack, kStackTraceMax, pc, bp);
-  StackTrace::PrintStack(stack.trace, stack.size, true, "", 0);
-}
-
 void PrintWarning(uptr pc, uptr bp) {
   PrintWarningWithOrigin(pc, bp, __msan_origin_tls);
 }
 
+bool OriginIsValid(u32 origin) {
+  return origin != 0 && origin != (u32)-1;
+}
+
 void PrintWarningWithOrigin(uptr pc, uptr bp, u32 origin) {
-  if (!__msan::flags()->report_umrs) return;
   if (msan_expect_umr) {
     // Printf("Expected UMR\n");
     __msan_origin_tls = origin;
@@ -170,24 +192,19 @@ void PrintWarningWithOrigin(uptr pc, uptr bp, u32 origin) {
     return;
   }
 
-  GenericScopedLock<StaticSpinMutex> lock(&report_mu);
+  ++msan_report_count;
 
-  Report(" WARNING: MemorySanitizer: UMR (uninitialized-memory-read)\n");
-  PrintCurrentStackTrace(pc, bp);
-  if (__msan_track_origins) {
-    Printf("  raw origin id: %d\n", origin);
-    if (origin == 0 || origin == (u32)-1) {
-      Printf("  ORIGIN: invalid (%x). Might be a bug in MemorySanitizer, "
-             "please report to MemorySanitizer developers.\n",
-             origin);
-    } else if (const char *so = __msan_get_origin_descr_if_stack(origin)) {
-      Printf("  ORIGIN: stack allocation: %s\n", so);
-    } else if (origin != 0) {
-      uptr size = 0;
-      const uptr *trace = StackDepotGet(origin, &size);
-      Printf("  ORIGIN: heap allocation:\n");
-      StackTrace::PrintStack(trace, size, true, "", 0);
-    }
+  StackTrace stack;
+  GetStackTrace(&stack, kStackTraceMax, pc, bp, /*fast*/false);
+
+  u32 report_origin =
+    (__msan_track_origins && OriginIsValid(origin)) ? origin : 0;
+  ReportUMR(&stack, report_origin);
+
+  if (__msan_track_origins && !OriginIsValid(origin)) {
+    Printf("  ORIGIN: invalid (%x). Might be a bug in MemorySanitizer, "
+           "please report to MemorySanitizer developers.\n",
+           origin);
   }
 }
 
@@ -214,13 +231,15 @@ void __msan_warning_noreturn() {
 void __msan_init() {
   if (msan_inited) return;
   msan_init_is_running = 1;
+  SanitizerToolName = "MemorySanitizer";
 
-  report_mu.Init();
-
+  InstallAtExitHandler();
   SetDieCallback(MsanDie);
   InitializeInterceptors();
 
   ReplaceOperatorsNewAndDelete();
+  const char *msan_options = GetEnv("MSAN_OPTIONS");
+  InitializeFlags(&msan_flags, msan_options);
   if (StackSizeIsUnlimited()) {
     if (flags()->verbosity)
       Printf("Unlimited stack, doing reexec\n");
@@ -229,10 +248,10 @@ void __msan_init() {
     SetStackSizeLimitInBytes(32 * 1024 * 1024);
     ReExec();
   }
-  const char *msan_options = GetEnv("MSAN_OPTIONS");
-  InitializeFlags(&msan_flags, msan_options);
+
   if (flags()->verbosity)
     Printf("MSAN_OPTIONS: %s\n", msan_options ? msan_options : "<empty>");
+
   msan_running_under_dr = IsRunningUnderDr();
   __msan_clear_on_return();
   if (__msan_track_origins && flags()->verbosity > 0)
@@ -240,13 +259,14 @@ void __msan_init() {
   if (!InitShadow(/* prot1 */false, /* prot2 */true, /* map_shadow */true,
                   __msan_track_origins)) {
     // FIXME: prot1 = false is only required when running under DR.
-    Printf("FATAL: MemorySanitizer can not mmap the shadow memory\n");
+    Printf("FATAL: MemorySanitizer can not mmap the shadow memory.\n");
     Printf("FATAL: Make sure to compile with -fPIE and to link with -pie.\n");
+    Printf("FATAL: Disabling ASLR is known to cause this error.\n");
+    Printf("FATAL: If running under GDB, try "
+           "'set disable-randomization off'.\n");
     DumpProcessMap();
     Die();
   }
-
-  InstallTrapHandler();
 
   const char *external_symbolizer = GetEnv("MSAN_SYMBOLIZER_PATH");
   if (external_symbolizer && external_symbolizer[0]) {
@@ -270,10 +290,11 @@ void __msan_set_expect_umr(int expect_umr) {
   if (expect_umr) {
     msan_expected_umr_found = 0;
   } else if (!msan_expected_umr_found) {
-    Printf("Expected UMR not found\n");
     GET_CALLER_PC_BP_SP;
     (void)sp;
-    PrintCurrentStackTrace(pc, bp);
+    StackTrace stack;
+    GetStackTrace(&stack, kStackTraceMax, pc, bp, /*fast*/false);
+    ReportExpectedUMRNotFound(&stack);
     Die();
   }
   msan_expect_umr = expect_umr;
@@ -314,8 +335,6 @@ int __msan_set_poison_in_malloc(int do_poison) {
   flags()->poison_in_malloc = do_poison;
   return old;
 }
-
-void __msan_break_optimization(void *x) { }
 
 int  __msan_has_dynamic_component() {
   return msan_running_under_dr;
@@ -422,6 +441,14 @@ u32 __msan_get_origin(void *a) {
   return *(u32*)origin_ptr;
 }
 
-u32 __msan_get_origin_tls() {
+u32 __msan_get_umr_origin() {
   return __msan_origin_tls;
 }
+
+#if !SANITIZER_SUPPORTS_WEAK_HOOKS
+extern "C" {
+SANITIZER_WEAK_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE
+const char* __msan_default_options() { return ""; }
+}  // extern "C"
+#endif
+

@@ -13,7 +13,7 @@
 #ifndef SANITIZER_STACKDEPOT_H
 #define SANITIZER_STACKDEPOT_H
 
-#include "sanitizer/common_interface_defs.h"
+#include "sanitizer_internal_defs.h"
 
 namespace __sanitizer {
 
@@ -23,6 +23,13 @@ namespace __sanitizer {
 u32 StackDepotPut(const uptr *stack, uptr size);
 // Retrieves a stored stack trace by the id.
 const uptr *StackDepotGet(u32 id, uptr *size);
+
+struct StackDepotStats {
+  uptr n_uniq_ids;
+  uptr mapped;
+};
+
+StackDepotStats *StackDepotGetStats();
 
 }  // namespace __sanitizer
 

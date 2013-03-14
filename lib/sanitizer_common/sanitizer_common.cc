@@ -16,6 +16,8 @@
 
 namespace __sanitizer {
 
+const char *SanitizerToolName = "SanitizerTool";
+
 uptr GetPageSizeCached() {
   static uptr PageSize;
   if (!PageSize)
@@ -23,10 +25,16 @@ uptr GetPageSizeCached() {
   return PageSize;
 }
 
-// By default, dump to stderr. If report_fd is kInvalidFd, try to obtain file
-// descriptor by opening file in report_path.
+static bool log_to_file = false;  // Set to true by __sanitizer_set_report_path
+
+// By default, dump to stderr. If |log_to_file| is true and |report_fd_pid|
+// isn't equal to the current PID, try to obtain file descriptor by opening
+// file "report_path_prefix.<PID>".
 static fd_t report_fd = kStderrFd;
-static char report_path[4096];  // Set via __sanitizer_set_report_path.
+static char report_path_prefix[4096];  // Set via __sanitizer_set_report_path.
+// PID of process that opened |report_fd|. If a fork() occurs, the PID of the
+// child thread will be different from |report_fd_pid|.
+static int report_fd_pid = 0;
 
 static void (*DieCallback)(void);
 void SetDieCallback(void (*callback)(void)) {
@@ -37,7 +45,7 @@ void NORETURN Die() {
   if (DieCallback) {
     DieCallback();
   }
-  Exit(1);
+  internal__exit(1);
 }
 
 static CheckFailedCallbackType CheckFailedCallback;
@@ -50,21 +58,29 @@ void NORETURN CheckFailed(const char *file, int line, const char *cond,
   if (CheckFailedCallback) {
     CheckFailedCallback(file, line, cond, v1, v2);
   }
-  Report("Sanitizer CHECK failed: %s:%d %s (%zd, %zd)\n", file, line, cond,
-                                                          v1, v2);
+  Report("Sanitizer CHECK failed: %s:%d %s (%lld, %lld)\n", file, line, cond,
+                                                            v1, v2);
   Die();
 }
 
 static void MaybeOpenReportFile() {
-  if (report_fd != kInvalidFd)
-    return;
-  fd_t fd = internal_open(report_path, true);
+  if (!log_to_file || (report_fd_pid == GetPid())) return;
+  InternalScopedBuffer<char> report_path_full(4096);
+  internal_snprintf(report_path_full.data(), report_path_full.size(),
+                    "%s.%d", report_path_prefix, GetPid());
+  fd_t fd = OpenFile(report_path_full.data(), true);
   if (fd == kInvalidFd) {
     report_fd = kStderrFd;
-    Report("ERROR: Can't open file: %s\n", report_path);
+    log_to_file = false;
+    Report("ERROR: Can't open file: %s\n", report_path_full.data());
     Die();
   }
+  if (report_fd != kInvalidFd) {
+    // We're in the child. Close the parent's log.
+    internal_close(report_fd);
+  }
   report_fd = fd;
+  report_fd_pid = GetPid();
 }
 
 bool PrintsToTty() {
@@ -91,7 +107,7 @@ uptr ReadFileToBuffer(const char *file_name, char **buff,
   *buff_size = 0;
   // The files we usually open are not seekable, so try different buffer sizes.
   for (uptr size = kMinFileLen; size <= max_len; size *= 2) {
-    fd_t fd = internal_open(file_name, /*write*/ false);
+    fd_t fd = OpenFile(file_name, /*write*/ false);
     if (fd == kInvalidFd) return 0;
     UnmapOrDie(*buff, *buff_size);
     *buff = (char*)MmapOrDie(size, __FUNCTION__);
@@ -176,6 +192,16 @@ void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type) {
   return (void*)res;
 }
 
+void ReportErrorSummary(const char *error_type, const char *file,
+                        int line, const char *function) {
+  const int kMaxSize = 1024;  // We don't want a summary too long.
+  InternalScopedBuffer<char> buff(kMaxSize);
+  internal_snprintf(buff.data(), kMaxSize, "%s: %s %s:%d %s",
+                    SanitizerToolName, error_type,
+                    file ? file : "??", line, function ? function : "??");
+  __sanitizer_report_error_summary(buff.data());
+}
+
 }  // namespace __sanitizer
 
 using namespace __sanitizer;  // NOLINT
@@ -184,14 +210,16 @@ extern "C" {
 void __sanitizer_set_report_path(const char *path) {
   if (!path) return;
   uptr len = internal_strlen(path);
-  if (len > sizeof(report_path) - 100) {
+  if (len > sizeof(report_path_prefix) - 100) {
     Report("ERROR: Path is too long: %c%c%c%c%c%c%c%c...\n",
            path[0], path[1], path[2], path[3],
            path[4], path[5], path[6], path[7]);
     Die();
   }
-  internal_snprintf(report_path, sizeof(report_path), "%s.%d", path, GetPid());
+  internal_strncpy(report_path_prefix, path, sizeof(report_path_prefix));
+  report_path_prefix[len] = '\0';
   report_fd = kInvalidFd;
+  log_to_file = true;
 }
 
 void __sanitizer_set_report_fd(int fd) {
@@ -205,5 +233,9 @@ void __sanitizer_set_report_fd(int fd) {
 void NOINLINE __sanitizer_sandbox_on_notify(void *reserved) {
   (void)reserved;
   PrepareForSandboxing();
+}
+
+void __sanitizer_report_error_summary(const char *error_summary) {
+  Printf("SUMMARY: %s\n", error_summary);
 }
 }  // extern "C"

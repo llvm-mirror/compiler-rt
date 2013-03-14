@@ -37,6 +37,11 @@ THREADLOCAL char cur_thread_placeholder[sizeof(ThreadState)] ALIGNED(64);
 #endif
 static char ctx_placeholder[sizeof(Context)] ALIGNED(64);
 
+// Can be overriden by a front-end.
+bool CPP_WEAK OnFinalize(bool failed) {
+  return failed;
+}
+
 static Context *ctx;
 Context *CTX() {
   return ctx;
@@ -138,7 +143,7 @@ static void InitializeMemoryProfile() {
   InternalScopedBuffer<char> filename(4096);
   internal_snprintf(filename.data(), filename.size(), "%s.%d",
       flags()->profile_memory, GetPid());
-  fd_t fd = internal_open(filename.data(), true);
+  fd_t fd = OpenFile(filename.data(), true);
   if (fd == kInvalidFd) {
     Printf("Failed to open memory profile file '%s'\n", &filename[0]);
     Die();
@@ -167,7 +172,7 @@ void MapShadow(uptr addr, uptr size) {
 }
 
 void MapThreadTrace(uptr addr, uptr size) {
-  DPrintf("Mapping trace at %p-%p(0x%zx)\n", addr, addr + size, size);
+  DPrintf("#0: Mapping trace at %p-%p(0x%zx)\n", addr, addr + size, size);
   CHECK_GE(addr, kTraceMemBegin);
   CHECK_LE(addr + size, kTraceMemBegin + kTraceMemSize);
   if (addr != (uptr)MmapFixedNoReserve(addr, size)) {
@@ -182,6 +187,7 @@ void Initialize(ThreadState *thr) {
   if (is_initialized)
     return;
   is_initialized = true;
+  SanitizerToolName = "ThreadSanitizer";
   // Install tool-specific callbacks in sanitizer_common.
   SetCheckFailedCallback(TsanCheckFailed);
 
@@ -239,7 +245,7 @@ void Initialize(ThreadState *thr) {
     Printf("ThreadSanitizer is suspended at startup (pid %d)."
            " Call __tsan_resume().\n",
            GetPid());
-    while (__tsan_resumed == 0);
+    while (__tsan_resumed == 0) {}
   }
 }
 
@@ -254,6 +260,11 @@ int Finalize(ThreadState *thr) {
   // Wait for pending reports.
   ctx->report_mtx.Lock();
   ctx->report_mtx.Unlock();
+
+#ifndef TSAN_GO
+  if (ctx->flags.verbosity)
+    AllocatorPrintStats();
+#endif
 
   ThreadFinalize(thr);
 
@@ -271,6 +282,8 @@ int Finalize(ThreadState *thr) {
     Printf("ThreadSanitizer: missed %d expected races\n",
         ctx->nmissed_expected);
   }
+
+  failed = OnFinalize(failed);
 
   StatAggregate(ctx->stat, thr->stat);
   StatOutput(ctx->stat);
@@ -358,18 +371,6 @@ static inline void HandleRace(ThreadState *thr, u64 *shadow_mem,
 #endif
 }
 
-static inline bool BothReads(Shadow s, int kAccessIsWrite) {
-  return !kAccessIsWrite && !s.is_write();
-}
-
-static inline bool OldIsRWNotWeaker(Shadow old, int kAccessIsWrite) {
-  return old.is_write() || !kAccessIsWrite;
-}
-
-static inline bool OldIsRWWeakerOrEqual(Shadow old, int kAccessIsWrite) {
-  return !old.is_write() || kAccessIsWrite;
-}
-
 static inline bool OldIsInSameSynchEpoch(Shadow old, ThreadState *thr) {
   return old.epoch() >= thr->fast_synch_epoch;
 }
@@ -380,7 +381,7 @@ static inline bool HappensBefore(Shadow old, ThreadState *thr) {
 
 ALWAYS_INLINE
 void MemoryAccessImpl(ThreadState *thr, uptr addr,
-    int kAccessSizeLog, bool kAccessIsWrite,
+    int kAccessSizeLog, bool kAccessIsWrite, bool kIsAtomic,
     u64 *shadow_mem, Shadow cur) {
   StatInc(thr, StatMop);
   StatInc(thr, kAccessIsWrite ? StatMopWrite : StatMopRead);
@@ -454,7 +455,7 @@ void MemoryAccessImpl(ThreadState *thr, uptr addr,
 
 ALWAYS_INLINE
 void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
-    int kAccessSizeLog, bool kAccessIsWrite) {
+    int kAccessSizeLog, bool kAccessIsWrite, bool kIsAtomic) {
   u64 *shadow_mem = (u64*)MemToShadow(addr);
   DPrintf2("#%d: MemoryAccess: @%p %p size=%d"
       " is_write=%d shadow_mem=%p {%zx, %zx, %zx, %zx}\n",
@@ -481,12 +482,13 @@ void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
   Shadow cur(fast_state);
   cur.SetAddr0AndSizeLog(addr & 7, kAccessSizeLog);
   cur.SetWrite(kAccessIsWrite);
+  cur.SetAtomic(kIsAtomic);
 
   // We must not store to the trace if we do not store to the shadow.
   // That is, this call must be moved somewhere below.
   TraceAddEvent(thr, fast_state, EventTypeMop, pc);
 
-  MemoryAccessImpl(thr, addr, kAccessSizeLog, kAccessIsWrite,
+  MemoryAccessImpl(thr, addr, kAccessSizeLog, kAccessIsWrite, kIsAtomic,
       shadow_mem, cur);
 }
 
@@ -533,7 +535,10 @@ void MemoryResetRange(ThreadState *thr, uptr pc, uptr addr, uptr size) {
 }
 
 void MemoryRangeFreed(ThreadState *thr, uptr pc, uptr addr, uptr size) {
+  CHECK_EQ(thr->is_freeing, false);
+  thr->is_freeing = true;
   MemoryAccessRange(thr, pc, addr, size, true);
+  thr->is_freeing = false;
   Shadow s(thr->fast_state);
   s.ClearIgnoreBit();
   s.MarkAsFreed();
