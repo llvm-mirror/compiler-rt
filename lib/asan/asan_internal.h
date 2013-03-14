@@ -15,6 +15,7 @@
 #define ASAN_INTERNAL_H
 
 #include "asan_flags.h"
+#include "asan_interface_internal.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
@@ -53,7 +54,7 @@
 
 #define ASAN_POSIX (ASAN_LINUX || ASAN_MAC)
 
-#if __has_feature(address_sanitizer)
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
 # error "The AddressSanitizer run-time should not be"
         " instrumented by AddressSanitizer"
 #endif
@@ -83,11 +84,15 @@
 // If set, values like allocator chunk size, as well as defaults for some flags
 // will be changed towards less memory overhead.
 #ifndef ASAN_LOW_MEMORY
-# ifdef ASAN_ANDROID
+#if SANITIZER_WORDSIZE == 32
 #  define ASAN_LOW_MEMORY 1
-# else
+#else
 #  define ASAN_LOW_MEMORY 0
 # endif
+#endif
+
+#ifndef ASAN_USE_PREINIT_ARRAY
+# define ASAN_USE_PREINIT_ARRAY (ASAN_LINUX && !ASAN_ANDROID)
 #endif
 
 // All internal functions in asan reside inside the __asan namespace
@@ -116,7 +121,7 @@ bool AsanInterceptsSignal(int signum);
 void SetAlternateSignalStack();
 void UnsetAlternateSignalStack();
 void InstallSignalHandlers();
-void ClearShadowMemoryForContext(void *context);
+void ReadContextStack(void *context, uptr *stack, uptr *ssize);
 void AsanPlatformThreadInit();
 
 // Wrapper for TLS/TSD.

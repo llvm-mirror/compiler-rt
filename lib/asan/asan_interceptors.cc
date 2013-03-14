@@ -22,43 +22,38 @@
 #include "asan_stats.h"
 #include "asan_thread_registry.h"
 #include "interception/interception.h"
-#include "sanitizer/asan_interface.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
 namespace __asan {
 
-// Instruments read/write access to a single byte in memory.
-// On error calls __asan_report_error, which aborts the program.
-#define ACCESS_ADDRESS(address, isWrite)   do {         \
-  if (!AddrIsInMem(address) || AddressIsPoisoned(address)) {                \
-    GET_CURRENT_PC_BP_SP;                               \
-    __asan_report_error(pc, bp, sp, address, isWrite, /* access_size */ 1); \
-  } \
-} while (0)
+// Return true if we can quickly decide that the region is unpoisoned.
+static inline bool QuickCheckForUnpoisonedRegion(uptr beg, uptr size) {
+  if (size == 0) return true;
+  if (size <= 32)
+    return !AddressIsPoisoned(beg) &&
+           !AddressIsPoisoned(beg + size - 1) &&
+           !AddressIsPoisoned(beg + size / 2);
+  return false;
+}
 
 // We implement ACCESS_MEMORY_RANGE, ASAN_READ_RANGE,
 // and ASAN_WRITE_RANGE as macro instead of function so
 // that no extra frames are created, and stack trace contains
 // relevant information only.
+// We check all shadow bytes.
+#define ACCESS_MEMORY_RANGE(offset, size, isWrite) do {                 \
+    uptr __offset = (uptr)(offset);                                     \
+    uptr __size = (uptr)(size);                                         \
+    uptr __bad = 0;                                                     \
+    if (!QuickCheckForUnpoisonedRegion(__offset, __size) &&             \
+        (__bad = __asan_region_is_poisoned(__offset, __size))) {        \
+      GET_CURRENT_PC_BP_SP;                                             \
+      __asan_report_error(pc, bp, sp, __bad, isWrite, __size);          \
+    }                                                                   \
+  } while (0)
 
-// Instruments read/write access to a memory range.
-// More complex implementation is possible, for now just
-// checking the first and the last byte of a range.
-#define ACCESS_MEMORY_RANGE(offset, size, isWrite) do { \
-  if (size > 0) { \
-    uptr ptr = (uptr)(offset); \
-    ACCESS_ADDRESS(ptr, isWrite); \
-    ACCESS_ADDRESS(ptr + (size) - 1, isWrite); \
-  } \
-} while (0)
-
-#define ASAN_READ_RANGE(offset, size) do { \
-  ACCESS_MEMORY_RANGE(offset, size, false); \
-} while (0)
-
-#define ASAN_WRITE_RANGE(offset, size) do { \
-  ACCESS_MEMORY_RANGE(offset, size, true); \
-} while (0)
+#define ASAN_READ_RANGE(offset, size) ACCESS_MEMORY_RANGE(offset, size, false)
+#define ASAN_WRITE_RANGE(offset, size) ACCESS_MEMORY_RANGE(offset, size, true);
 
 // Behavior of functions like "memcpy" or "strcpy" is undefined
 // if memory intervals overlap. We report error in this case.
@@ -71,7 +66,7 @@ static inline bool RangesOverlap(const char *offset1, uptr length1,
   const char *offset1 = (const char*)_offset1; \
   const char *offset2 = (const char*)_offset2; \
   if (RangesOverlap(offset1, length1, offset2, length2)) { \
-    GET_STACK_TRACE_HERE(kStackTraceMax); \
+    GET_STACK_TRACE_FATAL_HERE; \
     ReportStringFunctionMemoryRangesOverlap(name, offset1, length1, \
                                             offset2, length2, &stack); \
   } \
@@ -93,10 +88,30 @@ static inline uptr MaybeRealStrnlen(const char *s, uptr maxlen) {
   return internal_strnlen(s, maxlen);
 }
 
+void SetThreadName(const char *name) {
+  AsanThread *t = asanThreadRegistry().GetCurrent();
+  if (t)
+    t->summary()->set_name(name);
+}
+
 }  // namespace __asan
 
 // ---------------------- Wrappers ---------------- {{{1
 using namespace __asan;  // NOLINT
+
+#define COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, size) \
+  ASAN_WRITE_RANGE(ptr, size)
+#define COMMON_INTERCEPTOR_READ_RANGE(ctx, ptr, size) ASAN_READ_RANGE(ptr, size)
+#define COMMON_INTERCEPTOR_ENTER(ctx, func, ...) \
+  do {                                           \
+    ctx = 0;                                     \
+    (void)ctx;                                   \
+    ENSURE_ASAN_INITED();                        \
+  } while (false)
+#define COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd) do { } while (false)
+#define COMMON_INTERCEPTOR_FD_RELEASE(ctx, fd) do { } while (false)
+#define COMMON_INTERCEPTOR_SET_THREAD_NAME(ctx, name) SetThreadName(name)
+#include "sanitizer_common/sanitizer_common_interceptors.inc"
 
 static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
   AsanThread *t = (AsanThread*)arg;
@@ -107,7 +122,7 @@ static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
 #if ASAN_INTERCEPT_PTHREAD_CREATE
 INTERCEPTOR(int, pthread_create, void *thread,
     void *attr, void *(*start_routine)(void*), void *arg) {
-  GET_STACK_TRACE_HERE(kStackTraceMax);
+  GET_STACK_TRACE_THREAD;
   u32 current_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
   AsanThread *t = AsanThread::Create(current_tid, start_routine, arg, &stack);
   asanThreadRegistry().RegisterThread(t);
@@ -137,6 +152,18 @@ DEFINE_REAL(int, sigaction, int signum, const struct sigaction *act,
 #endif  // ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
 
 #if ASAN_INTERCEPT_SWAPCONTEXT
+static void ClearShadowMemoryForContextStack(uptr stack, uptr ssize) {
+  // Align to page size.
+  uptr PageSize = GetPageSizeCached();
+  uptr bottom = stack & ~(PageSize - 1);
+  ssize += stack - bottom;
+  ssize = RoundUpTo(ssize, PageSize);
+  static const uptr kMaxSaneContextStackSize = 1 << 22;  // 4 Mb
+  if (ssize && ssize <= kMaxSaneContextStackSize) {
+    PoisonShadow(bottom, ssize, 0);
+  }
+}
+
 INTERCEPTOR(int, swapcontext, struct ucontext_t *oucp,
             struct ucontext_t *ucp) {
   static bool reported_warning = false;
@@ -147,16 +174,18 @@ INTERCEPTOR(int, swapcontext, struct ucontext_t *oucp,
   }
   // Clear shadow memory for new context (it may share stack
   // with current context).
-  ClearShadowMemoryForContext(ucp);
+  uptr stack, ssize;
+  ReadContextStack(ucp, &stack, &ssize);
+  ClearShadowMemoryForContextStack(stack, ssize);
   int res = REAL(swapcontext)(oucp, ucp);
   // swapcontext technically does not return, but program may swap context to
   // "oucp" later, that would look as if swapcontext() returned 0.
   // We need to clear shadow for ucp once again, as it may be in arbitrary
   // state.
-  ClearShadowMemoryForContext(ucp);
+  ClearShadowMemoryForContextStack(stack, ssize);
   return res;
 }
-#endif
+#endif  // ASAN_INTERCEPT_SWAPCONTEXT
 
 INTERCEPTOR(void, longjmp, void *env, int val) {
   __asan_handle_no_return();
@@ -174,25 +203,6 @@ INTERCEPTOR(void, _longjmp, void *env, int val) {
 INTERCEPTOR(void, siglongjmp, void *env, int val) {
   __asan_handle_no_return();
   REAL(siglongjmp)(env, val);
-}
-#endif
-
-#if ASAN_INTERCEPT_PRCTL
-#define PR_SET_NAME 15
-INTERCEPTOR(int, prctl, int option,
-            unsigned long arg2, unsigned long arg3,  // NOLINT
-            unsigned long arg4, unsigned long arg5) {  // NOLINT
-  int res = REAL(prctl(option, arg2, arg3, arg4, arg5));
-  if (option == PR_SET_NAME) {
-    AsanThread *t = asanThreadRegistry().GetCurrent();
-    if (t) {
-      char buff[17];
-      internal_strncpy(buff, (char*)arg2, 16);
-      buff[16] = 0;
-      t->summary()->set_name(buff);
-    }
-  }
-  return res;
 }
 #endif
 
@@ -249,18 +259,29 @@ static inline int CharCaseCmp(unsigned char c1, unsigned char c2) {
 INTERCEPTOR(int, memcmp, const void *a1, const void *a2, uptr size) {
   if (!asan_inited) return internal_memcmp(a1, a2, size);
   ENSURE_ASAN_INITED();
-  unsigned char c1 = 0, c2 = 0;
-  const unsigned char *s1 = (const unsigned char*)a1;
-  const unsigned char *s2 = (const unsigned char*)a2;
-  uptr i;
-  for (i = 0; i < size; i++) {
-    c1 = s1[i];
-    c2 = s2[i];
-    if (c1 != c2) break;
+  if (flags()->replace_intrin) {
+    if (flags()->strict_memcmp) {
+      // Check the entire regions even if the first bytes of the buffers are
+      // different.
+      ASAN_READ_RANGE(a1, size);
+      ASAN_READ_RANGE(a2, size);
+      // Fallthrough to REAL(memcmp) below.
+    } else {
+      unsigned char c1 = 0, c2 = 0;
+      const unsigned char *s1 = (const unsigned char*)a1;
+      const unsigned char *s2 = (const unsigned char*)a2;
+      uptr i;
+      for (i = 0; i < size; i++) {
+        c1 = s1[i];
+        c2 = s2[i];
+        if (c1 != c2) break;
+      }
+      ASAN_READ_RANGE(s1, Min(i + 1, size));
+      ASAN_READ_RANGE(s2, Min(i + 1, size));
+      return CharCmp(c1, c2);
+    }
   }
-  ASAN_READ_RANGE(s1, Min(i + 1, size));
-  ASAN_READ_RANGE(s2, Min(i + 1, size));
-  return CharCmp(c1, c2);
+  return REAL(memcmp(a1, a2, size));
 }
 
 INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
@@ -280,13 +301,9 @@ INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
     ASAN_READ_RANGE(from, size);
     ASAN_WRITE_RANGE(to, size);
   }
-#if MAC_INTERPOSE_FUNCTIONS
   // Interposing of resolver functions is broken on Mac OS 10.7 and 10.8.
   // See also http://code.google.com/p/address-sanitizer/issues/detail?id=116.
   return internal_memcpy(to, from, size);
-#else
-  return REAL(memcpy)(to, from, size);
-#endif
 }
 
 INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) {
@@ -299,13 +316,9 @@ INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) {
     ASAN_READ_RANGE(from, size);
     ASAN_WRITE_RANGE(to, size);
   }
-#if MAC_INTERPOSE_FUNCTIONS
   // Interposing of resolver functions is broken on Mac OS 10.7 and 10.8.
   // See also http://code.google.com/p/address-sanitizer/issues/detail?id=116.
   return internal_memmove(to, from, size);
-#else
-  return REAL(memmove)(to, from, size);
-#endif
 }
 
 INTERCEPTOR(void*, memset, void *block, int c, uptr size) {
@@ -342,7 +355,12 @@ INTERCEPTOR(char*, strchr, const char *str, int c) {
 INTERCEPTOR(char*, index, const char *string, int c)
   ALIAS(WRAPPER_NAME(strchr));
 # else
-DEFINE_REAL(char*, index, const char *string, int c)
+#  if defined(__APPLE__)
+DECLARE_REAL(char*, index, const char *string, int c)
+OVERRIDE_FUNCTION(index, strchr);
+#  else
+DEFINE_REAL(char*, index, const char *string, int c);
+#  endif
 # endif
 #endif  // ASAN_INTERCEPT_INDEX
 
@@ -403,7 +421,7 @@ INTERCEPTOR(int, strcmp, const char *s1, const char *s2) {
 }
 
 INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
-#if MAC_INTERPOSE_FUNCTIONS
+#if defined(__APPLE__)
   if (!asan_inited) return REAL(strcpy)(to, from);  // NOLINT
 #endif
   // strcpy is called from malloc_default_purgeable_zone()
@@ -423,7 +441,7 @@ INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
 
 #if ASAN_INTERCEPT_STRDUP
 INTERCEPTOR(char*, strdup, const char *s) {
-#if MAC_INTERPOSE_FUNCTIONS
+#if defined(__APPLE__)
   // FIXME: because internal_strdup() uses InternalAlloc(), which currently
   // just calls malloc() on Mac, we can't use internal_strdup() with the
   // dynamic runtime. We can remove the call to REAL(strdup) once InternalAlloc
@@ -564,7 +582,7 @@ INTERCEPTOR(long, strtol, const char *nptr,  // NOLINT
 }
 
 INTERCEPTOR(int, atoi, const char *nptr) {
-#if MAC_INTERPOSE_FUNCTIONS
+#if defined(__APPLE__)
   if (!asan_inited) return REAL(atoi)(nptr);
 #endif
   ENSURE_ASAN_INITED();
@@ -583,7 +601,7 @@ INTERCEPTOR(int, atoi, const char *nptr) {
 }
 
 INTERCEPTOR(long, atol, const char *nptr) {  // NOLINT
-#if MAC_INTERPOSE_FUNCTIONS
+#if defined(__APPLE__)
   if (!asan_inited) return REAL(atol)(nptr);
 #endif
   ENSURE_ASAN_INITED();
@@ -642,7 +660,7 @@ INTERCEPTOR_WINAPI(DWORD, CreateThread,
                    void* security, uptr stack_size,
                    DWORD (__stdcall *start_routine)(void*), void* arg,
                    DWORD flags, void* tid) {
-  GET_STACK_TRACE_HERE(kStackTraceMax);
+  GET_STACK_TRACE_THREAD;
   u32 current_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
   AsanThread *t = AsanThread::Create(current_tid, start_routine, arg, &stack);
   asanThreadRegistry().RegisterThread(t);
@@ -664,21 +682,17 @@ void InitializeAsanInterceptors() {
   static bool was_called_once;
   CHECK(was_called_once == false);
   was_called_once = true;
-#if MAC_INTERPOSE_FUNCTIONS
+#if defined(__APPLE__)
   return;
-#endif
+#else
+  SANITIZER_COMMON_INTERCEPTORS_INIT;
+
   // Intercept mem* functions.
   ASAN_INTERCEPT_FUNC(memcmp);
   ASAN_INTERCEPT_FUNC(memmove);
   ASAN_INTERCEPT_FUNC(memset);
   if (PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE) {
     ASAN_INTERCEPT_FUNC(memcpy);
-  } else {
-#if !MAC_INTERPOSE_FUNCTIONS
-    // If we're using dynamic interceptors on Mac, these two are just plain
-    // functions.
-    internal_memcpy(&REAL(memcpy), &REAL(memmove), sizeof(REAL(memmove)));
-#endif
   }
 
   // Intercept str* functions.
@@ -700,12 +714,8 @@ void InitializeAsanInterceptors() {
 #if ASAN_INTERCEPT_STRNLEN
   ASAN_INTERCEPT_FUNC(strnlen);
 #endif
-#if ASAN_INTERCEPT_INDEX
-# if ASAN_USE_ALIAS_ATTRIBUTE_FOR_INDEX
+#if ASAN_INTERCEPT_INDEX && ASAN_USE_ALIAS_ATTRIBUTE_FOR_INDEX
   ASAN_INTERCEPT_FUNC(index);
-# else
-  CHECK(OVERRIDE_FUNCTION(index, WRAP(strchr)));
-# endif
 #endif
 
   ASAN_INTERCEPT_FUNC(atoi);
@@ -739,9 +749,6 @@ void InitializeAsanInterceptors() {
 #if ASAN_INTERCEPT_SIGLONGJMP
   ASAN_INTERCEPT_FUNC(siglongjmp);
 #endif
-#if ASAN_INTERCEPT_PRCTL
-  ASAN_INTERCEPT_FUNC(prctl);
-#endif
 
   // Intercept exception handling functions.
 #if ASAN_INTERCEPT___CXA_THROW
@@ -758,14 +765,10 @@ void InitializeAsanInterceptors() {
   InitializeWindowsInterceptors();
 #endif
 
-  // Some Mac-specific interceptors.
-#if defined(__APPLE__)
-  InitializeMacInterceptors();
-#endif
-
   if (flags()->verbosity > 0) {
     Report("AddressSanitizer: libc interceptors initialized\n");
   }
+#endif  // __APPLE__
 }
 
 }  // namespace __asan

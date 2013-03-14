@@ -4,13 +4,14 @@ ulimit -s 8192
 set -e # fail on any error
 
 ROOTDIR=$(dirname $0)/..
+BLACKLIST=$ROOTDIR/lit_tests/Helpers/blacklist.txt
 
 # Assuming clang is in path.
 CC=clang
 CXX=clang++
 
 # TODO: add testing for all of -O0...-O3
-CFLAGS="-fsanitize=thread -fPIE -O1 -g -fno-builtin -Wall"
+CFLAGS="-fsanitize=thread -fsanitize-blacklist=$BLACKLIST -fPIE -O1 -g -fno-builtin -Wall"
 LDFLAGS="-pie -lpthread -ldl $ROOTDIR/rtl/libtsan.a"
 
 test_file() {
@@ -21,10 +22,7 @@ test_file() {
   EXE=$SRC.exe
   $COMPILER $SRC $CFLAGS -c -o $OBJ
   $COMPILER $OBJ $LDFLAGS -o $EXE
-  RES=$(TSAN_OPTIONS="atexit_sleep_ms=0" $EXE 2>&1 || true)
-  if [ "$3" != "" ]; then
-    printf "%s\n" "$RES"
-  fi
+  RES=$($EXE 2>&1 || true)
   printf "%s\n" "$RES" | FileCheck $SRC
   if [ "$3" == "" ]; then
     rm -f $EXE $OBJ

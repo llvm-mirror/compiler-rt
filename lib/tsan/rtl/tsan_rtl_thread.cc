@@ -156,6 +156,7 @@ int ThreadCreate(ThreadState *thr, uptr pc, uptr uid, bool detached) {
     thr->clock.release(&tctx->sync);
     StatInc(thr, StatSyncRelease);
     tctx->creation_stack.ObtainCurrent(thr, pc);
+    tctx->creation_tid = thr->tid;
   }
   return tid;
 }
@@ -207,6 +208,9 @@ void ThreadStart(ThreadState *thr, int tid, uptr os_id) {
       kInitStackSize * sizeof(uptr));
   thr->shadow_stack_pos = thr->shadow_stack;
   thr->shadow_stack_end = thr->shadow_stack + kInitStackSize;
+#endif
+#ifndef TSAN_GO
+  AllocatorThreadStart(thr);
 #endif
   tctx->thr = thr;
   thr->fast_synch_epoch = tctx->epoch0;
@@ -268,7 +272,7 @@ void ThreadFinish(ThreadState *thr) {
   tctx->epoch1 = thr->fast_state.epoch();
 
 #ifndef TSAN_GO
-  AlloctorThreadFinish(thr);
+  AllocatorThreadFinish(thr);
 #endif
   thr->~ThreadState();
   StatAggregate(ctx->stat, thr->stat);
@@ -393,7 +397,7 @@ void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr,
     Shadow cur(fast_state);
     cur.SetWrite(is_write);
     cur.SetAddr0AndSizeLog(addr & (kShadowCell - 1), kAccessSizeLog);
-    MemoryAccessImpl(thr, addr, kAccessSizeLog, is_write,
+    MemoryAccessImpl(thr, addr, kAccessSizeLog, is_write, false,
         shadow_mem, cur);
   }
   if (unaligned)
@@ -404,7 +408,7 @@ void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr,
     Shadow cur(fast_state);
     cur.SetWrite(is_write);
     cur.SetAddr0AndSizeLog(0, kAccessSizeLog);
-    MemoryAccessImpl(thr, addr, kAccessSizeLog, is_write,
+    MemoryAccessImpl(thr, addr, kAccessSizeLog, is_write, false,
         shadow_mem, cur);
     shadow_mem += kShadowCnt;
   }
@@ -414,24 +418,30 @@ void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr,
     Shadow cur(fast_state);
     cur.SetWrite(is_write);
     cur.SetAddr0AndSizeLog(addr & (kShadowCell - 1), kAccessSizeLog);
-    MemoryAccessImpl(thr, addr, kAccessSizeLog, is_write,
+    MemoryAccessImpl(thr, addr, kAccessSizeLog, is_write, false,
         shadow_mem, cur);
   }
 }
 
-void MemoryRead1Byte(ThreadState *thr, uptr pc, uptr addr) {
-  MemoryAccess(thr, pc, addr, 0, 0);
-}
+void MemoryAccessRangeStep(ThreadState *thr, uptr pc, uptr addr,
+    uptr size, uptr step, bool is_write) {
+  if (size == 0)
+    return;
+  FastState fast_state = thr->fast_state;
+  if (fast_state.GetIgnoreBit())
+    return;
+  StatInc(thr, StatMopRange);
+  fast_state.IncrementEpoch();
+  thr->fast_state = fast_state;
+  TraceAddEvent(thr, fast_state, EventTypeMop, pc);
 
-void MemoryWrite1Byte(ThreadState *thr, uptr pc, uptr addr) {
-  MemoryAccess(thr, pc, addr, 0, 1);
-}
-
-void MemoryRead8Byte(ThreadState *thr, uptr pc, uptr addr) {
-  MemoryAccess(thr, pc, addr, 3, 0);
-}
-
-void MemoryWrite8Byte(ThreadState *thr, uptr pc, uptr addr) {
-  MemoryAccess(thr, pc, addr, 3, 1);
+  for (uptr addr_end = addr + size; addr < addr_end; addr += step) {
+    u64 *shadow_mem = (u64*)MemToShadow(addr);
+    Shadow cur(fast_state);
+    cur.SetWrite(is_write);
+    cur.SetAddr0AndSizeLog(addr & (kShadowCell - 1), kSizeLog1);
+    MemoryAccessImpl(thr, addr, kSizeLog1, is_write, false,
+        shadow_mem, cur);
+  }
 }
 }  // namespace __tsan

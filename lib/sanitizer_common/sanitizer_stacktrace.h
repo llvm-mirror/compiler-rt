@@ -44,16 +44,22 @@ struct StackTrace {
   }
 
   void FastUnwindStack(uptr pc, uptr bp, uptr stack_top, uptr stack_bottom);
+  void SlowUnwindStack(uptr pc, uptr max_depth);
 
   void PopStackFrames(uptr count);
 
   static uptr GetCurrentPc();
+  static uptr GetPreviousInstructionPc(uptr pc);
 
   static uptr CompressStack(StackTrace *stack,
                             u32 *compressed, uptr size);
   static void UncompressStack(StackTrace *stack,
                               u32 *compressed, uptr size);
 };
+
+
+const char *StripPathPrefix(const char *filepath,
+                            const char *strip_file_prefix);
 
 }  // namespace __sanitizer
 

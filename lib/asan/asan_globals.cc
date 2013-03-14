@@ -13,13 +13,12 @@
 //===----------------------------------------------------------------------===//
 #include "asan_interceptors.h"
 #include "asan_internal.h"
-#include "asan_lock.h"
 #include "asan_mapping.h"
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_stats.h"
 #include "asan_thread.h"
-#include "sanitizer/asan_interface.h"
+#include "sanitizer_common/sanitizer_mutex.h"
 
 namespace __asan {
 
@@ -30,46 +29,35 @@ struct ListOfGlobals {
   ListOfGlobals *next;
 };
 
-static AsanLock mu_for_globals(LINKER_INITIALIZED);
+static BlockingMutex mu_for_globals(LINKER_INITIALIZED);
 static LowLevelAllocator allocator_for_globals;
 static ListOfGlobals *list_of_all_globals;
 static ListOfGlobals *list_of_dynamic_init_globals;
 
 void PoisonRedZones(const Global &g)  {
-  uptr shadow_rz_size = kGlobalAndStackRedzone >> SHADOW_SCALE;
-  CHECK(shadow_rz_size == 1 || shadow_rz_size == 2 || shadow_rz_size == 4);
-  // full right redzone
-  uptr g_aligned_size = kGlobalAndStackRedzone *
-      ((g.size + kGlobalAndStackRedzone - 1) / kGlobalAndStackRedzone);
-  PoisonShadow(g.beg + g_aligned_size,
-               kGlobalAndStackRedzone, kAsanGlobalRedzoneMagic);
-  if ((g.size % kGlobalAndStackRedzone) != 0) {
+  uptr aligned_size = RoundUpTo(g.size, SHADOW_GRANULARITY);
+  PoisonShadow(g.beg + aligned_size, g.size_with_redzone - aligned_size,
+               kAsanGlobalRedzoneMagic);
+  if (g.size != aligned_size) {
     // partial right redzone
-    u64 g_aligned_down_size = kGlobalAndStackRedzone *
-        (g.size / kGlobalAndStackRedzone);
-    CHECK(g_aligned_down_size == g_aligned_size - kGlobalAndStackRedzone);
-    PoisonShadowPartialRightRedzone(g.beg + g_aligned_down_size,
-                                    g.size % kGlobalAndStackRedzone,
-                                    kGlobalAndStackRedzone,
-                                    kAsanGlobalRedzoneMagic);
+    PoisonShadowPartialRightRedzone(
+        g.beg + RoundDownTo(g.size, SHADOW_GRANULARITY),
+        g.size % SHADOW_GRANULARITY,
+        SHADOW_GRANULARITY,
+        kAsanGlobalRedzoneMagic);
   }
 }
 
-static uptr GetAlignedSize(uptr size) {
-  return ((size + kGlobalAndStackRedzone - 1) / kGlobalAndStackRedzone)
-      * kGlobalAndStackRedzone;
-}
-
-bool DescribeAddressIfGlobal(uptr addr) {
+bool DescribeAddressIfGlobal(uptr addr, uptr size) {
   if (!flags()->report_globals) return false;
-  ScopedLock lock(&mu_for_globals);
+  BlockingMutexLock lock(&mu_for_globals);
   bool res = false;
   for (ListOfGlobals *l = list_of_all_globals; l; l = l->next) {
     const Global &g = *l->g;
     if (flags()->report_globals >= 2)
       Report("Search Global: beg=%p size=%zu name=%s\n",
              (void*)g.beg, g.size, (char*)g.name);
-    res |= DescribeAddressRelativeToGlobal(addr, g);
+    res |= DescribeAddressRelativeToGlobal(addr, size, g);
   }
   return res;
 }
@@ -142,23 +130,10 @@ static void UnpoisonGlobal(const Global *g) {
 // ---------------------- Interface ---------------- {{{1
 using namespace __asan;  // NOLINT
 
-// Register one global with a default redzone.
-void __asan_register_global(uptr addr, uptr size,
-                            const char *name) {
-  if (!flags()->report_globals) return;
-  ScopedLock lock(&mu_for_globals);
-  Global *g = (Global *)allocator_for_globals.Allocate(sizeof(Global));
-  g->beg = addr;
-  g->size = size;
-  g->size_with_redzone = GetAlignedSize(size) + kGlobalAndStackRedzone;
-  g->name = name;
-  RegisterGlobal(g);
-}
-
 // Register an array of globals.
 void __asan_register_globals(__asan_global *globals, uptr n) {
   if (!flags()->report_globals) return;
-  ScopedLock lock(&mu_for_globals);
+  BlockingMutexLock lock(&mu_for_globals);
   for (uptr i = 0; i < n; i++) {
     RegisterGlobal(&globals[i]);
   }
@@ -168,7 +143,7 @@ void __asan_register_globals(__asan_global *globals, uptr n) {
 // We must do this when a shared objects gets dlclosed.
 void __asan_unregister_globals(__asan_global *globals, uptr n) {
   if (!flags()->report_globals) return;
-  ScopedLock lock(&mu_for_globals);
+  BlockingMutexLock lock(&mu_for_globals);
   for (uptr i = 0; i < n; i++) {
     UnregisterGlobal(&globals[i]);
   }
@@ -181,7 +156,7 @@ void __asan_unregister_globals(__asan_global *globals, uptr n) {
 void __asan_before_dynamic_init(uptr first_addr, uptr last_addr) {
   if (!flags()->check_initialization_order) return;
   CHECK(list_of_dynamic_init_globals);
-  ScopedLock lock(&mu_for_globals);
+  BlockingMutexLock lock(&mu_for_globals);
   bool from_current_tu = false;
   // The list looks like:
   // a => ... => b => last_addr => ... => first_addr => c => ...
@@ -202,7 +177,7 @@ void __asan_before_dynamic_init(uptr first_addr, uptr last_addr) {
 // TU are poisoned.  It simply unpoisons all dynamically initialized globals.
 void __asan_after_dynamic_init() {
   if (!flags()->check_initialization_order) return;
-  ScopedLock lock(&mu_for_globals);
+  BlockingMutexLock lock(&mu_for_globals);
   for (ListOfGlobals *l = list_of_dynamic_init_globals; l; l = l->next)
     UnpoisonGlobal(l->g);
 }
