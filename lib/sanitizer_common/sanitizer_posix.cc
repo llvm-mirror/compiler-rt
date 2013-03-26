@@ -11,7 +11,9 @@
 // run-time libraries and implements POSIX-specific functions from
 // sanitizer_libc.h.
 //===----------------------------------------------------------------------===//
-#if defined(__linux__) || defined(__APPLE__)
+
+#include "sanitizer_platform.h"
+#if SANITIZER_LINUX || SANITIZER_MAC
 
 #include "sanitizer_common.h"
 #include "sanitizer_libc.h"
@@ -152,7 +154,8 @@ bool MemoryRangeIsAvailable(uptr range_start, uptr range_end) {
   MemoryMappingLayout procmaps;
   uptr start, end;
   while (procmaps.Next(&start, &end,
-                       /*offset*/0, /*filename*/0, /*filename_size*/0)) {
+                       /*offset*/0, /*filename*/0, /*filename_size*/0,
+                       /*protection*/0)) {
     if (!IntervalsAreSeparate(start, end, range_start, range_end))
       return false;
   }
@@ -166,7 +169,7 @@ void DumpProcessMap() {
   char *filename = (char*)MmapOrDie(kBufSize, __FUNCTION__);
   Report("Process memory map follows:\n");
   while (proc_maps.Next(&start, &end, /* file_offset */0,
-                        filename, kBufSize)) {
+                        filename, kBufSize, /* protection */0)) {
     Printf("\t%p-%p\t%s\n", (void*)start, (void*)end, filename);
   }
   Report("End of process memory map.\n");

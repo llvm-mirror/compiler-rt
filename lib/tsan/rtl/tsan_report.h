@@ -20,6 +20,7 @@ namespace __tsan {
 
 enum ReportType {
   ReportTypeRace,
+  ReportTypeVptrRace,
   ReportTypeUseAfterFree,
   ReportTypeThreadLeak,
   ReportTypeMutexDestroyLocked,
@@ -101,6 +102,7 @@ class ReportDesc {
   Vector<ReportMutex*> mutexes;
   Vector<ReportThread*> threads;
   ReportStack *sleep;
+  int count;
 
   ReportDesc();
   ~ReportDesc();

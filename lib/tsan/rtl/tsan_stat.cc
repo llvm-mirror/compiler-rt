@@ -38,6 +38,8 @@ void StatOutput(u64 *stat) {
   name[StatMop8]                         = "            size 8                ";
   name[StatMopSame]                      = "  Including same                  ";
   name[StatMopRange]                     = "  Including range                 ";
+  name[StatMopRodata]                    = "  Including .rodata               ";
+  name[StatMopRangeRodata]               = "  Including .rodata range         ";
   name[StatShadowProcessed]              = "Shadow processed                  ";
   name[StatShadowZero]                   = "  Including empty                 ";
   name[StatShadowNonZero]                = "  Including non empty             ";
@@ -105,6 +107,7 @@ void StatOutput(u64 *stat) {
   name[StatInt_realloc]                  = "  realloc                         ";
   name[StatInt_free]                     = "  free                            ";
   name[StatInt_cfree]                    = "  cfree                           ";
+  name[StatInt_malloc_usable_size]       = "  malloc_usable_size              ";
   name[StatInt_mmap]                     = "  mmap                            ";
   name[StatInt_mmap64]                   = "  mmap64                          ";
   name[StatInt_munmap]                   = "  munmap                          ";
@@ -239,6 +242,8 @@ void StatOutput(u64 *stat) {
   name[StatInt_fclose]                   = "  fclose                          ";
   name[StatInt_fread]                    = "  fread                           ";
   name[StatInt_fwrite]                   = "  fwrite                          ";
+  name[StatInt_fflush]                   = "  fflush                          ";
+  name[StatInt_abort]                    = "  abort                           ";
   name[StatInt_puts]                     = "  puts                            ";
   name[StatInt_rmdir]                    = "  rmdir                           ";
   name[StatInt_opendir]                  = "  opendir                         ";
@@ -246,6 +251,10 @@ void StatOutput(u64 *stat) {
   name[StatInt_epoll_wait]               = "  epoll_wait                      ";
   name[StatInt_poll]                     = "  poll                            ";
   name[StatInt_sigaction]                = "  sigaction                       ";
+  name[StatInt_signal]                   = "  signal                          ";
+  name[StatInt_raise]                    = "  raise                           ";
+  name[StatInt_kill]                     = "  kill                            ";
+  name[StatInt_pthread_kill]             = "  pthread_kill                    ";
   name[StatInt_sleep]                    = "  sleep                           ";
   name[StatInt_usleep]                   = "  usleep                          ";
   name[StatInt_nanosleep]                = "  nanosleep                       ";
@@ -273,6 +282,9 @@ void StatOutput(u64 *stat) {
   name[StatInt_ctime_r]                  = "  ctime_r                         ";
   name[StatInt_asctime]                  = "  asctime                         ";
   name[StatInt_asctime_r]                = "  asctime_r                       ";
+  name[StatInt_frexp]                    = "  frexp                           ";
+  name[StatInt_frexpf]                   = "  frexpf                          ";
+  name[StatInt_frexpl]                   = "  frexpl                          ";
 
   name[StatAnnotation]                   = "Dynamic annotations               ";
   name[StatAnnotateHappensBefore]        = "  HappensBefore                   ";
@@ -282,6 +294,7 @@ void StatOutput(u64 *stat) {
   name[StatAnnotateMutexIsNotPHB]        = "  MutexIsNotPHB                   ";
   name[StatAnnotateCondVarWait]          = "  CondVarWait                     ";
   name[StatAnnotateRWLockCreate]         = "  RWLockCreate                    ";
+  name[StatAnnotateRWLockCreateStatic]   = "  StatAnnotateRWLockCreateStatic  ";
   name[StatAnnotateRWLockDestroy]        = "  RWLockDestroy                   ";
   name[StatAnnotateRWLockAcquired]       = "  RWLockAcquired                  ";
   name[StatAnnotateRWLockReleased]       = "  RWLockReleased                  ";

@@ -11,7 +11,9 @@
 // run-time libraries and implements linux-specific functions from
 // sanitizer_libc.h.
 //===----------------------------------------------------------------------===//
-#ifdef __linux__
+
+#include "sanitizer_platform.h"
+#if SANITIZER_LINUX
 
 #include "sanitizer_common.h"
 #include "sanitizer_internal_defs.h"
@@ -22,6 +24,7 @@
 #include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -37,9 +40,15 @@
 #include <unistd.h>
 #include <unwind.h>
 
-#if !defined(__ANDROID__) && !defined(ANDROID)
+#if !SANITIZER_ANDROID
 #include <sys/signal.h>
 #endif
+
+// <linux/time.h>
+struct kernel_timeval {
+  long tv_sec;
+  long tv_usec;
+};
 
 // <linux/futex.h> is broken on some linux distributions.
 const int FUTEX_WAIT = 0;
@@ -142,6 +151,10 @@ uptr internal_readlink(const char *path, char *buf, uptr bufsize) {
   return (uptr)syscall(__NR_readlink, path, buf, bufsize);
 }
 
+int internal_unlink(const char *path) {
+  return syscall(__NR_unlink, path);
+}
+
 int internal_sched_yield() {
   return syscall(__NR_sched_yield);
 }
@@ -170,6 +183,12 @@ uptr GetTid() {
   return syscall(__NR_gettid);
 }
 
+u64 NanoTime() {
+  kernel_timeval tv;
+  syscall(__NR_gettimeofday, &tv, 0);
+  return (u64)tv.tv_sec * 1000*1000*1000 + tv.tv_usec * 1000;
+}
+
 void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
                                 uptr *stack_bottom) {
   static const uptr kMaxThreadStackSize = 256 * (1 << 20);  // 256M
@@ -184,7 +203,7 @@ void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
     MemoryMappingLayout proc_maps;
     uptr start, end, offset;
     uptr prev_end = 0;
-    while (proc_maps.Next(&start, &end, &offset, 0, 0)) {
+    while (proc_maps.Next(&start, &end, &offset, 0, 0, /* protection */0)) {
       if ((uptr)&rl < end)
         break;
       prev_end = end;
@@ -381,7 +400,7 @@ static uptr ParseHex(char **str) {
   return x;
 }
 
-static bool IsOnOf(char c, char c1, char c2) {
+static bool IsOneOf(char c, char c1, char c2) {
   return c == c1 || c == c2;
 }
 
@@ -390,7 +409,8 @@ static bool IsDecimal(char c) {
 }
 
 bool MemoryMappingLayout::Next(uptr *start, uptr *end, uptr *offset,
-                               char filename[], uptr filename_size) {
+                               char filename[], uptr filename_size,
+                               uptr *protection) {
   char *last = proc_self_maps_.data + proc_self_maps_.len;
   if (current_ >= last) return false;
   uptr dummy;
@@ -405,10 +425,22 @@ bool MemoryMappingLayout::Next(uptr *start, uptr *end, uptr *offset,
   CHECK_EQ(*current_++, '-');
   *end = ParseHex(&current_);
   CHECK_EQ(*current_++, ' ');
-  CHECK(IsOnOf(*current_++, '-', 'r'));
-  CHECK(IsOnOf(*current_++, '-', 'w'));
-  CHECK(IsOnOf(*current_++, '-', 'x'));
-  CHECK(IsOnOf(*current_++, 's', 'p'));
+  uptr local_protection = 0;
+  CHECK(IsOneOf(*current_, '-', 'r'));
+  if (*current_++ == 'r')
+    local_protection |= kProtectionRead;
+  CHECK(IsOneOf(*current_, '-', 'w'));
+  if (*current_++ == 'w')
+    local_protection |= kProtectionWrite;
+  CHECK(IsOneOf(*current_, '-', 'x'));
+  if (*current_++ == 'x')
+    local_protection |= kProtectionExecute;
+  CHECK(IsOneOf(*current_, 's', 'p'));
+  if (*current_++ == 's')
+    local_protection |= kProtectionShared;
+  if (protection) {
+    *protection = local_protection;
+  }
   CHECK_EQ(*current_++, ' ');
   *offset = ParseHex(&current_);
   CHECK_EQ(*current_++, ' ');
@@ -438,8 +470,10 @@ bool MemoryMappingLayout::Next(uptr *start, uptr *end, uptr *offset,
 // Gets the object name and the offset by walking MemoryMappingLayout.
 bool MemoryMappingLayout::GetObjectNameAndOffset(uptr addr, uptr *offset,
                                                  char filename[],
-                                                 uptr filename_size) {
-  return IterateForObjectNameAndOffset(addr, offset, filename, filename_size);
+                                                 uptr filename_size,
+                                                 uptr *protection) {
+  return IterateForObjectNameAndOffset(addr, offset, filename, filename_size,
+                                       protection);
 }
 
 bool SanitizerSetThreadName(const char *name) {
@@ -527,6 +561,10 @@ enum MutexState {
 
 BlockingMutex::BlockingMutex(LinkerInitialized) {
   CHECK_EQ(owner_, 0);
+}
+
+BlockingMutex::BlockingMutex() {
+  internal_memset(this, 0, sizeof(*this));
 }
 
 void BlockingMutex::Lock() {
@@ -656,6 +694,58 @@ bool ThreadLister::GetDirectoryEntries() {
   }
   entry_ = (struct linux_dirent *)buffer_;
   return true;
+}
+
+static uptr g_tls_size;
+
+#ifdef __i386__
+# define DL_INTERNAL_FUNCTION __attribute__((regparm(3), stdcall))
+#else
+# define DL_INTERNAL_FUNCTION
+#endif
+
+void InitTlsSize() {
+#ifndef SANITIZER_GO
+  typedef void (*get_tls_func)(size_t*, size_t*) DL_INTERNAL_FUNCTION;
+  get_tls_func get_tls;
+  void *get_tls_static_info_ptr = dlsym(RTLD_NEXT, "_dl_get_tls_static_info");
+  CHECK_EQ(sizeof(get_tls), sizeof(get_tls_static_info_ptr));
+  internal_memcpy(&get_tls, &get_tls_static_info_ptr,
+                  sizeof(get_tls_static_info_ptr));
+  CHECK_NE(get_tls, 0);
+  size_t tls_size = 0;
+  size_t tls_align = 0;
+  get_tls(&tls_size, &tls_align);
+  g_tls_size = tls_size;
+#endif
+}
+
+uptr GetTlsSize() {
+  return g_tls_size;
+}
+
+void AdjustStackSizeLinux(void *attr_, int verbosity) {
+  pthread_attr_t *attr = (pthread_attr_t *)attr_;
+  uptr stackaddr = 0;
+  size_t stacksize = 0;
+  pthread_attr_getstack(attr, (void**)&stackaddr, &stacksize);
+  // GLibC will return (0 - stacksize) as the stack address in the case when
+  // stacksize is set, but stackaddr is not.
+  bool stack_set = (stackaddr != 0) && (stackaddr + stacksize != 0);
+  // We place a lot of tool data into TLS, account for that.
+  const uptr minstacksize = GetTlsSize() + 128*1024;
+  if (stacksize < minstacksize) {
+    if (!stack_set) {
+      if (verbosity && stacksize != 0)
+        Printf("Sanitizer: increasing stacksize %zu->%zu\n", stacksize,
+               minstacksize);
+      pthread_attr_setstacksize(attr, minstacksize);
+    } else {
+      Printf("Sanitizer: pre-allocated stack size is insufficient: "
+             "%zu < %zu\n", stacksize, minstacksize);
+      Printf("Sanitizer: pthread_create is likely to fail.\n");
+    }
+  }
 }
 
 }  // namespace __sanitizer

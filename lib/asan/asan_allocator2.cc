@@ -21,7 +21,6 @@
 #include "asan_mapping.h"
 #include "asan_report.h"
 #include "asan_thread.h"
-#include "asan_thread_registry.h"
 #include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_list.h"
@@ -34,7 +33,7 @@ struct AsanMapUnmapCallback {
   void OnMap(uptr p, uptr size) const {
     PoisonShadow(p, size, kAsanHeapLeftRedzoneMagic);
     // Statistics.
-    AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+    AsanStats &thread_stats = GetCurrentThreadStats();
     thread_stats.mmaps++;
     thread_stats.mmaped += size;
   }
@@ -49,7 +48,7 @@ struct AsanMapUnmapCallback {
     uptr shadow_end = RoundDownTo(MemToShadow(p + size), page_size);
     FlushUnneededShadowMemory(shadow_beg, shadow_end - shadow_beg);
     // Statistics.
-    AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+    AsanStats &thread_stats = GetCurrentThreadStats();
     thread_stats.munmaps++;
     thread_stats.munmaped += size;
   }
@@ -274,7 +273,7 @@ struct QuarantineCallback {
     }
 
     // Statistics.
-    AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+    AsanStats &thread_stats = GetCurrentThreadStats();
     thread_stats.real_frees++;
     thread_stats.really_freed += m->UsedSize();
 
@@ -336,7 +335,7 @@ static void *Allocate(uptr size, uptr alignment, StackTrace *stack,
     return 0;
   }
 
-  AsanThread *t = asanThreadRegistry().GetCurrent();
+  AsanThread *t = GetCurrentThread();
   void *allocated;
   if (t) {
     AllocatorCache *cache = GetAllocatorCache(&t->malloc_storage());
@@ -401,7 +400,7 @@ static void *Allocate(uptr size, uptr alignment, StackTrace *stack,
     *shadow = size & (SHADOW_GRANULARITY - 1);
   }
 
-  AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+  AsanStats &thread_stats = GetCurrentThreadStats();
   thread_stats.mallocs++;
   thread_stats.malloced += size;
   thread_stats.malloced_redzones += needed_size - size;
@@ -438,7 +437,7 @@ static void Deallocate(void *ptr, StackTrace *stack, AllocType alloc_type) {
   CHECK_GE(m->alloc_tid, 0);
   if (SANITIZER_WORDSIZE == 64)  // On 32-bits this resides in user area.
     CHECK_EQ(m->free_tid, kInvalidTid);
-  AsanThread *t = asanThreadRegistry().GetCurrent();
+  AsanThread *t = GetCurrentThread();
   m->free_tid = t ? t->tid() : 0;
   if (flags()->use_stack_depot) {
     m->free_context_id = StackDepotPut(stack->trace, stack->size);
@@ -452,7 +451,7 @@ static void Deallocate(void *ptr, StackTrace *stack, AllocType alloc_type) {
                RoundUpTo(m->UsedSize(), SHADOW_GRANULARITY),
                kAsanHeapFreeMagic);
 
-  AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+  AsanStats &thread_stats = GetCurrentThreadStats();
   thread_stats.frees++;
   thread_stats.freed += m->UsedSize();
 
@@ -476,7 +475,7 @@ static void *Reallocate(void *old_ptr, uptr new_size, StackTrace *stack) {
   uptr chunk_beg = p - kChunkHeaderSize;
   AsanChunk *m = reinterpret_cast<AsanChunk *>(chunk_beg);
 
-  AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+  AsanStats &thread_stats = GetCurrentThreadStats();
   thread_stats.reallocs++;
   thread_stats.realloced += new_size;
 

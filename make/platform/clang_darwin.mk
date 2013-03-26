@@ -132,7 +132,7 @@ CFLAGS.eprintf		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.10.4		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 # FIXME: We can't build ASAN with our stub SDK yet.
 CFLAGS.asan_osx         := $(CFLAGS) -mmacosx-version-min=10.5 -fno-builtin \
-                           -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
+                           -fno-rtti -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
 CFLAGS.asan_osx_dynamic := \
 	$(CFLAGS) -mmacosx-version-min=10.5 -fno-builtin \
 	-DMAC_INTERPOSE_FUNCTIONS=1 \
@@ -192,7 +192,8 @@ FUNCTIONS.asan_osx_dynamic := $(AsanFunctions) $(InterceptionFunctions) \
                               $(SanitizerCommonFunctions) \
 	                      $(AsanDynamicFunctions)
 
-FUNCTIONS.ubsan_osx := $(UbsanFunctions) $(SanitizerCommonFunctions)
+FUNCTIONS.ubsan_osx := $(UbsanFunctions) $(UbsanCXXFunctions) \
+                       $(SanitizerCommonFunctions)
 
 CCKEXT_COMMON_FUNCTIONS := \
 	absvdi2 \

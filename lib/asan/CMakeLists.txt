@@ -20,7 +20,6 @@ set(ASAN_SOURCES
   asan_stack.cc
   asan_stats.cc
   asan_thread.cc
-  asan_thread_registry.cc
   asan_win.cc
   )
 
@@ -30,7 +29,9 @@ set(ASAN_DYLIB_SOURCES
 
 include_directories(..)
 
-set(ASAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
+set(ASAN_CFLAGS
+  ${SANITIZER_COMMON_CFLAGS}
+  -fno-rtti)
 
 set(ASAN_COMMON_DEFINITIONS
   ASAN_HAS_EXCEPTIONS=1)

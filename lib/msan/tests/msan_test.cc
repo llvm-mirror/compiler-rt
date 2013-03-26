@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <wchar.h>
+#include <math.h>
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -34,6 +35,8 @@
 #include <sys/utsname.h>
 #include <sys/mman.h>
 #include <sys/vfs.h>
+#include <sys/types.h>
+#include <dirent.h>
 
 #if defined(__i386__) || defined(__x86_64__)
 # include <emmintrin.h>
@@ -612,6 +615,14 @@ TEST(MemorySanitizer, getcwd_gnu) {
   free(res);
 }
 
+TEST(MemorySanitizer, readdir) {
+  DIR *dir = opendir(".");
+  struct dirent *d = readdir(dir);
+  assert(d);
+  EXPECT_NOT_POISONED(d->d_name[0]);
+  closedir(dir);
+}
+
 TEST(MemorySanitizer, realpath) {
   const char* relpath = ".";
   char path[PATH_MAX + 1];
@@ -641,10 +652,38 @@ TEST(MemorySanitizer, memmove) {
 }
 
 TEST(MemorySanitizer, strdup) {
-  char *x = strdup("zzz");
-  EXPECT_NOT_POISONED(*x);
+  char buf[4] = "abc";
+  __msan_poison(buf + 2, sizeof(*buf));
+  char *x = strdup(buf);
+  EXPECT_NOT_POISONED(x[0]);
+  EXPECT_NOT_POISONED(x[1]);
+  EXPECT_POISONED(x[2]);
+  EXPECT_NOT_POISONED(x[3]);
   free(x);
 }
+
+TEST(MemorySanitizer, strndup) {
+  char buf[4] = "abc";
+  __msan_poison(buf + 2, sizeof(*buf));
+  char *x = strndup(buf, 3);
+  EXPECT_NOT_POISONED(x[0]);
+  EXPECT_NOT_POISONED(x[1]);
+  EXPECT_POISONED(x[2]);
+  EXPECT_NOT_POISONED(x[3]);
+  free(x);
+}
+
+TEST(MemorySanitizer, strndup_short) {
+  char buf[4] = "abc";
+  __msan_poison(buf + 1, sizeof(*buf));
+  __msan_poison(buf + 2, sizeof(*buf));
+  char *x = strndup(buf, 2);
+  EXPECT_NOT_POISONED(x[0]);
+  EXPECT_POISONED(x[1]);
+  EXPECT_NOT_POISONED(x[2]);
+  free(x);
+}
+
 
 template<class T, int size>
 void TestOverlapMemmove() {
@@ -858,6 +897,24 @@ TEST(MemorySanitizer, fcvt) {
   char *str = fcvt(12345.6789, 10, &a, &b);
   EXPECT_NOT_POISONED(a);
   EXPECT_NOT_POISONED(b);
+}
+
+TEST(MemorySanitizer, frexp) {
+  int x;
+  x = *GetPoisoned<int>();
+  double r = frexp(1.1, &x);
+  EXPECT_NOT_POISONED(r);
+  EXPECT_NOT_POISONED(x);
+
+  x = *GetPoisoned<int>();
+  float rf = frexpf(1.1, &x);
+  EXPECT_NOT_POISONED(rf);
+  EXPECT_NOT_POISONED(x);
+
+  x = *GetPoisoned<int>();
+  double rl = frexpl(1.1, &x);
+  EXPECT_NOT_POISONED(rl);
+  EXPECT_NOT_POISONED(x);
 }
 
 struct StructWithDtor {
@@ -1356,13 +1413,13 @@ TEST(MemorySanitizer, scanf) {
   delete d;
 }
 
-static void* SimpleThread_threadfn(void* data) {
+static void *SimpleThread_threadfn(void* data) {
   return new int;
 }
 
 TEST(MemorySanitizer, SimpleThread) {
   pthread_t t;
-  void* p;
+  void *p;
   int res = pthread_create(&t, NULL, SimpleThread_threadfn, NULL);
   assert(!res);
   res = pthread_join(t, &p);
@@ -1370,6 +1427,47 @@ TEST(MemorySanitizer, SimpleThread) {
   if (!__msan_has_dynamic_component())  // FIXME: intercept pthread_join (?).
     __msan_unpoison(&p, sizeof(p));
   delete (int*)p;
+}
+
+static void *SmallStackThread_threadfn(void* data) {
+  return 0;
+}
+
+TEST(MemorySanitizer, SmallStackThread) {
+  pthread_attr_t attr;
+  pthread_t t;
+  void *p;
+  int res;
+  res = pthread_attr_init(&attr);
+  ASSERT_EQ(0, res);
+  res = pthread_attr_setstacksize(&attr, 64 * 1024);
+  ASSERT_EQ(0, res);
+  res = pthread_create(&t, &attr, SmallStackThread_threadfn, NULL);
+  ASSERT_EQ(0, res);
+  res = pthread_join(t, &p);
+  ASSERT_EQ(0, res);
+  res = pthread_attr_destroy(&attr);
+  ASSERT_EQ(0, res);
+}
+
+TEST(MemorySanitizer, PreAllocatedStackThread) {
+  pthread_attr_t attr;
+  pthread_t t;
+  int res;
+  res = pthread_attr_init(&attr);
+  ASSERT_EQ(0, res);
+  void *stack;
+  const size_t kStackSize = 64 * 1024;
+  res = posix_memalign(&stack, 4096, kStackSize);
+  ASSERT_EQ(0, res);
+  res = pthread_attr_setstack(&attr, stack, kStackSize);
+  ASSERT_EQ(0, res);
+  // A small self-allocated stack can not be extended by the tool.
+  // In this case pthread_create is expected to fail.
+  res = pthread_create(&t, &attr, SmallStackThread_threadfn, NULL);
+  EXPECT_NE(0, res);
+  res = pthread_attr_destroy(&attr);
+  ASSERT_EQ(0, res);
 }
 
 TEST(MemorySanitizer, uname) {

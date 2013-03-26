@@ -20,7 +20,6 @@
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_stats.h"
-#include "asan_thread_registry.h"
 #include "interception/interception.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
@@ -89,9 +88,9 @@ static inline uptr MaybeRealStrnlen(const char *s, uptr maxlen) {
 }
 
 void SetThreadName(const char *name) {
-  AsanThread *t = asanThreadRegistry().GetCurrent();
+  AsanThread *t = GetCurrentThread();
   if (t)
-    t->summary()->set_name(name);
+    asanThreadRegistry().SetThreadName(t->tid(), name);
 }
 
 }  // namespace __asan
@@ -115,17 +114,24 @@ using namespace __asan;  // NOLINT
 
 static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
   AsanThread *t = (AsanThread*)arg;
-  asanThreadRegistry().SetCurrent(t);
-  return t->ThreadStart();
+  SetCurrentThread(t);
+  return t->ThreadStart(GetTid());
 }
 
 #if ASAN_INTERCEPT_PTHREAD_CREATE
+extern "C" int pthread_attr_getdetachstate(void *attr, int *v);
+
 INTERCEPTOR(int, pthread_create, void *thread,
     void *attr, void *(*start_routine)(void*), void *arg) {
   GET_STACK_TRACE_THREAD;
-  u32 current_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
-  AsanThread *t = AsanThread::Create(current_tid, start_routine, arg, &stack);
-  asanThreadRegistry().RegisterThread(t);
+  int detached = 0;
+  if (attr != 0)
+    pthread_attr_getdetachstate(attr, &detached);
+
+  u32 current_tid = GetCurrentTidOrInvalid();
+  AsanThread *t = AsanThread::Create(start_routine, arg);
+  CreateThreadContextArgs args = { t, &stack };
+  asanThreadRegistry().CreateThread(*(uptr*)t, detached, current_tid, &args);
   return REAL(pthread_create)(thread, attr, asan_thread_start, t);
 }
 #endif  // ASAN_INTERCEPT_PTHREAD_CREATE
@@ -145,7 +151,7 @@ INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
   }
   return 0;
 }
-#elif ASAN_POSIX
+#elif SANITIZER_POSIX
 // We need to have defined REAL(sigaction) on posix systems.
 DEFINE_REAL(int, sigaction, int signum, const struct sigaction *act,
     struct sigaction *oldact);
@@ -355,7 +361,7 @@ INTERCEPTOR(char*, strchr, const char *str, int c) {
 INTERCEPTOR(char*, index, const char *string, int c)
   ALIAS(WRAPPER_NAME(strchr));
 # else
-#  if defined(__APPLE__)
+#  if SANITIZER_MAC
 DECLARE_REAL(char*, index, const char *string, int c)
 OVERRIDE_FUNCTION(index, strchr);
 #  else
@@ -421,7 +427,7 @@ INTERCEPTOR(int, strcmp, const char *s1, const char *s2) {
 }
 
 INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
-#if defined(__APPLE__)
+#if SANITIZER_MAC
   if (!asan_inited) return REAL(strcpy)(to, from);  // NOLINT
 #endif
   // strcpy is called from malloc_default_purgeable_zone()
@@ -441,7 +447,7 @@ INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
 
 #if ASAN_INTERCEPT_STRDUP
 INTERCEPTOR(char*, strdup, const char *s) {
-#if defined(__APPLE__)
+#if SANITIZER_MAC
   // FIXME: because internal_strdup() uses InternalAlloc(), which currently
   // just calls malloc() on Mac, we can't use internal_strdup() with the
   // dynamic runtime. We can remove the call to REAL(strdup) once InternalAlloc
@@ -582,7 +588,7 @@ INTERCEPTOR(long, strtol, const char *nptr,  // NOLINT
 }
 
 INTERCEPTOR(int, atoi, const char *nptr) {
-#if defined(__APPLE__)
+#if SANITIZER_MAC
   if (!asan_inited) return REAL(atoi)(nptr);
 #endif
   ENSURE_ASAN_INITED();
@@ -601,7 +607,7 @@ INTERCEPTOR(int, atoi, const char *nptr) {
 }
 
 INTERCEPTOR(long, atol, const char *nptr) {  // NOLINT
-#if defined(__APPLE__)
+#if SANITIZER_MAC
   if (!asan_inited) return REAL(atol)(nptr);
 #endif
   ENSURE_ASAN_INITED();
@@ -655,13 +661,13 @@ INTERCEPTOR(long long, atoll, const char *nptr) {  // NOLINT
         Report("AddressSanitizer: failed to intercept '" #name "'\n"); \
     } while (0)
 
-#if defined(_WIN32)
+#if SANITIZER_WINDOWS
 INTERCEPTOR_WINAPI(DWORD, CreateThread,
                    void* security, uptr stack_size,
                    DWORD (__stdcall *start_routine)(void*), void* arg,
                    DWORD flags, void* tid) {
   GET_STACK_TRACE_THREAD;
-  u32 current_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
+  u32 current_tid = GetCurrentTidOrInvalid();
   AsanThread *t = AsanThread::Create(current_tid, start_routine, arg, &stack);
   asanThreadRegistry().RegisterThread(t);
   return REAL(CreateThread)(security, stack_size,
@@ -682,7 +688,7 @@ void InitializeAsanInterceptors() {
   static bool was_called_once;
   CHECK(was_called_once == false);
   was_called_once = true;
-#if defined(__APPLE__)
+#if SANITIZER_MAC
   return;
 #else
   SANITIZER_COMMON_INTERCEPTORS_INIT;
@@ -761,7 +767,7 @@ void InitializeAsanInterceptors() {
 #endif
 
   // Some Windows-specific interceptors.
-#if defined(_WIN32)
+#if SANITIZER_WINDOWS
   InitializeWindowsInterceptors();
 #endif
 

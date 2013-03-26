@@ -27,6 +27,8 @@ enum StatType {
   StatMop8,
   StatMopSame,
   StatMopRange,
+  StatMopRodata,
+  StatMopRangeRodata,
   StatShadowProcessed,
   StatShadowZero,
   StatShadowNonZero,  // Derived.
@@ -235,6 +237,8 @@ enum StatType {
   StatInt_fclose,
   StatInt_fread,
   StatInt_fwrite,
+  StatInt_fflush,
+  StatInt_abort,
   StatInt_puts,
   StatInt_rmdir,
   StatInt_opendir,
@@ -273,6 +277,9 @@ enum StatType {
   StatInt_ctime_r,
   StatInt_asctime,
   StatInt_asctime_r,
+  StatInt_frexp,
+  StatInt_frexpf,
+  StatInt_frexpl,
 
   // Dynamic annotations.
   StatAnnotation,

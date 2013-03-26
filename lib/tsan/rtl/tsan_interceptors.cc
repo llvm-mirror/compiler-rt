@@ -15,6 +15,8 @@
 
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_linux.h"
+#include "sanitizer_common/sanitizer_platform_limits_posix.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
 #include "interception/interception.h"
@@ -26,18 +28,21 @@
 
 using namespace __tsan;  // NOLINT
 
-const int kSigCount = 128;
+const int kSigCount = 64;
 
 struct my_siginfo_t {
-  int opaque[128];
+  // The size is determined by looking at sizeof of real siginfo_t on linux.
+  u64 opaque[128 / sizeof(u64)];
 };
 
 struct sigset_t {
-  u64 val[1024 / 8 / sizeof(u64)];
+  // The size is determined by looking at sizeof of real sigset_t on linux.
+  u64 val[128 / sizeof(u64)];
 };
 
 struct ucontext_t {
-  uptr opaque[117];
+  // The size is determined by looking at sizeof of real ucontext_t on linux.
+  u64 opaque[936 / sizeof(u64) + 1];
 };
 
 extern "C" int pthread_attr_init(void *attr);
@@ -59,6 +64,7 @@ extern "C" void *__libc_malloc(uptr size);
 extern "C" void *__libc_calloc(uptr size, uptr n);
 extern "C" void *__libc_realloc(void *ptr, uptr size);
 extern "C" void __libc_free(void *ptr);
+extern "C" int mallopt(int param, int value);
 const int PTHREAD_MUTEX_RECURSIVE = 1;
 const int PTHREAD_MUTEX_RECURSIVE_NP = 1;
 const int kPthreadAttrSize = 56;
@@ -85,11 +91,6 @@ typedef long long_t;  // NOLINT
 typedef void (*sighandler_t)(int sig);
 
 #define errno (*__errno_location())
-
-union pthread_attr_t {
-  char size[kPthreadAttrSize];
-  void *align;
-};
 
 struct sigaction_t {
   union {
@@ -294,15 +295,6 @@ class AtExitContext {
 };
 
 static AtExitContext *atexit_ctx;
-
-static void finalize(void *arg) {
-  ThreadState * thr = cur_thread();
-  uptr pc = 0;
-  atexit_ctx->exit(thr, pc);
-  int status = Finalize(cur_thread());
-  if (status)
-    _exit(status);
-}
 
 TSAN_INTERCEPTOR(int, atexit, void (*f)()) {
   if (cur_thread()->in_symbolizer)
@@ -602,7 +594,7 @@ TSAN_INTERCEPTOR(void*, mmap, void *addr, long_t sz, int prot,
   if (res != MAP_FAILED) {
     if (fd > 0)
       FdAccess(thr, pc, fd);
-    MemoryResetRange(thr, pc, (uptr)res, sz);
+    MemoryRangeImitateWrite(thr, pc, (uptr)res, sz);
   }
   return res;
 }
@@ -616,13 +608,14 @@ TSAN_INTERCEPTOR(void*, mmap64, void *addr, long_t sz, int prot,
   if (res != MAP_FAILED) {
     if (fd > 0)
       FdAccess(thr, pc, fd);
-    MemoryResetRange(thr, pc, (uptr)res, sz);
+    MemoryRangeImitateWrite(thr, pc, (uptr)res, sz);
   }
   return res;
 }
 
 TSAN_INTERCEPTOR(int, munmap, void *addr, long_t sz) {
   SCOPED_TSAN_INTERCEPTOR(munmap, addr, sz);
+  DontNeedShadowFor((uptr)addr, sz);
   int res = REAL(munmap)(addr, sz);
   return res;
 }
@@ -734,21 +727,21 @@ extern "C" void *__tsan_thread_start_func(void *arg) {
 TSAN_INTERCEPTOR(int, pthread_create,
     void *th, void *attr, void *(*callback)(void*), void * param) {
   SCOPED_TSAN_INTERCEPTOR(pthread_create, th, attr, callback, param);
-  pthread_attr_t myattr;
+  __sanitizer_pthread_attr_t myattr;
   if (attr == 0) {
     pthread_attr_init(&myattr);
     attr = &myattr;
   }
   int detached = 0;
   pthread_attr_getdetachstate(attr, &detached);
-  uptr stacksize = 0;
-  pthread_attr_getstacksize(attr, &stacksize);
-  // We place the huge ThreadState object into TLS, account for that.
-  const uptr minstacksize = GetTlsSize() + 128*1024;
-  if (stacksize < minstacksize) {
-    DPrintf("ThreadSanitizer: stacksize %zu->%zu\n", stacksize, minstacksize);
-    pthread_attr_setstacksize(attr, minstacksize);
-  }
+
+#if defined(TSAN_DEBUG_OUTPUT)
+  int verbosity = (TSAN_DEBUG_OUTPUT);
+#else
+  int verbosity = 0;
+#endif
+  AdjustStackSizeLinux(attr, verbosity);
+
   ThreadParam p;
   p.callback = callback;
   p.param = param;
@@ -1522,6 +1515,17 @@ TSAN_INTERCEPTOR(uptr, fwrite, const void *p, uptr size, uptr nmemb, void *f) {
   return REAL(fwrite)(p, size, nmemb, f);
 }
 
+TSAN_INTERCEPTOR(int, fflush, void *stream) {
+  SCOPED_TSAN_INTERCEPTOR(fflush, stream);
+  return REAL(fflush)(stream);
+}
+
+TSAN_INTERCEPTOR(void, abort, int fake) {
+  SCOPED_TSAN_INTERCEPTOR(abort, fake);
+  REAL(fflush)(0);
+  REAL(abort)(fake);
+}
+
 TSAN_INTERCEPTOR(int, puts, const char *s) {
   SCOPED_TSAN_INTERCEPTOR(puts, s);
   MemoryAccessRange(thr, pc, (uptr)s, internal_strlen(s), false);
@@ -1582,7 +1586,6 @@ static void ALWAYS_INLINE rtl_generic_sighandler(bool sigact, int sig,
       // (but check if we are in a recursive interceptor,
       // i.e. pthread_join()->munmap()).
       (sctx && sctx->in_blocking_func == 1 && thr->in_rtl == 1)) {
-    CHECK(thr->in_rtl == 0 || thr->in_rtl == 1);
     int in_rtl = thr->in_rtl;
     thr->in_rtl = 0;
     CHECK_EQ(thr->in_signal_handler, false);
@@ -1804,7 +1807,7 @@ void ProcessPendingSignals(ThreadState *thr) {
               (uptr)sigactions[sig].sa_sigaction :
               (uptr)sigactions[sig].sa_handler;
           stack.Init(&pc, 1);
-          Lock l(&ctx->thread_mtx);
+          ThreadRegistryLock l(ctx->thread_registry);
           ScopedReport rep(ReportTypeErrnoInSignal);
           if (!IsFiredSuppression(ctx, rep, stack)) {
             rep.AddStack(&stack);
@@ -1820,6 +1823,16 @@ void ProcessPendingSignals(ThreadState *thr) {
   thr->in_signal_handler = false;
 }
 
+static void finalize(void *arg) {
+  ThreadState * thr = cur_thread();
+  uptr pc = 0;
+  atexit_ctx->exit(thr, pc);
+  int status = Finalize(cur_thread());
+  REAL(fflush)(0);
+  if (status)
+    _exit(status);
+}
+
 static void unreachable() {
   Printf("FATAL: ThreadSanitizer: unreachable called\n");
   Die();
@@ -1832,6 +1845,10 @@ void InitializeInterceptors() {
   REAL(memset) = internal_memset;
   REAL(memcpy) = internal_memcpy;
   REAL(memcmp) = internal_memcmp;
+
+  // Instruct libc malloc to consume less memory.
+  mallopt(1, 0);  // M_MXFAST
+  mallopt(-3, 32*1024);  // M_MMAP_THRESHOLD
 
   SANITIZER_COMMON_INTERCEPTORS_INIT;
 
@@ -1969,6 +1986,8 @@ void InitializeInterceptors() {
   TSAN_INTERCEPT(fclose);
   TSAN_INTERCEPT(fread);
   TSAN_INTERCEPT(fwrite);
+  TSAN_INTERCEPT(fflush);
+  TSAN_INTERCEPT(abort);
   TSAN_INTERCEPT(puts);
   TSAN_INTERCEPT(rmdir);
   TSAN_INTERCEPT(opendir);

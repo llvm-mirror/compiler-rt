@@ -22,7 +22,8 @@ ReportDesc::ReportDesc()
     , locs(MBlockReportLoc)
     , mutexes(MBlockReportMutex)
     , threads(MBlockReportThread)
-    , sleep() {
+    , sleep()
+    , count() {
 }
 
 ReportMop::ReportMop()
@@ -46,6 +47,8 @@ const char *thread_name(char *buf, int tid) {
 static const char *ReportTypeString(ReportType typ) {
   if (typ == ReportTypeRace)
     return "data race";
+  if (typ == ReportTypeVptrRace)
+    return "data race on vptr (ctor/dtor vs virtual call)";
   if (typ == ReportTypeUseAfterFree)
     return "heap-use-after-free";
   if (typ == ReportTypeThreadLeak)
@@ -138,7 +141,7 @@ static void PrintThread(const ReportThread *rt) {
   if (rt->id == 0)  // Little sense in describing the main thread.
     return;
   Printf("  Thread T%d", rt->id);
-  if (rt->name)
+  if (rt->name && rt->name[0] != '\0')
     Printf(" '%s'", rt->name);
   char thrbuf[kThreadBufSize];
   Printf(" (tid=%zu, %s) created by %s",
@@ -198,6 +201,9 @@ void PrintReport(const ReportDesc *rep) {
 
   for (uptr i = 0; i < rep->threads.Size(); i++)
     PrintThread(rep->threads[i]);
+
+  if (rep->typ == ReportTypeThreadLeak && rep->count > 1)
+    Printf("  And %d more similar thread leaks.\n\n", rep->count - 1);
 
   if (ReportStack *ent = SkipTsanInternalFrames(ChooseSummaryStack(rep)))
     ReportErrorSummary(rep_typ_str, ent->file, ent->line, ent->func);

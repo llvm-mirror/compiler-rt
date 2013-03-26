@@ -66,7 +66,7 @@ namespace __tsan {
 #if defined(TSAN_GO)
 static const uptr kLinuxAppMemBeg = 0x000000000000ULL;
 static const uptr kLinuxAppMemEnd = 0x00fcffffffffULL;
-# if defined(_WIN32)
+# if SANITIZER_WINDOWS
 static const uptr kLinuxShadowMsk = 0x010000000000ULL;
 # else
 static const uptr kLinuxShadowMsk = 0x100000000000ULL;
@@ -84,7 +84,7 @@ static const uptr kLinuxAppMemEnd = 0x7fffffffffffULL;
 
 static const uptr kLinuxAppMemMsk = 0x7c0000000000ULL;
 
-#if defined(_WIN32)
+#if SANITIZER_WINDOWS
 const uptr kTraceMemBegin = 0x056000000000ULL;
 #else
 const uptr kTraceMemBegin = 0x600000000000ULL;
@@ -132,13 +132,19 @@ static inline uptr AlternativeAddress(uptr addr) {
 #endif
 }
 
-uptr GetShadowMemoryConsumption();
 void FlushShadowMemory();
+void WriteMemoryProfile(char *buf, uptr buf_size);
 
 const char *InitializePlatform();
 void FinalizePlatform();
 uptr ALWAYS_INLINE INLINE GetThreadTrace(int tid) {
-  uptr p = kTraceMemBegin + (uptr)tid * kTraceSize * sizeof(Event);
+  uptr p = kTraceMemBegin + (uptr)(tid * 2) * kTraceSize * sizeof(Event);
+  DCHECK_LT(p, kTraceMemBegin + kTraceMemSize);
+  return p;
+}
+
+uptr ALWAYS_INLINE INLINE GetThreadTraceHeader(int tid) {
+  uptr p = kTraceMemBegin + (uptr)(tid * 2 + 1) * kTraceSize * sizeof(Event);
   DCHECK_LT(p, kTraceMemBegin + kTraceMemSize);
   return p;
 }
@@ -148,7 +154,6 @@ void internal_start_thread(void(*func)(void*), void *arg);
 // Says whether the addr relates to a global var.
 // Guesses with high probability, may yield both false positives and negatives.
 bool IsGlobalVar(uptr addr);
-uptr GetTlsSize();
 void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
                           uptr *tls_addr, uptr *tls_size);
 int ExtractResolvFDs(void *state, int *fds, int nfd);

@@ -12,7 +12,9 @@
 // sanitizer_libc.h.
 //===----------------------------------------------------------------------===//
 
-#ifdef __APPLE__
+#include "sanitizer_platform.h"
+#if SANITIZER_MAC
+
 // Use 64-bit inodes in file operations. ASan does not support OS X 10.5, so
 // the clients will most certainly use 64-bit ones as well.
 #ifndef _DARWIN_USE_64_BIT_INODE
@@ -216,7 +218,9 @@ void MemoryMappingLayout::LoadFromCache() {
 template<u32 kLCSegment, typename SegmentCommand>
 bool MemoryMappingLayout::NextSegmentLoad(
     uptr *start, uptr *end, uptr *offset,
-    char filename[], uptr filename_size) {
+    char filename[], uptr filename_size, uptr *protection) {
+  if (protection)
+    UNIMPLEMENTED();
   const char* lc = current_load_cmd_addr_;
   current_load_cmd_addr_ += ((const load_command *)lc)->cmdsize;
   if (((const load_command *)lc)->cmd == kLCSegment) {
@@ -241,7 +245,8 @@ bool MemoryMappingLayout::NextSegmentLoad(
 }
 
 bool MemoryMappingLayout::Next(uptr *start, uptr *end, uptr *offset,
-                               char filename[], uptr filename_size) {
+                               char filename[], uptr filename_size,
+                               uptr *protection) {
   for (; current_image_ >= 0; current_image_--) {
     const mach_header* hdr = _dyld_get_image_header(current_image_);
     if (!hdr) continue;
@@ -273,14 +278,14 @@ bool MemoryMappingLayout::Next(uptr *start, uptr *end, uptr *offset,
 #ifdef MH_MAGIC_64
         case MH_MAGIC_64: {
           if (NextSegmentLoad<LC_SEGMENT_64, struct segment_command_64>(
-                  start, end, offset, filename, filename_size))
+                  start, end, offset, filename, filename_size, protection))
             return true;
           break;
         }
 #endif
         case MH_MAGIC: {
           if (NextSegmentLoad<LC_SEGMENT, struct segment_command>(
-                  start, end, offset, filename, filename_size))
+                  start, end, offset, filename, filename_size, protection))
             return true;
           break;
         }
@@ -294,12 +299,18 @@ bool MemoryMappingLayout::Next(uptr *start, uptr *end, uptr *offset,
 
 bool MemoryMappingLayout::GetObjectNameAndOffset(uptr addr, uptr *offset,
                                                  char filename[],
-                                                 uptr filename_size) {
-  return IterateForObjectNameAndOffset(addr, offset, filename, filename_size);
+                                                 uptr filename_size,
+                                                 uptr *protection) {
+  return IterateForObjectNameAndOffset(addr, offset, filename, filename_size,
+                                       protection);
 }
 
 BlockingMutex::BlockingMutex(LinkerInitialized) {
   // We assume that OS_SPINLOCK_INIT is zero
+}
+
+BlockingMutex::BlockingMutex() {
+  internal_memset(this, 0, sizeof(*this));
 }
 
 void BlockingMutex::Lock() {
@@ -319,6 +330,13 @@ void BlockingMutex::Unlock() {
 
 void BlockingMutex::CheckLocked() {
   CHECK_EQ((uptr)pthread_self(), owner_);
+}
+
+uptr GetTlsSize() {
+  return 0;
+}
+
+void InitTlsSize() {
 }
 
 }  // namespace __sanitizer

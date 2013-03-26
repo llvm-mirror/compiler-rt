@@ -19,7 +19,6 @@
 #include "asan_stack.h"
 #include "asan_stats.h"
 #include "asan_thread.h"
-#include "asan_thread_registry.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_libc.h"
@@ -130,16 +129,18 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->strict_memcmp, "strict_memcmp");
 }
 
+static const char *asan_external_symbolizer;
+
 void InitializeFlags(Flags *f, const char *env) {
   internal_memset(f, 0, sizeof(*f));
 
   f->quarantine_size = (ASAN_LOW_MEMORY) ? 1UL << 26 : 1UL << 28;
-  f->symbolize = false;
+  f->symbolize = (asan_external_symbolizer != 0);
   f->verbosity = 0;
   f->redzone = ASAN_ALLOCATOR_VERSION == 2 ? 16 : (ASAN_LOW_MEMORY) ? 64 : 128;
   f->debug = false;
   f->report_globals = 1;
-  f->check_initialization_order = true;
+  f->check_initialization_order = false;
   f->malloc_context_size = kDeafultMallocContextSize;
   f->replace_str = true;
   f->replace_intrin = true;
@@ -167,7 +168,7 @@ void InitializeFlags(Flags *f, const char *env) {
   f->poison_heap = true;
   // Turn off alloc/dealloc mismatch checker on Mac for now.
   // TODO(glider): Fix known issues and enable this back.
-  f->alloc_dealloc_mismatch = (ASAN_MAC == 0);;
+  f->alloc_dealloc_mismatch = (SANITIZER_MAC == 0);;
   f->use_stack_depot = true;  // Only affects allocator2.
   f->strict_memcmp = true;
 
@@ -399,7 +400,7 @@ int NOINLINE __asan_set_error_exit_code(int exit_code) {
 
 void NOINLINE __asan_handle_no_return() {
   int local_stack;
-  AsanThread *curr_thread = asanThreadRegistry().GetCurrent();
+  AsanThread *curr_thread = GetCurrentThread();
   CHECK(curr_thread);
   uptr PageSize = GetPageSizeCached();
   uptr top = curr_thread->stack_top();
@@ -426,6 +427,8 @@ void __asan_init() {
   SetCheckFailedCallback(AsanCheckFailed);
   SetPrintfAndReportCallback(AppendToErrorMessageBuffer);
 
+  // Check if external symbolizer is defined before parsing the flags.
+  asan_external_symbolizer = GetEnv("ASAN_SYMBOLIZER_PATH");
   // Initialize flags. This must be done early, because most of the
   // initialization steps look at flags().
   const char *options = GetEnv("ASAN_OPTIONS");
@@ -458,7 +461,7 @@ void __asan_init() {
   bool full_shadow_is_available =
       MemoryRangeIsAvailable(shadow_start, shadow_end);
 
-#if ASAN_LINUX && defined(__x86_64__) && !ASAN_FIXED_MAPPING
+#if SANITIZER_LINUX && defined(__x86_64__) && !ASAN_FIXED_MAPPING
   if (!full_shadow_is_available) {
     kMidMemBeg = kLowMemEnd < 0x3000000000ULL ? 0x3000000000ULL : 0;
     kMidMemEnd = kLowMemEnd < 0x3000000000ULL ? 0x4fffffffffULL : 0;
@@ -503,11 +506,9 @@ void __asan_init() {
 
   InstallSignalHandlers();
   // Start symbolizer process if necessary.
-  if (flags()->symbolize) {
-    const char *external_symbolizer = GetEnv("ASAN_SYMBOLIZER_PATH");
-    if (external_symbolizer) {
-      InitializeExternalSymbolizer(external_symbolizer);
-    }
+  if (flags()->symbolize && asan_external_symbolizer &&
+      asan_external_symbolizer[0]) {
+    InitializeExternalSymbolizer(asan_external_symbolizer);
   }
 
   // On Linux AsanThread::ThreadStart() calls malloc() that's why asan_inited
@@ -515,8 +516,15 @@ void __asan_init() {
   asan_inited = 1;
   asan_init_is_running = false;
 
-  asanThreadRegistry().Init();
-  asanThreadRegistry().GetMain()->ThreadStart();
+  // Create main thread.
+  AsanTSDInit(AsanThread::TSDDtor);
+  AsanThread *main_thread = AsanThread::Create(0, 0);
+  CreateThreadContextArgs create_main_args = { main_thread, 0 };
+  u32 main_tid = asanThreadRegistry().CreateThread(
+      0, true, 0, &create_main_args);
+  CHECK_EQ(0, main_tid);
+  SetCurrentThread(main_thread);
+  main_thread->ThreadStart(GetPid());
   force_interface_symbols();  // no-op.
 
   InitializeAllocator();

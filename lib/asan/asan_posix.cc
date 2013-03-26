@@ -11,14 +11,15 @@
 //
 // Posix-specific details.
 //===----------------------------------------------------------------------===//
-#if defined(__linux__) || defined(__APPLE__)
+
+#include "sanitizer_common/sanitizer_platform.h"
+#if SANITIZER_LINUX || SANITIZER_MAC
 
 #include "asan_internal.h"
 #include "asan_interceptors.h"
 #include "asan_mapping.h"
 #include "asan_report.h"
 #include "asan_stack.h"
-#include "asan_thread_registry.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_procmaps.h"
 
@@ -72,7 +73,7 @@ void SetAlternateSignalStack() {
   CHECK(0 == sigaltstack(&altstack, 0));
   if (flags()->verbosity > 0) {
     Report("Alternative stack for T%d set: [%p,%p)\n",
-           asanThreadRegistry().GetCurrentTidOrInvalid(),
+           GetCurrentTidOrInvalid(),
            altstack.ss_sp, (char*)altstack.ss_sp + altstack.ss_size);
   }
 }

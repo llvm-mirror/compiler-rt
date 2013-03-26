@@ -11,7 +11,9 @@
 //
 // Windows-specific details.
 //===----------------------------------------------------------------------===//
-#ifdef _WIN32
+
+#include "sanitizer_common/sanitizer_platform.h"
+#if SANITIZER_WINDOWS
 #include <windows.h>
 
 #include <dbghelp.h>
