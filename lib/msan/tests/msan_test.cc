@@ -12,15 +12,19 @@
 // MemorySanitizer unit tests.
 //===----------------------------------------------------------------------===//
 
+#ifndef MSAN_EXTERNAL_TEST_CONFIG
+#include "msan_test_config.h"
+#endif // MSAN_EXTERNAL_TEST_CONFIG
+
 #include "sanitizer/msan_interface.h"
 #include "msandr_test_so.h"
-#include "gtest/gtest.h"
 
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <assert.h>
 #include <wchar.h>
+#include <math.h>
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -34,6 +38,9 @@
 #include <sys/utsname.h>
 #include <sys/mman.h>
 #include <sys/vfs.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <pwd.h>
 
 #if defined(__i386__) || defined(__x86_64__)
 # include <emmintrin.h>
@@ -612,6 +619,14 @@ TEST(MemorySanitizer, getcwd_gnu) {
   free(res);
 }
 
+TEST(MemorySanitizer, readdir) {
+  DIR *dir = opendir(".");
+  struct dirent *d = readdir(dir);
+  assert(d);
+  EXPECT_NOT_POISONED(d->d_name[0]);
+  closedir(dir);
+}
+
 TEST(MemorySanitizer, realpath) {
   const char* relpath = ".";
   char path[PATH_MAX + 1];
@@ -641,10 +656,38 @@ TEST(MemorySanitizer, memmove) {
 }
 
 TEST(MemorySanitizer, strdup) {
-  char *x = strdup("zzz");
-  EXPECT_NOT_POISONED(*x);
+  char buf[4] = "abc";
+  __msan_poison(buf + 2, sizeof(*buf));
+  char *x = strdup(buf);
+  EXPECT_NOT_POISONED(x[0]);
+  EXPECT_NOT_POISONED(x[1]);
+  EXPECT_POISONED(x[2]);
+  EXPECT_NOT_POISONED(x[3]);
   free(x);
 }
+
+TEST(MemorySanitizer, strndup) {
+  char buf[4] = "abc";
+  __msan_poison(buf + 2, sizeof(*buf));
+  char *x = strndup(buf, 3);
+  EXPECT_NOT_POISONED(x[0]);
+  EXPECT_NOT_POISONED(x[1]);
+  EXPECT_POISONED(x[2]);
+  EXPECT_NOT_POISONED(x[3]);
+  free(x);
+}
+
+TEST(MemorySanitizer, strndup_short) {
+  char buf[4] = "abc";
+  __msan_poison(buf + 1, sizeof(*buf));
+  __msan_poison(buf + 2, sizeof(*buf));
+  char *x = strndup(buf, 2);
+  EXPECT_NOT_POISONED(x[0]);
+  EXPECT_POISONED(x[1]);
+  EXPECT_NOT_POISONED(x[2]);
+  free(x);
+}
+
 
 template<class T, int size>
 void TestOverlapMemmove() {
@@ -807,6 +850,45 @@ TEST(MemorySanitizer, gettimeofday) {
   EXPECT_NOT_POISONED(tz.tz_dsttime);
 }
 
+TEST(MemorySanitizer, clock_gettime) {
+  struct timespec tp;
+  EXPECT_POISONED(tp.tv_sec);
+  EXPECT_POISONED(tp.tv_nsec);
+  assert(0 == clock_gettime(CLOCK_REALTIME, &tp));
+  EXPECT_NOT_POISONED(tp.tv_sec);
+  EXPECT_NOT_POISONED(tp.tv_nsec);
+}
+
+TEST(MemorySanitizer, getitimer) {
+  struct itimerval it1, it2;
+  int res;
+  EXPECT_POISONED(it1.it_interval.tv_sec);
+  EXPECT_POISONED(it1.it_interval.tv_usec);
+  EXPECT_POISONED(it1.it_value.tv_sec);
+  EXPECT_POISONED(it1.it_value.tv_usec);
+  res = getitimer(ITIMER_VIRTUAL, &it1);
+  assert(!res);
+  EXPECT_NOT_POISONED(it1.it_interval.tv_sec);
+  EXPECT_NOT_POISONED(it1.it_interval.tv_usec);
+  EXPECT_NOT_POISONED(it1.it_value.tv_sec);
+  EXPECT_NOT_POISONED(it1.it_value.tv_usec);
+
+  it1.it_interval.tv_sec = it1.it_value.tv_sec = 10000;
+  it1.it_interval.tv_usec = it1.it_value.tv_usec = 0;
+
+  res = setitimer(ITIMER_VIRTUAL, &it1, &it2);
+  assert(!res);
+  EXPECT_NOT_POISONED(it2.it_interval.tv_sec);
+  EXPECT_NOT_POISONED(it2.it_interval.tv_usec);
+  EXPECT_NOT_POISONED(it2.it_value.tv_sec);
+  EXPECT_NOT_POISONED(it2.it_value.tv_usec);
+
+  // Check that old_value can be 0, and disable the timer.
+  memset(&it1, 0, sizeof(it1));
+  res = setitimer(ITIMER_VIRTUAL, &it1, 0);
+  assert(!res);
+}
+
 TEST(MemorySanitizer, localtime) {
   time_t t = 123;
   struct tm *time = localtime(&t);
@@ -858,6 +940,24 @@ TEST(MemorySanitizer, fcvt) {
   char *str = fcvt(12345.6789, 10, &a, &b);
   EXPECT_NOT_POISONED(a);
   EXPECT_NOT_POISONED(b);
+}
+
+TEST(MemorySanitizer, frexp) {
+  int x;
+  x = *GetPoisoned<int>();
+  double r = frexp(1.1, &x);
+  EXPECT_NOT_POISONED(r);
+  EXPECT_NOT_POISONED(x);
+
+  x = *GetPoisoned<int>();
+  float rf = frexpf(1.1, &x);
+  EXPECT_NOT_POISONED(rf);
+  EXPECT_NOT_POISONED(x);
+
+  x = *GetPoisoned<int>();
+  double rl = frexpl(1.1, &x);
+  EXPECT_NOT_POISONED(rl);
+  EXPECT_NOT_POISONED(x);
 }
 
 struct StructWithDtor {
@@ -1288,6 +1388,7 @@ TEST(MemorySanitizer, dladdr) {
   EXPECT_NOT_POISONED((unsigned long)info.dli_saddr);
 }
 
+namespace {
 #ifdef __GLIBC__
 extern "C" {
   extern void *__libc_stack_end;
@@ -1337,6 +1438,14 @@ TEST(MemorySanitizer, dlopen) {
   delete[] path;
 }
 
+// Regression test for a crash in dlopen() interceptor.
+TEST(MemorySanitizer, dlopenFailed) {
+  const char *path = "/libmsan_loadable_does_not_exist.x86_64.so";
+  void *lib = dlopen(path, RTLD_LAZY);
+  ASSERT_EQ(0, lib);
+}
+} // namespace
+
 TEST(MemorySanitizer, scanf) {
   const char *input = "42 hello";
   int* d = new int;
@@ -1356,20 +1465,62 @@ TEST(MemorySanitizer, scanf) {
   delete d;
 }
 
-static void* SimpleThread_threadfn(void* data) {
+static void *SimpleThread_threadfn(void* data) {
   return new int;
 }
 
 TEST(MemorySanitizer, SimpleThread) {
   pthread_t t;
-  void* p;
+  void *p;
   int res = pthread_create(&t, NULL, SimpleThread_threadfn, NULL);
   assert(!res);
+  EXPECT_NOT_POISONED(t);
   res = pthread_join(t, &p);
   assert(!res);
   if (!__msan_has_dynamic_component())  // FIXME: intercept pthread_join (?).
     __msan_unpoison(&p, sizeof(p));
   delete (int*)p;
+}
+
+static void *SmallStackThread_threadfn(void* data) {
+  return 0;
+}
+
+TEST(MemorySanitizer, SmallStackThread) {
+  pthread_attr_t attr;
+  pthread_t t;
+  void *p;
+  int res;
+  res = pthread_attr_init(&attr);
+  ASSERT_EQ(0, res);
+  res = pthread_attr_setstacksize(&attr, 64 * 1024);
+  ASSERT_EQ(0, res);
+  res = pthread_create(&t, &attr, SmallStackThread_threadfn, NULL);
+  ASSERT_EQ(0, res);
+  res = pthread_join(t, &p);
+  ASSERT_EQ(0, res);
+  res = pthread_attr_destroy(&attr);
+  ASSERT_EQ(0, res);
+}
+
+TEST(MemorySanitizer, PreAllocatedStackThread) {
+  pthread_attr_t attr;
+  pthread_t t;
+  int res;
+  res = pthread_attr_init(&attr);
+  ASSERT_EQ(0, res);
+  void *stack;
+  const size_t kStackSize = 64 * 1024;
+  res = posix_memalign(&stack, 4096, kStackSize);
+  ASSERT_EQ(0, res);
+  res = pthread_attr_setstack(&attr, stack, kStackSize);
+  ASSERT_EQ(0, res);
+  // A small self-allocated stack can not be extended by the tool.
+  // In this case pthread_create is expected to fail.
+  res = pthread_create(&t, &attr, SmallStackThread_threadfn, NULL);
+  EXPECT_NE(0, res);
+  res = pthread_attr_destroy(&attr);
+  ASSERT_EQ(0, res);
 }
 
 TEST(MemorySanitizer, uname) {
@@ -1388,6 +1539,40 @@ TEST(MemorySanitizer, gethostname) {
   int res = gethostname(buf, 100);
   assert(!res);
   EXPECT_NOT_POISONED(strlen(buf));
+}
+
+TEST(MemorySanitizer, getpwuid) {
+  struct passwd *p = getpwuid(0); // root
+  assert(p);
+  EXPECT_NOT_POISONED(p->pw_name);
+  assert(p->pw_name);
+  EXPECT_NOT_POISONED(p->pw_name[0]);
+  EXPECT_NOT_POISONED(p->pw_uid);
+  assert(p->pw_uid == 0);
+}
+
+TEST(MemorySanitizer, getpwnam_r) {
+  struct passwd pwd;
+  struct passwd *pwdres;
+  char buf[10000];
+  int res = getpwnam_r("root", &pwd, buf, sizeof(buf), &pwdres);
+  assert(!res);
+  EXPECT_NOT_POISONED(pwd.pw_name);
+  assert(pwd.pw_name);
+  EXPECT_NOT_POISONED(pwd.pw_name[0]);
+  EXPECT_NOT_POISONED(pwd.pw_uid);
+  assert(pwd.pw_uid == 0);
+}
+
+TEST(MemorySanitizer, getpwnam_r_positive) {
+  struct passwd pwd;
+  struct passwd *pwdres;
+  char s[5];
+  strncpy(s, "abcd", 5);
+  __msan_poison(s, 5);
+  char buf[10000];
+  int res;
+  EXPECT_UMR(res = getpwnam_r(s, &pwd, buf, sizeof(buf), &pwdres));
 }
 
 template<class T>
@@ -1842,10 +2027,4 @@ TEST(MemorySanitizer, CallocOverflow) {
 
 TEST(MemorySanitizerStress, DISABLED_MallocStackTrace) {
   RecursiveMalloc(22);
-}
-
-int main(int argc, char **argv) {
-  testing::InitGoogleTest(&argc, argv);
-  int res = RUN_ALL_TESTS();
-  return res;
 }

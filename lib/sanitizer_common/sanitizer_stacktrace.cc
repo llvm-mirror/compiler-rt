@@ -64,7 +64,7 @@ static void PrintModuleAndOffset(const char *module, uptr offset,
 void StackTrace::PrintStack(const uptr *addr, uptr size,
                             bool symbolize, const char *strip_file_prefix,
                             SymbolizeCallback symbolize_callback ) {
-  MemoryMappingLayout proc_maps;
+  MemoryMappingLayout proc_maps(/*cache_enabled*/true);
   InternalScopedBuffer<char> buff(GetPageSizeCached() * 2);
   InternalScopedBuffer<AddressInfo> addr_frames(64);
   uptr frame_num = 0;
@@ -113,7 +113,8 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
       PrintStackFramePrefix(frame_num, pc);
       uptr offset;
       if (proc_maps.GetObjectNameAndOffset(pc, &offset,
-                                           buff.data(), buff.size())) {
+                                           buff.data(), buff.size(),
+                                           /* protection */0)) {
         PrintModuleAndOffset(buff.data(), offset, strip_file_prefix);
       }
       Printf("\n");

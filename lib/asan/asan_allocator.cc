@@ -33,7 +33,6 @@
 #include "asan_stats.h"
 #include "asan_report.h"
 #include "asan_thread.h"
-#include "asan_thread_registry.h"
 #include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_mutex.h"
@@ -427,7 +426,7 @@ class MallocInfo {
     free_lists_[size_class] = m;
 
     // Statistics.
-    AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+    AsanStats &thread_stats = GetCurrentThreadStats();
     thread_stats.real_frees++;
     thread_stats.really_freed += m->used_size;
     thread_stats.really_freed_redzones += m->Size() - m->used_size;
@@ -454,7 +453,7 @@ class MallocInfo {
     u8 *mem = MmapNewPagesAndPoisonShadow(mmap_size);
 
     // Statistics.
-    AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+    AsanStats &thread_stats = GetCurrentThreadStats();
     thread_stats.mmaps++;
     thread_stats.mmaped += mmap_size;
     thread_stats.mmaped_by_size[size_class] += n_chunks;
@@ -529,8 +528,8 @@ static u8 *Allocate(uptr alignment, uptr size, StackTrace *stack,
          alignment, size, size_class, size_to_allocate);
   }
 
-  AsanThread *t = asanThreadRegistry().GetCurrent();
-  AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+  AsanThread *t = GetCurrentThread();
+  AsanStats &thread_stats = GetCurrentThreadStats();
   // Statistics
   thread_stats.mallocs++;
   thread_stats.malloced += size;
@@ -619,7 +618,7 @@ static void Deallocate(u8 *ptr, StackTrace *stack, AllocType alloc_type) {
   CHECK(REDZONE <= 16 || !m->next);
   CHECK(m->free_tid == kInvalidTid);
   CHECK(m->alloc_tid >= 0);
-  AsanThread *t = asanThreadRegistry().GetCurrent();
+  AsanThread *t = GetCurrentThread();
   m->free_tid = t ? t->tid() : 0;
   StackTrace::CompressStack(stack, m->compressed_free_stack(),
                                 m->compressed_free_stack_size());
@@ -627,7 +626,7 @@ static void Deallocate(u8 *ptr, StackTrace *stack, AllocType alloc_type) {
   PoisonShadow((uptr)ptr, rounded_size, kAsanHeapFreeMagic);
 
   // Statistics.
-  AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+  AsanStats &thread_stats = GetCurrentThreadStats();
   thread_stats.frees++;
   thread_stats.freed += m->used_size;
   thread_stats.freed_by_size[m->SizeClass()]++;
@@ -651,7 +650,7 @@ static u8 *Reallocate(u8 *old_ptr, uptr new_size,
   CHECK(old_ptr && new_size);
 
   // Statistics.
-  AsanStats &thread_stats = asanThreadRegistry().GetCurrentThreadStats();
+  AsanStats &thread_stats = GetCurrentThreadStats();
   thread_stats.reallocs++;
   thread_stats.realloced += new_size;
 

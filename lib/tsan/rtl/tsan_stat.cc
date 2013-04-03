@@ -38,6 +38,8 @@ void StatOutput(u64 *stat) {
   name[StatMop8]                         = "            size 8                ";
   name[StatMopSame]                      = "  Including same                  ";
   name[StatMopRange]                     = "  Including range                 ";
+  name[StatMopRodata]                    = "  Including .rodata               ";
+  name[StatMopRangeRodata]               = "  Including .rodata range         ";
   name[StatShadowProcessed]              = "Shadow processed                  ";
   name[StatShadowZero]                   = "  Including empty                 ";
   name[StatShadowNonZero]                = "  Including non empty             ";
@@ -105,6 +107,7 @@ void StatOutput(u64 *stat) {
   name[StatInt_realloc]                  = "  realloc                         ";
   name[StatInt_free]                     = "  free                            ";
   name[StatInt_cfree]                    = "  cfree                           ";
+  name[StatInt_malloc_usable_size]       = "  malloc_usable_size              ";
   name[StatInt_mmap]                     = "  mmap                            ";
   name[StatInt_mmap64]                   = "  mmap64                          ";
   name[StatInt_munmap]                   = "  munmap                          ";
@@ -135,6 +138,8 @@ void StatOutput(u64 *stat) {
   name[StatInt_strcpy]                   = "  strcpy                          ";
   name[StatInt_strncpy]                  = "  strncpy                         ";
   name[StatInt_strstr]                   = "  strstr                          ";
+  name[StatInt_strcasecmp]               = "  strcasecmp                      ";
+  name[StatInt_strncasecmp]              = "  strncasecmp                     ";
   name[StatInt_atexit]                   = "  atexit                          ";
   name[StatInt___cxa_guard_acquire]      = "  __cxa_guard_acquire             ";
   name[StatInt___cxa_guard_release]      = "  __cxa_guard_release             ";
@@ -239,6 +244,8 @@ void StatOutput(u64 *stat) {
   name[StatInt_fclose]                   = "  fclose                          ";
   name[StatInt_fread]                    = "  fread                           ";
   name[StatInt_fwrite]                   = "  fwrite                          ";
+  name[StatInt_fflush]                   = "  fflush                          ";
+  name[StatInt_abort]                    = "  abort                           ";
   name[StatInt_puts]                     = "  puts                            ";
   name[StatInt_rmdir]                    = "  rmdir                           ";
   name[StatInt_opendir]                  = "  opendir                         ";
@@ -246,6 +253,10 @@ void StatOutput(u64 *stat) {
   name[StatInt_epoll_wait]               = "  epoll_wait                      ";
   name[StatInt_poll]                     = "  poll                            ";
   name[StatInt_sigaction]                = "  sigaction                       ";
+  name[StatInt_signal]                   = "  signal                          ";
+  name[StatInt_raise]                    = "  raise                           ";
+  name[StatInt_kill]                     = "  kill                            ";
+  name[StatInt_pthread_kill]             = "  pthread_kill                    ";
   name[StatInt_sleep]                    = "  sleep                           ";
   name[StatInt_usleep]                   = "  usleep                          ";
   name[StatInt_nanosleep]                = "  nanosleep                       ";
@@ -273,6 +284,18 @@ void StatOutput(u64 *stat) {
   name[StatInt_ctime_r]                  = "  ctime_r                         ";
   name[StatInt_asctime]                  = "  asctime                         ";
   name[StatInt_asctime_r]                = "  asctime_r                       ";
+  name[StatInt_frexp]                    = "  frexp                           ";
+  name[StatInt_frexpf]                   = "  frexpf                          ";
+  name[StatInt_frexpl]                   = "  frexpl                          ";
+  name[StatInt_getpwnam]                 = "  getpwnam                        ";
+  name[StatInt_getpwuid]                 = "  getpwuid                        ";
+  name[StatInt_getpwnam_r]               = "  getpwnam_r                      ";
+  name[StatInt_getpwuid_r]               = "  getpwuid_r                      ";
+  name[StatInt_clock_getres]             = "  clock_getres                    ";
+  name[StatInt_clock_gettime]            = "  clock_gettime                   ";
+  name[StatInt_clock_settime]            = "  clock_settime                   ";
+  name[StatInt_getitimer]                = "  getitimer                       ";
+  name[StatInt_setitimer]                = "  setitimer                       ";
 
   name[StatAnnotation]                   = "Dynamic annotations               ";
   name[StatAnnotateHappensBefore]        = "  HappensBefore                   ";
@@ -282,6 +305,7 @@ void StatOutput(u64 *stat) {
   name[StatAnnotateMutexIsNotPHB]        = "  MutexIsNotPHB                   ";
   name[StatAnnotateCondVarWait]          = "  CondVarWait                     ";
   name[StatAnnotateRWLockCreate]         = "  RWLockCreate                    ";
+  name[StatAnnotateRWLockCreateStatic]   = "  StatAnnotateRWLockCreateStatic  ";
   name[StatAnnotateRWLockDestroy]        = "  RWLockDestroy                   ";
   name[StatAnnotateRWLockAcquired]       = "  RWLockAcquired                  ";
   name[StatAnnotateRWLockReleased]       = "  RWLockReleased                  ";

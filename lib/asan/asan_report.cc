@@ -17,7 +17,6 @@
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_thread.h"
-#include "asan_thread_registry.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
@@ -181,13 +180,21 @@ static bool IsASCII(unsigned char c) {
   return /*0x00 <= c &&*/ c <= 0x7F;
 }
 
+static const char *MaybeDemangleGlobalName(const char *name) {
+  // We can spoil names of globals with C linkage, so use an heuristic
+  // approach to check if the name should be demangled.
+  return (name[0] == '_' && name[1] == 'Z') ? Demangle(name) : name;
+}
+
 // Check if the global is a zero-terminated ASCII string. If so, print it.
 static void PrintGlobalNameIfASCII(const __asan_global &g) {
   for (uptr p = g.beg; p < g.beg + g.size - 1; p++) {
-    if (!IsASCII(*(unsigned char*)p)) return;
+    unsigned char c = *(unsigned char*)p;
+    if (c == '\0' || !IsASCII(c)) return;
   }
-  if (*(char*)(g.beg + g.size - 1) != 0) return;
-  Printf("  '%s' is ascii string '%s'\n", g.name, (char*)g.beg);
+  if (*(char*)(g.beg + g.size - 1) != '\0') return;
+  Printf("  '%s' is ascii string '%s'\n",
+         MaybeDemangleGlobalName(g.name), (char*)g.beg);
 }
 
 bool DescribeAddressRelativeToGlobal(uptr addr, uptr size,
@@ -208,8 +215,8 @@ bool DescribeAddressRelativeToGlobal(uptr addr, uptr size,
     // Can it happen?
     Printf("%p is located %zd bytes inside", (void*)addr, addr - g.beg);
   }
-  Printf(" of global variable '%s' (0x%zx) of size %zu\n",
-             g.name, g.beg, g.size);
+  Printf(" of global variable '%s' from '%s' (0x%zx) of size %zu\n",
+             MaybeDemangleGlobalName(g.name), g.module_name, g.beg, g.size);
   Printf("%s", d.EndLocation());
   PrintGlobalNameIfASCII(g);
   return true;
@@ -236,33 +243,61 @@ bool DescribeAddressIfShadow(uptr addr) {
   return false;
 }
 
+// Return " (thread_name) " or an empty string if the name is empty.
+const char *ThreadNameWithParenthesis(AsanThreadContext *t, char buff[],
+                                      uptr buff_len) {
+  const char *name = t->name;
+  if (name[0] == '\0') return "";
+  buff[0] = 0;
+  internal_strncat(buff, " (", 3);
+  internal_strncat(buff, name, buff_len - 4);
+  internal_strncat(buff, ")", 2);
+  return buff;
+}
+
+const char *ThreadNameWithParenthesis(u32 tid, char buff[],
+                                      uptr buff_len) {
+  if (tid == kInvalidTid) return "";
+  asanThreadRegistry().CheckLocked();
+  AsanThreadContext *t = GetThreadContextByTidLocked(tid);
+  return ThreadNameWithParenthesis(t, buff, buff_len);
+}
+
 bool DescribeAddressIfStack(uptr addr, uptr access_size) {
-  AsanThread *t = asanThreadRegistry().FindThreadByStackAddress(addr);
+  AsanThread *t = FindThreadByStackAddress(addr);
   if (!t) return false;
   const sptr kBufSize = 4095;
   char buf[kBufSize];
   uptr offset = 0;
-  const char *frame_descr = t->GetFrameNameByAddr(addr, &offset);
+  uptr frame_pc = 0;
+  char tname[128];
+  const char *frame_descr = t->GetFrameNameByAddr(addr, &offset, &frame_pc);
   // This string is created by the compiler and has the following form:
-  // "FunctioName n alloc_1 alloc_2 ... alloc_n"
+  // "n alloc_1 alloc_2 ... alloc_n"
   // where alloc_i looks like "offset size len ObjectName ".
   CHECK(frame_descr);
-  // Report the function name and the offset.
-  const char *name_end = internal_strchr(frame_descr, ' ');
-  CHECK(name_end);
-  buf[0] = 0;
-  internal_strncat(buf, frame_descr,
-                   Min(kBufSize,
-                       static_cast<sptr>(name_end - frame_descr)));
   Decorator d;
   Printf("%s", d.Location());
-  Printf("Address %p is located at offset %zu "
-             "in frame <%s> of T%d's stack:\n",
-             (void*)addr, offset, Demangle(buf), t->tid());
+  Printf("Address %p is located in stack of thread T%d%s "
+         "at offset %zu in frame\n",
+         addr, t->tid(),
+         ThreadNameWithParenthesis(t->tid(), tname, sizeof(tname)),
+         offset);
+  // Now we print the frame where the alloca has happened.
+  // We print this frame as a stack trace with one element.
+  // The symbolizer may print more than one frame if inlining was involved.
+  // The frame numbers may be different than those in the stack trace printed
+  // previously. That's unfortunate, but I have no better solution,
+  // especially given that the alloca may be from entirely different place
+  // (e.g. use-after-scope, or different thread's stack).
+  StackTrace alloca_stack;
+  alloca_stack.trace[0] = frame_pc + 16;
+  alloca_stack.size = 1;
   Printf("%s", d.EndLocation());
+  PrintStack(&alloca_stack);
   // Report the number of stack objects.
   char *p;
-  uptr n_objects = internal_simple_strtoll(name_end, &p, 10);
+  uptr n_objects = internal_simple_strtoll(frame_descr, &p, 10);
   CHECK(n_objects > 0);
   Printf("  This frame has %zu object(s):\n", n_objects);
   // Report all objects in this frame.
@@ -286,7 +321,7 @@ bool DescribeAddressIfStack(uptr addr, uptr access_size) {
   Printf("HINT: this may be a false positive if your program uses "
              "some custom stack unwind mechanism or swapcontext\n"
              "      (longjmp and C++ exceptions *are* supported)\n");
-  DescribeThread(t->summary());
+  DescribeThread(t->context());
   return true;
 }
 
@@ -314,63 +349,45 @@ static void DescribeAccessToHeapChunk(AsanChunkView chunk, uptr addr,
   Printf("%s", d.EndLocation());
 }
 
-// Return " (thread_name) " or an empty string if the name is empty.
-const char *ThreadNameWithParenthesis(AsanThreadSummary *t, char buff[],
-                                      uptr buff_len) {
-  const char *name = t->name();
-  if (*name == 0) return "";
-  buff[0] = 0;
-  internal_strncat(buff, " (", 3);
-  internal_strncat(buff, name, buff_len - 4);
-  internal_strncat(buff, ")", 2);
-  return buff;
-}
-
-const char *ThreadNameWithParenthesis(u32 tid, char buff[],
-                                      uptr buff_len) {
-  if (tid == kInvalidTid) return "";
-  AsanThreadSummary *t = asanThreadRegistry().FindByTid(tid);
-  return ThreadNameWithParenthesis(t, buff, buff_len);
-}
-
 void DescribeHeapAddress(uptr addr, uptr access_size) {
   AsanChunkView chunk = FindHeapChunkByAddress(addr);
   if (!chunk.IsValid()) return;
   DescribeAccessToHeapChunk(chunk, addr, access_size);
   CHECK(chunk.AllocTid() != kInvalidTid);
-  AsanThreadSummary *alloc_thread =
-      asanThreadRegistry().FindByTid(chunk.AllocTid());
+  asanThreadRegistry().CheckLocked();
+  AsanThreadContext *alloc_thread =
+      GetThreadContextByTidLocked(chunk.AllocTid());
   StackTrace alloc_stack;
   chunk.GetAllocStack(&alloc_stack);
-  AsanThread *t = asanThreadRegistry().GetCurrent();
+  AsanThread *t = GetCurrentThread();
   CHECK(t);
   char tname[128];
   Decorator d;
   if (chunk.FreeTid() != kInvalidTid) {
-    AsanThreadSummary *free_thread =
-        asanThreadRegistry().FindByTid(chunk.FreeTid());
+    AsanThreadContext *free_thread =
+        GetThreadContextByTidLocked(chunk.FreeTid());
     Printf("%sfreed by thread T%d%s here:%s\n", d.Allocation(),
-           free_thread->tid(),
+           free_thread->tid,
            ThreadNameWithParenthesis(free_thread, tname, sizeof(tname)),
            d.EndAllocation());
     StackTrace free_stack;
     chunk.GetFreeStack(&free_stack);
     PrintStack(&free_stack);
     Printf("%spreviously allocated by thread T%d%s here:%s\n",
-           d.Allocation(), alloc_thread->tid(),
+           d.Allocation(), alloc_thread->tid,
            ThreadNameWithParenthesis(alloc_thread, tname, sizeof(tname)),
            d.EndAllocation());
     PrintStack(&alloc_stack);
-    DescribeThread(t->summary());
+    DescribeThread(t->context());
     DescribeThread(free_thread);
     DescribeThread(alloc_thread);
   } else {
     Printf("%sallocated by thread T%d%s here:%s\n", d.Allocation(),
-           alloc_thread->tid(),
+           alloc_thread->tid,
            ThreadNameWithParenthesis(alloc_thread, tname, sizeof(tname)),
            d.EndAllocation());
     PrintStack(&alloc_stack);
-    DescribeThread(t->summary());
+    DescribeThread(t->context());
     DescribeThread(alloc_thread);
   }
 }
@@ -390,26 +407,27 @@ void DescribeAddress(uptr addr, uptr access_size) {
 
 // ------------------- Thread description -------------------- {{{1
 
-void DescribeThread(AsanThreadSummary *summary) {
-  CHECK(summary);
+void DescribeThread(AsanThreadContext *context) {
+  CHECK(context);
+  asanThreadRegistry().CheckLocked();
   // No need to announce the main thread.
-  if (summary->tid() == 0 || summary->announced()) {
+  if (context->tid == 0 || context->announced) {
     return;
   }
-  summary->set_announced(true);
+  context->announced = true;
   char tname[128];
-  Printf("Thread T%d%s", summary->tid(),
-         ThreadNameWithParenthesis(summary->tid(), tname, sizeof(tname)));
+  Printf("Thread T%d%s", context->tid,
+         ThreadNameWithParenthesis(context->tid, tname, sizeof(tname)));
   Printf(" created by T%d%s here:\n",
-         summary->parent_tid(),
-         ThreadNameWithParenthesis(summary->parent_tid(),
+         context->parent_tid,
+         ThreadNameWithParenthesis(context->parent_tid,
                                    tname, sizeof(tname)));
-  PrintStack(summary->stack());
+  PrintStack(&context->stack);
   // Recursively described parent thread if needed.
   if (flags()->print_full_thread_history) {
-    AsanThreadSummary *parent_summary =
-        asanThreadRegistry().FindByTid(summary->parent_tid());
-    DescribeThread(parent_summary);
+    AsanThreadContext *parent_context =
+        GetThreadContextByTidLocked(context->parent_tid);
+    DescribeThread(parent_context);
   }
 }
 
@@ -428,7 +446,7 @@ class ScopedInErrorReport {
       // they are defined as no-return.
       Report("AddressSanitizer: while reporting a bug found another one."
                  "Ignoring.\n");
-      u32 current_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
+      u32 current_tid = GetCurrentTidOrInvalid();
       if (current_tid != reporting_thread_tid) {
         // ASan found two bugs in different threads simultaneously. Sleep
         // long enough to make sure that the thread which started to print
@@ -440,13 +458,17 @@ class ScopedInErrorReport {
       internal__exit(flags()->exitcode);
     }
     ASAN_ON_ERROR();
-    reporting_thread_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
+    // Make sure the registry is locked while we're printing an error report.
+    // We can lock the registry only here to avoid self-deadlock in case of
+    // recursive reports.
+    asanThreadRegistry().Lock();
+    reporting_thread_tid = GetCurrentTidOrInvalid();
     Printf("===================================================="
            "=============\n");
     if (reporting_thread_tid != kInvalidTid) {
       // We started reporting an error message. Stop using the fake stack
       // in case we call an instrumented function from a symbolizer.
-      AsanThread *curr_thread = asanThreadRegistry().GetCurrent();
+      AsanThread *curr_thread = GetCurrentThread();
       CHECK(curr_thread);
       curr_thread->fake_stack().StopUsingFakeStack();
     }
@@ -454,9 +476,9 @@ class ScopedInErrorReport {
   // Destructor is NORETURN, as functions that report errors are.
   NORETURN ~ScopedInErrorReport() {
     // Make sure the current thread is announced.
-    AsanThread *curr_thread = asanThreadRegistry().GetCurrent();
+    AsanThread *curr_thread = GetCurrentThread();
     if (curr_thread) {
-      DescribeThread(curr_thread->summary());
+      DescribeThread(curr_thread->context());
     }
     // Print memory stats.
     if (flags()->print_stats)
@@ -490,7 +512,7 @@ void ReportSIGSEGV(uptr pc, uptr sp, uptr bp, uptr addr) {
   Report("ERROR: AddressSanitizer: SEGV on unknown address %p"
              " (pc %p sp %p bp %p T%d)\n",
              (void*)addr, (void*)pc, (void*)sp, (void*)bp,
-             asanThreadRegistry().GetCurrentTidOrInvalid());
+             GetCurrentTidOrInvalid());
   Printf("%s", d.EndWarning());
   Printf("AddressSanitizer can not provide additional info.\n");
   GET_STACK_TRACE_FATAL(pc, bp);
@@ -502,7 +524,13 @@ void ReportDoubleFree(uptr addr, StackTrace *stack) {
   ScopedInErrorReport in_report;
   Decorator d;
   Printf("%s", d.Warning());
-  Report("ERROR: AddressSanitizer: attempting double-free on %p:\n", addr);
+  char tname[128];
+  u32 curr_tid = GetCurrentTidOrInvalid();
+  Report("ERROR: AddressSanitizer: attempting double-free on %p in "
+         "thread T%d%s:\n",
+         addr, curr_tid,
+         ThreadNameWithParenthesis(curr_tid, tname, sizeof(tname)));
+
   Printf("%s", d.EndWarning());
   PrintStack(stack);
   DescribeHeapAddress(addr, 1);
@@ -513,8 +541,11 @@ void ReportFreeNotMalloced(uptr addr, StackTrace *stack) {
   ScopedInErrorReport in_report;
   Decorator d;
   Printf("%s", d.Warning());
+  char tname[128];
+  u32 curr_tid = GetCurrentTidOrInvalid();
   Report("ERROR: AddressSanitizer: attempting free on address "
-             "which was not malloc()-ed: %p\n", addr);
+             "which was not malloc()-ed: %p in thread T%d%s\n", addr,
+         curr_tid, ThreadNameWithParenthesis(curr_tid, tname, sizeof(tname)));
   Printf("%s", d.EndWarning());
   PrintStack(stack);
   DescribeHeapAddress(addr, 1);
@@ -680,7 +711,7 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp,
              bug_descr, (void*)addr, pc, bp, sp);
   Printf("%s", d.EndWarning());
 
-  u32 curr_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
+  u32 curr_tid = GetCurrentTidOrInvalid();
   char tname[128];
   Printf("%s%s of size %zu at %p thread T%d%s%s\n",
          d.Access(),

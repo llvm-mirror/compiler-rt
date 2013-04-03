@@ -52,6 +52,10 @@ struct Flags {
   const char *strip_path_prefix;
   // Suppressions filename.
   const char *suppressions;
+  // Print matched suppressions at exit.
+  bool print_suppressions;
+  // Print matched "benign" races at exit.
+  bool print_benign;
   // Override exit status if something was reported.
   int exitcode;
   // Write logs to "log_path.pid".
@@ -67,6 +71,8 @@ struct Flags {
   const char *profile_memory;
   // Flush shadow memory every X ms.
   int flush_memory_ms;
+  // Flush symbolizer caches every X ms.
+  int flush_symbolizer_ms;
   // Stops on start until __tsan_resume() is called (for debugging).
   bool stop_on_start;
   // Controls whether RunningOnValgrind() returns true or false.

@@ -23,10 +23,10 @@ string(REGEX MATCH "[0-9]+\\.[0-9]+(\\.[0-9]+)?" CLANG_VERSION
 # Setup the paths where compiler-rt runtimes and headers should be stored.
 set(LIBCLANG_INSTALL_PATH lib${LLVM_LIBDIR_SUFFIX}/clang/${CLANG_VERSION})
 string(TOLOWER ${CMAKE_SYSTEM_NAME} LIBCLANG_OS_DIR)
-set(COMPILER_RT_LIBRARY_OUTPUT_DIR 
-  ${LLVM_BINARY_DIR}/lib/clang/${CLANG_VERSION}/lib/${LIBCLANG_OS_DIR})
+set(CLANG_RESOURCE_DIR ${LLVM_BINARY_DIR}/lib/clang/${CLANG_VERSION})
+set(COMPILER_RT_LIBRARY_OUTPUT_DIR ${CLANG_RESOURCE_DIR}/lib/${LIBCLANG_OS_DIR})
 set(COMPILER_RT_LIBRARY_INSTALL_DIR
- ${LIBCLANG_INSTALL_PATH}/lib/${LIBCLANG_OS_DIR}) 
+  ${LIBCLANG_INSTALL_PATH}/lib/${LIBCLANG_OS_DIR})
 
 # Add path for custom modules
 set(CMAKE_MODULE_PATH
@@ -36,6 +36,9 @@ set(CMAKE_MODULE_PATH
 include(AddCompilerRT)
 
 set(COMPILER_RT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+# Setup custom SDK sysroots.
+set(COMPILER_RT_DARWIN_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/darwin)
+set(COMPILER_RT_LINUX_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/linux)
 
 # Detect whether the current target platform is 32-bit or 64-bit, and setup
 # the correct commandline flags needed to attempt to target 32-bit and 64-bit.
@@ -96,11 +99,11 @@ endif()
 # and target a unix-like system. On Android we define the rules for building
 # unit tests, but don't execute them.
 if("${CMAKE_HOST_SYSTEM}" STREQUAL "${CMAKE_SYSTEM}" AND UNIX AND NOT ANDROID)
-  set(COMPILER_RT_CAN_EXECUTE_TESTS TRUE)
+  option(COMPILER_RT_CAN_EXECUTE_TESTS "Can we execute instrumented tests" ON)
 else()
-  set(COMPILER_RT_CAN_EXECUTE_TESTS FALSE)
+  option(COMPILER_RT_CAN_EXECUTE_TESTS "Can we execute instrumented tests" OFF)
 endif()
-    
+
 # Check if compiler-rt is built with libc++.
 find_flag_in_string("${CMAKE_CXX_FLAGS}" "-stdlib=libc++"
                     COMPILER_RT_USES_LIBCXX)
@@ -143,6 +146,12 @@ endif()
 check_cxx_compiler_flag(-Wno-c99-extensions SUPPORTS_NO_C99_EXTENSIONS_FLAG)
 if(SUPPORTS_NO_C99_EXTENSIONS_FLAG)
   list(APPEND SANITIZER_COMMON_CFLAGS -Wno-c99-extensions)
+endif()
+# Sanitizer may not have libstdc++, so we can have problems with virtual
+# destructors.
+check_cxx_compiler_flag(-Wno-non-virtual-dtor SUPPORTS_NO_NON_VIRTUAL_DTOR_FLAG)
+if (SUPPORTS_NO_NON_VIRTUAL_DTOR_FLAG)
+  list(APPEND SANITIZER_COMMON_CFLAGS -Wno-non-virtual-dtor)
 endif()
 
 # Setup min Mac OS X version.

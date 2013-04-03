@@ -173,6 +173,21 @@ void SetPrintfAndReportCallback(void (*callback)(const char *)) {
   PrintfAndReportCallback = callback;
 }
 
+// Can be overriden in frontend.
+#ifndef SANITIZER_SUPPORTS_WEAK_HOOKS
+SANITIZER_INTERFACE_ATTRIBUTE void WEAK OnPrint(const char *str) {
+  (void)str;
+}
+#endif
+
+static void CallPrintfAndReportCallback(const char *str) {
+#ifndef SANITIZER_SUPPORTS_WEAK_HOOKS
+  OnPrint(str);
+#endif
+  if (PrintfAndReportCallback)
+    PrintfAndReportCallback(str);
+}
+
 void Printf(const char *format, ...) {
   const int kLen = 16 * 1024;
   InternalScopedBuffer<char> buffer(kLen);
@@ -182,8 +197,7 @@ void Printf(const char *format, ...) {
   va_end(args);
   RAW_CHECK_MSG(needed_length < kLen, "Buffer in Printf is too short!\n");
   RawWrite(buffer.data());
-  if (PrintfAndReportCallback)
-    PrintfAndReportCallback(buffer.data());
+  CallPrintfAndReportCallback(buffer.data());
 }
 
 // Writes at most "length" symbols to "buffer" (including trailing '\0').
@@ -230,15 +244,15 @@ void Report(const char *format, ...) {
       if (use_mmap) {
         RAW_CHECK_MSG(needed_length < kLen, "Buffer in Report is too short!\n");
       } else {
-        // The error message doesn't fit into the local buffer - allocate a bigger one.
+        // The error message doesn't fit into the local buffer - allocate a
+        // bigger one.
         buffer = (char*)MmapOrDie(kLen, "Report");
         cur_size = kLen;
         continue;
       }
     } else {
       RawWrite(buffer);
-      if (PrintfAndReportCallback)
-        PrintfAndReportCallback(buffer);
+      CallPrintfAndReportCallback(buffer);
       // Don't do anything for the second time if the first iteration
       // succeeded.
       break;

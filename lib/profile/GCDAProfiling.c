@@ -42,7 +42,36 @@ typedef unsigned int uint64_t;
  * --- GCOV file format I/O primitives ---
  */
 
+/*
+ * The current file we're outputting.
+ */ 
 static FILE *output_file = NULL;
+
+/*
+ * A list of functions to write out the data.
+ */
+typedef void (*writeout_fn)();
+
+struct writeout_fn_node {
+  writeout_fn fn;
+  struct writeout_fn_node *next;
+};
+
+struct writeout_fn_node *writeout_fn_head = NULL;
+struct writeout_fn_node *writeout_fn_tail = NULL;
+
+/*
+ *  A list of flush functions that our __gcov_flush() function should call.
+ */
+typedef void (*flush_fn)();
+
+struct flush_fn_node {
+  flush_fn fn;
+  struct flush_fn_node *next;
+};
+
+struct flush_fn_node *flush_fn_head = NULL;
+struct flush_fn_node *flush_fn_tail = NULL;
 
 static void write_int32(uint32_t i) {
   fwrite(&i, 4, 1, output_file);
@@ -287,4 +316,87 @@ void llvm_gcda_end_file() {
 #ifdef DEBUG_GCDAPROFILING
   fprintf(stderr, "llvmgcda: -----\n");
 #endif
+}
+
+void llvm_register_writeout_function(writeout_fn fn) {
+  struct writeout_fn_node *new_node = malloc(sizeof(struct writeout_fn_node));
+  new_node->fn = fn;
+  new_node->next = NULL;
+
+  if (!writeout_fn_head) {
+    writeout_fn_head = writeout_fn_tail = new_node;
+  } else {
+    writeout_fn_tail->next = new_node;
+    writeout_fn_tail = new_node;
+  }
+}
+
+void llvm_writeout_files() {
+  struct writeout_fn_node *curr = writeout_fn_head;
+
+  while (curr) {
+    curr->fn();
+    curr = curr->next;
+  }
+}
+
+void llvm_delete_writeout_function_list() {
+  while (writeout_fn_head) {
+    struct writeout_fn_node *node = writeout_fn_head;
+    writeout_fn_head = writeout_fn_head->next;
+    free(node);
+  }
+  
+  writeout_fn_head = writeout_fn_tail = NULL;
+}
+
+void llvm_register_flush_function(flush_fn fn) {
+  struct flush_fn_node *new_node = malloc(sizeof(struct flush_fn_node));
+  new_node->fn = fn;
+  new_node->next = NULL;
+
+  if (!flush_fn_head) {
+    flush_fn_head = flush_fn_tail = new_node;
+  } else {
+    flush_fn_tail->next = new_node;
+    flush_fn_tail = new_node;
+  }
+}
+
+void __gcov_flush() {
+  struct flush_fn_node *curr = flush_fn_head;
+
+  while (curr) {
+    curr->fn();
+    curr = curr->next;
+  }
+}
+
+void llvm_delete_flush_function_list() {
+  while (flush_fn_head) {
+    struct flush_fn_node *node = flush_fn_head;
+    flush_fn_head = flush_fn_head->next;
+    free(node);
+  }
+
+  flush_fn_head = flush_fn_tail = NULL;
+}
+
+void llvm_gcov_init(writeout_fn wfn, flush_fn ffn) {
+  static int atexit_ran = 0;
+
+  if (wfn)
+    llvm_register_writeout_function(wfn);
+
+  if (ffn)
+    llvm_register_flush_function(ffn);
+
+  if (atexit_ran == 0) {
+    atexit_ran = 1;
+
+    /* Make sure we write out the data and delete the data structures. */
+    atexit(llvm_delete_flush_function_list);
+    atexit(llvm_delete_writeout_function_list);
+    atexit(llvm_writeout_files);
+  }
 }

@@ -12,7 +12,8 @@
 // Mac-specific malloc interception.
 //===----------------------------------------------------------------------===//
 
-#ifdef __APPLE__
+#include "sanitizer_common/sanitizer_platform.h"
+#if SANITIZER_MAC
 
 #include <AvailabilityMacros.h>
 #include <CoreFoundation/CFBase.h>
@@ -26,7 +27,6 @@
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_stats.h"
-#include "asan_thread_registry.h"
 
 // Similar code is used in Google Perftools,
 // http://code.google.com/p/google-perftools.
@@ -284,7 +284,7 @@ void mi_force_unlock(malloc_zone_t *zone) {
 
 void mi_statistics(malloc_zone_t *zone, malloc_statistics_t *stats) {
   AsanMallocStats malloc_stats;
-  asanThreadRegistry().FillMallocStatistics(&malloc_stats);
+  FillMallocStatistics(&malloc_stats);
   CHECK(sizeof(malloc_statistics_t) == sizeof(AsanMallocStats));
   internal_memcpy(stats, &malloc_stats, sizeof(malloc_statistics_t));
 }

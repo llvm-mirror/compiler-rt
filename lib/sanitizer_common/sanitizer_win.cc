@@ -11,7 +11,10 @@
 // run-time libraries and implements windows-specific functions from
 // sanitizer_libc.h.
 //===----------------------------------------------------------------------===//
-#ifdef _WIN32
+
+#include "sanitizer_platform.h"
+#if SANITIZER_WINDOWS
+
 #define WIN32_LEAN_AND_MEAN
 #define NOGDI
 #include <stdlib.h>
@@ -42,8 +45,14 @@ int GetPid() {
   return GetProcessId(GetCurrentProcess());
 }
 
-uptr GetThreadSelf() {
+// In contrast to POSIX, on Windows GetCurrentThreadId()
+// returns a system-unique identifier.
+uptr GetTid() {
   return GetCurrentThreadId();
+}
+
+uptr GetThreadSelf() {
+  return GetTid();
 }
 
 void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
@@ -111,19 +120,38 @@ void *MapFileToMemory(const char *file_name, uptr *buff_size) {
   UNIMPLEMENTED();
 }
 
+static const int kMaxEnvNameLength = 128;
+static const int kMaxEnvValueLength = 32767;
+
+namespace {
+
+struct EnvVariable {
+  char name[kMaxEnvNameLength];
+  char value[kMaxEnvValueLength];
+};
+
+}  // namespace
+
+static const int kEnvVariables = 5;
+static EnvVariable env_vars[kEnvVariables];
+static int num_env_vars;
+
 const char *GetEnv(const char *name) {
-  static char env_buffer[32767] = {};
-
-  // Note: this implementation stores the result in a static buffer so we only
-  // allow it to be called just once.
-  static bool called_once = false;
-  if (called_once)
-    UNIMPLEMENTED();
-  called_once = true;
-
-  DWORD rv = GetEnvironmentVariableA(name, env_buffer, sizeof(env_buffer));
-  if (rv > 0 && rv < sizeof(env_buffer))
-    return env_buffer;
+  // Note: this implementation caches the values of the environment variables
+  // and limits their quantity.
+  for (int i = 0; i < num_env_vars; i++) {
+    if (0 == internal_strcmp(name, env_vars[i].name))
+      return env_vars[i].value;
+  }
+  CHECK_LT(num_env_vars, kEnvVariables);
+  DWORD rv = GetEnvironmentVariableA(name, env_vars[num_env_vars].value,
+                                     kMaxEnvValueLength);
+  if (rv > 0 && rv < kMaxEnvValueLength) {
+    CHECK_LT(internal_strlen(name), kMaxEnvNameLength);
+    internal_strncpy(env_vars[num_env_vars].name, name, kMaxEnvNameLength);
+    num_env_vars++;
+    return env_vars[num_env_vars - 1].value;
+  }
   return 0;
 }
 
@@ -270,6 +298,12 @@ BlockingMutex::BlockingMutex(LinkerInitialized li) {
   owner_ = LOCK_READY;
 }
 
+BlockingMutex::BlockingMutex() {
+  CHECK(sizeof(CRITICAL_SECTION) <= sizeof(opaque_storage_));
+  InitializeCriticalSection((LPCRITICAL_SECTION)opaque_storage_);
+  owner_ = LOCK_READY;
+}
+
 void BlockingMutex::Lock() {
   if (owner_ == LOCK_UNINITIALIZED) {
     // FIXME: hm, global BlockingMutex objects are not initialized?!?
@@ -293,6 +327,13 @@ void BlockingMutex::Unlock() {
 
 void BlockingMutex::CheckLocked() {
   CHECK_EQ(owner_, GetThreadSelf());
+}
+
+uptr GetTlsSize() {
+  return 0;
+}
+
+void InitTlsSize() {
 }
 
 }  // namespace __sanitizer

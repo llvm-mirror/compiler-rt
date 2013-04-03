@@ -22,6 +22,7 @@
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
 #include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_linux.h"
 
 #include <stdarg.h>
 // ACHTUNG! No other system header includes in this file.
@@ -88,6 +89,13 @@ INTERCEPTOR(void *, readdir, void *a) {
   ENSURE_MSAN_INITED();
   void *res = REAL(readdir)(a);
   __msan_unpoison(res, __sanitizer::struct_dirent_sz);
+  return res;
+}
+
+INTERCEPTOR(void *, readdir64, void *a) {
+  ENSURE_MSAN_INITED();
+  void *res = REAL(readdir)(a);
+  __msan_unpoison(res, __sanitizer::struct_dirent64_sz);
   return res;
 }
 
@@ -158,6 +166,32 @@ INTERCEPTOR(char *, strdup, char *src) {
   SIZE_T n = REAL(strlen)(src);
   char *res = REAL(strdup)(src);
   __msan_copy_poison(res, src, n + 1);
+  return res;
+}
+
+INTERCEPTOR(char *, __strdup, char *src) {
+  ENSURE_MSAN_INITED();
+  SIZE_T n = REAL(strlen)(src);
+  char *res = REAL(__strdup)(src);
+  __msan_copy_poison(res, src, n + 1);
+  return res;
+}
+
+INTERCEPTOR(char *, strndup, char *src, SIZE_T n) {
+  ENSURE_MSAN_INITED();
+  SIZE_T copy_size = REAL(strnlen)(src, n);
+  char *res = REAL(strndup)(src, n);
+  __msan_copy_poison(res, src, copy_size);
+  __msan_unpoison(res + copy_size, 1); // \0
+  return res;
+}
+
+INTERCEPTOR(char *, __strndup, char *src, SIZE_T n) {
+  ENSURE_MSAN_INITED();
+  SIZE_T copy_size = REAL(strnlen)(src, n);
+  char *res = REAL(__strndup)(src, n);
+  __msan_copy_poison(res, src, copy_size);
+  __msan_unpoison(res + copy_size, 1); // \0
   return res;
 }
 
@@ -773,7 +807,7 @@ INTERCEPTOR(void *, dlopen, const char *filename, int flag) {
   EnterLoader();
   link_map *map = (link_map *)REAL(dlopen)(filename, flag);
   ExitLoader();
-  if (!__msan_has_dynamic_component()) {
+  if (!__msan_has_dynamic_component() && map) {
     // If msandr didn't clear the shadow before the initializers ran, we do it
     // ourselves afterwards.
     UnpoisonMappedDSO(map);
@@ -786,6 +820,42 @@ INTERCEPTOR(int, getrusage, int who, void *usage) {
   int res = REAL(getrusage)(who, usage);
   if (res == 0) {
     __msan_unpoison(usage, __sanitizer::struct_rusage_sz);
+  }
+  return res;
+}
+
+INTERCEPTOR(int, sigaction, int signum, const void *act, void *oldact) {
+  ENSURE_MSAN_INITED();
+  // TODO: check that *act is unpoisoned.
+  // That requires intercepting all of sigemptyset, sigfillset, etc.
+  int res = REAL(sigaction)(signum, act, oldact);
+  if (res == 0) {
+    __msan_unpoison(oldact, __sanitizer::struct_sigaction_sz);
+  }
+  return res;
+}
+
+extern "C" int pthread_attr_init(void *attr);
+extern "C" int pthread_attr_destroy(void *attr);
+extern "C" int pthread_attr_setstacksize(void *attr, uptr stacksize);
+extern "C" int pthread_attr_getstack(void *attr, uptr *stack, uptr *stacksize);
+
+INTERCEPTOR(int, pthread_create, void *th, void *attr, void *(*callback)(void*),
+            void * param) {
+  ENSURE_MSAN_INITED(); // for GetTlsSize()
+  __sanitizer_pthread_attr_t myattr;
+  if (attr == 0) {
+    pthread_attr_init(&myattr);
+    attr = &myattr;
+  }
+
+  AdjustStackSizeLinux(attr, flags()->verbosity);
+
+  int res = REAL(pthread_create)(th, attr, callback, param);
+  if (attr == &myattr)
+    pthread_attr_destroy(&myattr);
+  if (!res) {
+    __msan_unpoison(th, __sanitizer::pthread_t_sz);
   }
   return res;
 }
@@ -927,6 +997,7 @@ void InitializeInterceptors() {
   INTERCEPT_FUNCTION(fread_unlocked);
   INTERCEPT_FUNCTION(readlink);
   INTERCEPT_FUNCTION(readdir);
+  INTERCEPT_FUNCTION(readdir64);
   INTERCEPT_FUNCTION(memcpy);
   INTERCEPT_FUNCTION(memset);
   INTERCEPT_FUNCTION(memmove);
@@ -935,6 +1006,9 @@ void InitializeInterceptors() {
   INTERCEPT_FUNCTION(wmemmove);
   INTERCEPT_FUNCTION(strcpy);  // NOLINT
   INTERCEPT_FUNCTION(strdup);
+  INTERCEPT_FUNCTION(__strdup);
+  INTERCEPT_FUNCTION(strndup);
+  INTERCEPT_FUNCTION(__strndup);
   INTERCEPT_FUNCTION(strncpy);  // NOLINT
   INTERCEPT_FUNCTION(strlen);
   INTERCEPT_FUNCTION(strnlen);
@@ -994,6 +1068,8 @@ void InitializeInterceptors() {
   INTERCEPT_FUNCTION(dladdr);
   INTERCEPT_FUNCTION(dlopen);
   INTERCEPT_FUNCTION(getrusage);
+  INTERCEPT_FUNCTION(sigaction);
+  INTERCEPT_FUNCTION(pthread_create);
   inited = 1;
 }
 }  // namespace __msan
