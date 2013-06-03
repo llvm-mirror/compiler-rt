@@ -15,10 +15,15 @@
 #ifndef MSAN_H
 #define MSAN_H
 
+#include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
 #include "msan_interface_internal.h"
 #include "msan_flags.h"
+
+#ifndef MSAN_REPLACE_OPERATORS_NEW_AND_DELETE
+# define MSAN_REPLACE_OPERATORS_NEW_AND_DELETE 1
+#endif
 
 #define MEM_TO_SHADOW(mem) (((uptr)mem)       & ~0x400000000000ULL)
 #define MEM_TO_ORIGIN(mem) (MEM_TO_SHADOW(mem) + 0x200000000000ULL)
@@ -77,9 +82,9 @@ void UnpoisonMappedDSO(struct link_map *map);
   StackTrace stack;                                                \
   stack.size = 0;                                                  \
   if (__msan_get_track_origins() && msan_inited)                   \
-    GetStackTrace(&stack, flags()->num_callers,                    \
+    GetStackTrace(&stack, common_flags()->malloc_context_size,     \
         StackTrace::GetCurrentPc(), GET_CURRENT_FRAME(),           \
-        flags()->fast_unwind_on_malloc)
+        common_flags()->fast_unwind_on_malloc)
 
 }  // namespace __msan
 

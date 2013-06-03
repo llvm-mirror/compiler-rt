@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 #include "asan_allocator.h"
 #include "asan_interceptors.h"
+#include "asan_poisoning.h"
 #include "asan_stack.h"
 #include "asan_thread.h"
 #include "asan_mapping.h"
@@ -128,7 +129,7 @@ thread_return_t AsanThread::ThreadStart(uptr os_id) {
     // start_routine_ == 0 if we're on the main thread or on one of the
     // OS X libdispatch worker threads. But nobody is supposed to call
     // ThreadStart() for the worker threads.
-    CHECK(tid() == 0);
+    CHECK_EQ(tid(), 0);
     return 0;
   }
 
@@ -151,7 +152,8 @@ void AsanThread::ClearShadowForThreadStack() {
   PoisonShadow(stack_bottom_, stack_top_ - stack_bottom_, 0);
 }
 
-const char *AsanThread::GetFrameNameByAddr(uptr addr, uptr *offset) {
+const char *AsanThread::GetFrameNameByAddr(uptr addr, uptr *offset,
+                                           uptr *frame_pc) {
   uptr bottom = 0;
   if (AddrIsInStack(addr)) {
     bottom = stack_bottom();
@@ -159,6 +161,7 @@ const char *AsanThread::GetFrameNameByAddr(uptr addr, uptr *offset) {
     bottom = fake_stack().AddrIsInFakeStack(addr);
     CHECK(bottom);
     *offset = addr - bottom;
+    *frame_pc = ((uptr*)bottom)[2];
     return  (const char *)((uptr*)bottom)[1];
   }
   uptr aligned_addr = addr & ~(SANITIZER_WORDSIZE/8 - 1);  // align addr.
@@ -183,6 +186,7 @@ const char *AsanThread::GetFrameNameByAddr(uptr addr, uptr *offset) {
   uptr* ptr = (uptr*)SHADOW_TO_MEM((uptr)(shadow_ptr + 1));
   CHECK(ptr[0] == kCurrentStackFrameMagic);
   *offset = addr - (uptr)ptr;
+  *frame_pc = ptr[2];
   return (const char*)ptr[1];
 }
 
@@ -202,8 +206,8 @@ AsanThread *GetCurrentThread() {
       // On Android, libc constructor is called _after_ asan_init, and cleans up
       // TSD. Try to figure out if this is still the main thread by the stack
       // address. We are not entirely sure that we have correct main thread
-      // limits, so only do this magic on Android, and only if the found thread is
-      // the main thread.
+      // limits, so only do this magic on Android, and only if the found thread
+      // is the main thread.
       AsanThreadContext *tctx = GetThreadContextByTidLocked(0);
       if (ThreadStackContainsAddress(tctx, &context)) {
         SetCurrentThread(tctx->thread);

@@ -25,8 +25,13 @@ extern "C" {
   // Everytime the asan ABI changes we also change the version number in this
   // name. Objects build with incompatible asan ABI version
   // will not link with run-time.
-  void __asan_init_v2() SANITIZER_INTERFACE_ATTRIBUTE;
-  #define __asan_init __asan_init_v2
+  // Changes between ABI versions:
+  // v1=>v2: added 'module_name' to __asan_global
+  // v2=>v3: stack frame description (created by the compiler)
+  //         contains the function PC as the 3-rd field (see
+  //         DescribeAddressIfStack).
+  void __asan_init_v3() SANITIZER_INTERFACE_ATTRIBUTE;
+  #define __asan_init __asan_init_v3
 
   // This structure describes an instrumented global variable.
   struct __asan_global {
@@ -34,7 +39,8 @@ extern "C" {
     uptr size;               // The original size of the global.
     uptr size_with_redzone;  // The size with the redzone.
     const char *name;        // Name as a C string.
-    const char *module_name; // Module name as a C string.
+    const char *module_name; // Module name as a C string. This pointer is a
+                             // unique identifier of a module.
     uptr has_dynamic_init;   // Non-zero if the global has dynamic initializer.
   };
 
@@ -46,9 +52,8 @@ extern "C" {
       SANITIZER_INTERFACE_ATTRIBUTE;
 
   // These two functions should be called before and after dynamic initializers
-  // run, respectively.  They should be called with parameters describing all
-  // dynamically initialized globals defined in the calling TU.
-  void __asan_before_dynamic_init(uptr first_addr, uptr last_addr)
+  // of a single module run, respectively.
+  void __asan_before_dynamic_init(const char *module_name)
       SANITIZER_INTERFACE_ATTRIBUTE;
   void __asan_after_dynamic_init()
       SANITIZER_INTERFACE_ATTRIBUTE;

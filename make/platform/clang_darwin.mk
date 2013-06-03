@@ -70,9 +70,6 @@ Configs += profile_ios
 UniversalArchs.profile_ios := $(call CheckArches,i386 x86_64 armv7,profile_ios)
 
 # Configurations which define the ASAN support functions.
-Configs += asan_osx
-UniversalArchs.asan_osx := $(call CheckArches,i386 x86_64,asan_osx)
-
 Configs += asan_osx_dynamic
 UniversalArchs.asan_osx_dynamic := $(call CheckArches,i386 x86_64,asan_osx_dynamic)
 
@@ -83,13 +80,11 @@ UniversalArchs.ubsan_osx := $(call CheckArches,i386 x86_64,ubsan_osx)
 # object files. If we are on that platform, strip out all ARM archs. We still
 # build the libraries themselves so that Clang can find them where it expects
 # them, even though they might not have an expected slice.
-ifneq ($(shell which sw_vers),)
-ifneq ($(shell sw_vers -productVersion | grep 10.6),)
+ifneq ($(shell test -x /usr/bin/sw_vers && sw_vers -productVersion | grep 10.6),)
 UniversalArchs.ios := $(filter-out armv7, $(UniversalArchs.ios))
 UniversalArchs.cc_kext := $(filter-out armv7, $(UniversalArchs.cc_kext))
 UniversalArchs.cc_kext_ios5 := $(filter-out armv7, $(UniversalArchs.cc_kext_ios5))
 UniversalArchs.profile_ios := $(filter-out armv7, $(UniversalArchs.profile_ios))
-endif
 endif
 
 # If RC_SUPPORTED_ARCHS is defined, treat it as a list of the architectures we
@@ -118,9 +113,9 @@ CFLAGS := -Wall -Werror -O3 -fomit-frame-pointer
 # supported deployment target -- nothing in the compiler-rt libraries should
 # actually depend on the deployment target.
 OSX_DEPLOYMENT_ARGS := -mmacosx-version-min=10.4
-IOS_DEPLOYMENT_ARGS := -miphoneos-version-min=1.0
-IOS6_DEPLOYMENT_ARGS := -miphoneos-version-min=6.0
-IOSSIM_DEPLOYMENT_ARGS := -miphoneos-version-min=1.0
+IOS_DEPLOYMENT_ARGS := -mios-version-min=1.0
+IOS6_DEPLOYMENT_ARGS := -mios-version-min=6.0
+IOSSIM_DEPLOYMENT_ARGS := -mios-simulator-version-min=1.0
 
 # Use our stub SDK as the sysroot to support more portable building.
 OSX_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
@@ -131,10 +126,9 @@ IOSSIM_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
 CFLAGS.eprintf		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.10.4		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 # FIXME: We can't build ASAN with our stub SDK yet.
-CFLAGS.asan_osx         := $(CFLAGS) -mmacosx-version-min=10.5 -fno-builtin \
-                           -fno-rtti -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
 CFLAGS.asan_osx_dynamic := \
 	$(CFLAGS) -mmacosx-version-min=10.5 -fno-builtin \
+	-gline-tables-only \
 	-DMAC_INTERPOSE_FUNCTIONS=1 \
   -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
 
@@ -186,8 +180,6 @@ FUNCTIONS.osx	:= mulosi4 mulodi4 muloti4
 FUNCTIONS.profile_osx := GCDAProfiling
 FUNCTIONS.profile_ios := GCDAProfiling
 
-FUNCTIONS.asan_osx := $(AsanFunctions) $(InterceptionFunctions) \
-                                       $(SanitizerCommonFunctions)
 FUNCTIONS.asan_osx_dynamic := $(AsanFunctions) $(InterceptionFunctions) \
                               $(SanitizerCommonFunctions) \
 	                      $(AsanDynamicFunctions)

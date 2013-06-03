@@ -27,7 +27,7 @@
 # define SANITIZER_WEAK_ATTRIBUTE  __attribute__((weak))
 #endif
 
-#if SANITIZER_LINUX
+#if SANITIZER_LINUX && !defined(SANITIZER_GO)
 # define SANITIZER_SUPPORTS_WEAK_HOOKS 1
 #else
 # define SANITIZER_SUPPORTS_WEAK_HOOKS 0
@@ -109,13 +109,13 @@ using namespace __sanitizer;  // NOLINT
 // This header should NOT include any other headers to avoid portability issues.
 
 // Common defs.
-#define INLINE static inline
+#define INLINE inline
 #define INTERFACE_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE
 #define WEAK SANITIZER_WEAK_ATTRIBUTE
 
 // Platform-specific defs.
 #if defined(_MSC_VER)
-# define ALWAYS_INLINE __declspec(forceinline)
+# define ALWAYS_INLINE __forceinline
 // FIXME(timurrrr): do we need this on Windows?
 # define ALIAS(x)
 # define ALIGNED(x) __declspec(align(x))
@@ -130,7 +130,7 @@ using namespace __sanitizer;  // NOLINT
 # define USED
 # define PREFETCH(x) /* _mm_prefetch(x, _MM_HINT_NTA) */
 #else  // _MSC_VER
-# define ALWAYS_INLINE __attribute__((always_inline))
+# define ALWAYS_INLINE inline __attribute__((always_inline))
 # define ALIAS(x) __attribute__((alias(x)))
 # define ALIGNED(x) __attribute__((aligned(x)))
 # define FORMAT(f, a)  __attribute__((format(printf, f, a)))
@@ -273,10 +273,12 @@ extern "C" void* _ReturnAddress(void);
 # define GET_CURRENT_FRAME() (uptr)0xDEADBEEF
 #endif
 
-#define HANDLE_EINTR(res, f) {                               \
-  do {                                                                  \
-    res = (f);                                                         \
-  } while (res == -1 && errno == EINTR); \
+#define HANDLE_EINTR(res, f)                                       \
+  {                                                                \
+    int rverrno;                                                   \
+    do {                                                           \
+      res = (f);                                                   \
+    } while (internal_iserror(res, &rverrno) && rverrno == EINTR); \
   }
 
 #endif  // SANITIZER_DEFS_H

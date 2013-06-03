@@ -138,6 +138,8 @@ void StatOutput(u64 *stat) {
   name[StatInt_strcpy]                   = "  strcpy                          ";
   name[StatInt_strncpy]                  = "  strncpy                         ";
   name[StatInt_strstr]                   = "  strstr                          ";
+  name[StatInt_strcasecmp]               = "  strcasecmp                      ";
+  name[StatInt_strncasecmp]              = "  strncasecmp                     ";
   name[StatInt_atexit]                   = "  atexit                          ";
   name[StatInt___cxa_guard_acquire]      = "  __cxa_guard_acquire             ";
   name[StatInt___cxa_guard_release]      = "  __cxa_guard_release             ";
@@ -177,6 +179,7 @@ void StatOutput(u64 *stat) {
   name[StatInt_pthread_barrier_destroy]  = "  pthread_barrier_destroy         ";
   name[StatInt_pthread_barrier_wait]     = "  pthread_barrier_wait            ";
   name[StatInt_pthread_once]             = "  pthread_once                    ";
+  name[StatInt_pthread_getschedparam]    = "  pthread_getschedparam           ";
   name[StatInt_sem_init]                 = "  sem_init                        ";
   name[StatInt_sem_destroy]              = "  sem_destroy                     ";
   name[StatInt_sem_wait]                 = "  sem_wait                        ";
@@ -285,6 +288,29 @@ void StatOutput(u64 *stat) {
   name[StatInt_frexp]                    = "  frexp                           ";
   name[StatInt_frexpf]                   = "  frexpf                          ";
   name[StatInt_frexpl]                   = "  frexpl                          ";
+  name[StatInt_getpwnam]                 = "  getpwnam                        ";
+  name[StatInt_getpwuid]                 = "  getpwuid                        ";
+  name[StatInt_getgrnam]                 = "  getgrnam                        ";
+  name[StatInt_getgrgid]                 = "  getgrgid                        ";
+  name[StatInt_getpwnam_r]               = "  getpwnam_r                      ";
+  name[StatInt_getpwuid_r]               = "  getpwuid_r                      ";
+  name[StatInt_getgrnam_r]               = "  getgrnam_r                      ";
+  name[StatInt_getgrgid_r]               = "  getgrgid_r                      ";
+  name[StatInt_clock_getres]             = "  clock_getres                    ";
+  name[StatInt_clock_gettime]            = "  clock_gettime                   ";
+  name[StatInt_clock_settime]            = "  clock_settime                   ";
+  name[StatInt_getitimer]                = "  getitimer                       ";
+  name[StatInt_setitimer]                = "  setitimer                       ";
+  name[StatInt_time]                     = "  time                            ";
+  name[StatInt_glob]                     = "  glob                            ";
+  name[StatInt_glob64]                   = "  glob64                          ";
+  name[StatInt_wait]                     = "  wait                            ";
+  name[StatInt_waitid]                   = "  waitid                          ";
+  name[StatInt_waitpid]                  = "  waitpid                         ";
+  name[StatInt_wait3]                    = "  wait3                           ";
+  name[StatInt_wait4]                    = "  wait4                           ";
+  name[StatInt_inet_ntop]                = "  inet_ntop                       ";
+  name[StatInt_inet_pton]                = "  inet_pton                       ";
 
   name[StatAnnotation]                   = "Dynamic annotations               ";
   name[StatAnnotateHappensBefore]        = "  HappensBefore                   ";

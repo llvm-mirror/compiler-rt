@@ -84,10 +84,12 @@ ThreadState::ThreadState(Context *ctx, int tid, int unique_id, u64 epoch,
   : fast_state(tid, epoch)
   // Do not touch these, rely on zero initialization,
   // they may be accessed before the ctor.
-  // , fast_ignore_reads()
-  // , fast_ignore_writes()
+  // , ignore_reads_and_writes()
   // , in_rtl()
   , shadow_stack_pos(&shadow_stack[0])
+#ifndef TSAN_GO
+  , jmp_bufs(MBlockJmpBuf)
+#endif
   , tid(tid)
   , unique_id(unique_id)
   , stk_addr(stk_addr)
@@ -117,11 +119,13 @@ static void BackgroundThread(void *arg) {
   if (flags()->profile_memory && flags()->profile_memory[0]) {
     InternalScopedBuffer<char> filename(4096);
     internal_snprintf(filename.data(), filename.size(), "%s.%d",
-        flags()->profile_memory, GetPid());
-    mprof_fd = OpenFile(filename.data(), true);
-    if (mprof_fd == kInvalidFd) {
+        flags()->profile_memory, (int)internal_getpid());
+    uptr openrv = OpenFile(filename.data(), true);
+    if (internal_iserror(openrv)) {
       Printf("ThreadSanitizer: failed to open memory profile file '%s'\n",
           &filename[0]);
+    } else {
+      mprof_fd = openrv;
     }
   }
 
@@ -149,6 +153,7 @@ static void BackgroundThread(void *arg) {
                              memory_order_relaxed);
       if (last != 0 && last + flags()->flush_symbolizer_ms * kMs2Ns < now) {
         Lock l(&ctx->report_mtx);
+        SpinMutexLock l2(&CommonSanitizerReportMutex);
         SymbolizeFlush();
         atomic_store(&ctx->last_symbolize_time_ns, 0, memory_order_relaxed);
       }
@@ -223,19 +228,19 @@ void Initialize(ThreadState *thr) {
 
   if (ctx->flags.verbosity)
     Printf("***** Running under ThreadSanitizer v2 (pid %d) *****\n",
-               GetPid());
+           (int)internal_getpid());
 
   // Initialize thread 0.
   int tid = ThreadCreate(thr, 0, 0, true);
   CHECK_EQ(tid, 0);
-  ThreadStart(thr, tid, GetPid());
+  ThreadStart(thr, tid, internal_getpid());
   CHECK_EQ(thr->in_rtl, 1);
   ctx->initialized = true;
 
   if (flags()->stop_on_start) {
     Printf("ThreadSanitizer is suspended at startup (pid %d)."
            " Call __tsan_resume().\n",
-           GetPid());
+           (int)internal_getpid());
     while (__tsan_resumed == 0) {}
   }
 }
@@ -250,6 +255,8 @@ int Finalize(ThreadState *thr) {
 
   // Wait for pending reports.
   ctx->report_mtx.Lock();
+  CommonSanitizerReportMutex.Lock();
+  CommonSanitizerReportMutex.Unlock();
   ctx->report_mtx.Unlock();
 
 #ifndef TSAN_GO
@@ -273,6 +280,13 @@ int Finalize(ThreadState *thr) {
     Printf("ThreadSanitizer: missed %d expected races\n",
         ctx->nmissed_expected);
   }
+
+  if (flags()->print_suppressions)
+    PrintMatchedSuppressions();
+#ifndef TSAN_GO
+  if (flags()->print_benign)
+    PrintMatchedBenignRaces();
+#endif
 
   failed = OnFinalize(failed);
 
@@ -339,18 +353,18 @@ extern "C" void __tsan_report_race() {
 #endif
 
 ALWAYS_INLINE
-static Shadow LoadShadow(u64 *p) {
+Shadow LoadShadow(u64 *p) {
   u64 raw = atomic_load((atomic_uint64_t*)p, memory_order_relaxed);
   return Shadow(raw);
 }
 
 ALWAYS_INLINE
-static void StoreShadow(u64 *sp, u64 s) {
+void StoreShadow(u64 *sp, u64 s) {
   atomic_store((atomic_uint64_t*)sp, s, memory_order_relaxed);
 }
 
 ALWAYS_INLINE
-static void StoreIfNotYetStored(u64 *sp, u64 *s) {
+void StoreIfNotYetStored(u64 *sp, u64 *s) {
   StoreShadow(sp, *s);
   *s = 0;
 }
@@ -375,7 +389,7 @@ static inline bool HappensBefore(Shadow old, ThreadState *thr) {
   return thr->clock.get(old.TidWithIgnore()) >= old.epoch();
 }
 
-ALWAYS_INLINE
+ALWAYS_INLINE USED
 void MemoryAccessImpl(ThreadState *thr, uptr addr,
     int kAccessSizeLog, bool kAccessIsWrite, bool kIsAtomic,
     u64 *shadow_mem, Shadow cur) {
@@ -449,7 +463,28 @@ void MemoryAccessImpl(ThreadState *thr, uptr addr,
   return;
 }
 
-ALWAYS_INLINE
+void UnalignedMemoryAccess(ThreadState *thr, uptr pc, uptr addr,
+    int size, bool kAccessIsWrite, bool kIsAtomic) {
+  while (size) {
+    int size1 = 1;
+    int kAccessSizeLog = kSizeLog1;
+    if (size >= 8 && (addr & ~7) == ((addr + 8) & ~7)) {
+      size1 = 8;
+      kAccessSizeLog = kSizeLog8;
+    } else if (size >= 4 && (addr & ~7) == ((addr + 4) & ~7)) {
+      size1 = 4;
+      kAccessSizeLog = kSizeLog4;
+    } else if (size >= 2 && (addr & ~7) == ((addr + 2) & ~7)) {
+      size1 = 2;
+      kAccessSizeLog = kSizeLog2;
+    }
+    MemoryAccess(thr, pc, addr, kAccessSizeLog, kAccessIsWrite, kIsAtomic);
+    addr += size1;
+    size -= size1;
+  }
+}
+
+ALWAYS_INLINE USED
 void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
     int kAccessSizeLog, bool kAccessIsWrite, bool kIsAtomic) {
   u64 *shadow_mem = (u64*)MemToShadow(addr);
@@ -571,6 +606,8 @@ void MemoryRangeFreed(ThreadState *thr, uptr pc, uptr addr, uptr size) {
   thr->is_freeing = true;
   MemoryAccessRange(thr, pc, addr, size, true);
   thr->is_freeing = false;
+  thr->fast_state.IncrementEpoch();
+  TraceAddEvent(thr, thr->fast_state, EventTypeMop, pc);
   Shadow s(thr->fast_state);
   s.ClearIgnoreBit();
   s.MarkAsFreed();
@@ -580,6 +617,8 @@ void MemoryRangeFreed(ThreadState *thr, uptr pc, uptr addr, uptr size) {
 }
 
 void MemoryRangeImitateWrite(ThreadState *thr, uptr pc, uptr addr, uptr size) {
+  thr->fast_state.IncrementEpoch();
+  TraceAddEvent(thr, thr->fast_state, EventTypeMop, pc);
   Shadow s(thr->fast_state);
   s.ClearIgnoreBit();
   s.SetWrite(true);
@@ -587,7 +626,7 @@ void MemoryRangeImitateWrite(ThreadState *thr, uptr pc, uptr addr, uptr size) {
   MemoryRangeSet(thr, pc, addr, size, s.raw());
 }
 
-ALWAYS_INLINE
+ALWAYS_INLINE USED
 void FuncEntry(ThreadState *thr, uptr pc) {
   DCHECK_EQ(thr->in_rtl, 0);
   StatInc(thr, StatFuncEnter);
@@ -617,7 +656,7 @@ void FuncEntry(ThreadState *thr, uptr pc) {
   thr->shadow_stack_pos++;
 }
 
-ALWAYS_INLINE
+ALWAYS_INLINE USED
 void FuncExit(ThreadState *thr) {
   DCHECK_EQ(thr->in_rtl, 0);
   StatInc(thr, StatFuncExit);

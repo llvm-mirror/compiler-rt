@@ -13,6 +13,7 @@
 #ifndef SANITIZER_LINUX_H
 #define SANITIZER_LINUX_H
 
+#include "sanitizer_common.h"
 #include "sanitizer_internal_defs.h"
 
 struct sigaltstack;
@@ -23,9 +24,10 @@ namespace __sanitizer {
 struct linux_dirent;
 
 // Syscall wrappers.
-int internal_getdents(fd_t fd, struct linux_dirent *dirp, unsigned int count);
-int internal_prctl(int option, uptr arg2, uptr arg3, uptr arg4, uptr arg5);
-int internal_sigaltstack(const struct sigaltstack *ss, struct sigaltstack *oss);
+uptr internal_getdents(fd_t fd, struct linux_dirent *dirp, unsigned int count);
+uptr internal_prctl(int option, uptr arg2, uptr arg3, uptr arg4, uptr arg5);
+uptr internal_sigaltstack(const struct sigaltstack* ss,
+                          struct sigaltstack* oss);
 
 // This class reads thread IDs from /proc/<pid>/task using only syscalls.
 class ThreadLister {
@@ -43,13 +45,20 @@ class ThreadLister {
 
   int pid_;
   int descriptor_;
-  char buffer_[4096];
+  InternalScopedBuffer<char> buffer_;
   bool error_;
   struct linux_dirent* entry_;
   int bytes_read_;
 };
 
 void AdjustStackSizeLinux(void *attr, int verbosity);
+
+// Exposed for testing.
+uptr ThreadDescriptorSize();
+
+// Matches a library's file name against a base name (stripping path and version
+// information).
+bool LibraryNameIs(const char *full_name, const char *base_name);
 
 }  // namespace __sanitizer
 

@@ -11,18 +11,27 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifdef __linux__
+#include "sanitizer_common/sanitizer_platform.h"
+#if SANITIZER_LINUX
 
 #include "sanitizer_common/sanitizer_linux.h"
-#include "gtest/gtest.h"
 
 #include "sanitizer_common/sanitizer_common.h"
+#include "gtest/gtest.h"
 
+#ifdef __x86_64__
+#include <asm/prctl.h>
+#endif
 #include <pthread.h>
 #include <sched.h>
+#include <stdlib.h>
 
 #include <algorithm>
 #include <vector>
+
+#ifdef __x86_64__
+extern "C" int arch_prctl(int code, __sanitizer::uptr *addr);
+#endif
 
 namespace __sanitizer {
 
@@ -185,6 +194,60 @@ TEST_F(ThreadListerTest, ResetMakesNewThreadsKnown) {
   ASSERT_TRUE(HasElement(threads_after_extra, extra_tid));
 }
 
+TEST(SanitizerCommon, SetEnvTest) {
+  const char kEnvName[] = "ENV_FOO";
+  SetEnv(kEnvName, "value");
+  EXPECT_STREQ("value", getenv(kEnvName));
+  unsetenv(kEnvName);
+  EXPECT_EQ(0, getenv(kEnvName));
+}
+
+#ifdef __x86_64__
+// libpthread puts the thread descriptor (%fs:0x0) at the end of stack space.
+void *thread_descriptor_test_func(void *arg) {
+  uptr fs;
+  arch_prctl(ARCH_GET_FS, &fs);
+  pthread_attr_t attr;
+  pthread_getattr_np(pthread_self(), &attr);
+  void *stackaddr;
+  uptr stacksize;
+  pthread_attr_getstack(&attr, &stackaddr, &stacksize);
+  return (void *)((uptr)stackaddr + stacksize - fs);
+}
+
+TEST(SanitizerLinux, ThreadDescriptorSize) {
+  pthread_t tid;
+  void *result;
+  pthread_create(&tid, 0, thread_descriptor_test_func, 0);
+  ASSERT_EQ(0, pthread_join(tid, &result));
+  EXPECT_EQ((uptr)result, ThreadDescriptorSize());
+}
+#endif
+
+TEST(SanitizerCommon, LibraryNameIs) {
+  EXPECT_FALSE(LibraryNameIs("", ""));
+
+  char full_name[256];
+  const char *paths[] = { "", "/", "/path/to/" };
+  const char *suffixes[] = { "", "-linux", ".1.2", "-linux.1.2" };
+  const char *base_names[] = { "lib", "lib.0", "lib-i386" };
+  const char *wrong_names[] = { "", "lib.9", "lib-x86_64" };
+  for (uptr i = 0; i < ARRAY_SIZE(paths); i++)
+    for (uptr j = 0; j < ARRAY_SIZE(suffixes); j++) {
+      for (uptr k = 0; k < ARRAY_SIZE(base_names); k++) {
+        internal_snprintf(full_name, ARRAY_SIZE(full_name), "%s%s%s.so",
+                          paths[i], base_names[k], suffixes[j]);
+        EXPECT_TRUE(LibraryNameIs(full_name, base_names[k]))
+            << "Full name " << full_name
+            << " doesn't match base name " << base_names[k];
+        for (uptr m = 0; m < ARRAY_SIZE(wrong_names); m++)
+          EXPECT_FALSE(LibraryNameIs(full_name, wrong_names[m]))
+            << "Full name " << full_name
+            << " matches base name " << wrong_names[m];
+      }
+    }
+}
+
 }  // namespace __sanitizer
 
-#endif  // __linux__
+#endif  // SANITIZER_LINUX

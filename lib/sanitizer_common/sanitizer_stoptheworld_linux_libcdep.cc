@@ -1,4 +1,4 @@
-//===-- sanitizer_stoptheworld_linux.cc -----------------------------------===//
+//===-- sanitizer_stoptheworld_linux_libcdep.cc ---------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -24,6 +24,11 @@
 #include <sys/prctl.h> // for PR_* definitions
 #include <sys/ptrace.h> // for PTRACE_* definitions
 #include <sys/types.h> // for pid_t
+#if SANITIZER_ANDROID && defined(__arm__)
+# include <linux/user.h>  // for pt_regs
+#else
+# include <sys/user.h>  // for user_regs_struct
+#endif
 #include <sys/wait.h> // for signal-related stuff
 
 #include "sanitizer_common.h"
@@ -96,23 +101,26 @@ bool ThreadSuspender::SuspendThread(SuspendedThreadID thread_id) {
   // usually small.
   if (suspended_threads_list_.Contains(thread_id))
     return false;
-  if (internal_ptrace(PTRACE_ATTACH, thread_id, NULL, NULL) != 0) {
+  int pterrno;
+  if (internal_iserror(internal_ptrace(PTRACE_ATTACH, thread_id, NULL, NULL),
+                       &pterrno)) {
     // Either the thread is dead, or something prevented us from attaching.
     // Log this event and move on.
-    Report("Could not attach to thread %d (errno %d).\n", thread_id, errno);
+    Report("Could not attach to thread %d (errno %d).\n", thread_id, pterrno);
     return false;
   } else {
     if (SanitizerVerbosity > 0)
       Report("Attached to thread %d.\n", thread_id);
     // The thread is not guaranteed to stop before ptrace returns, so we must
     // wait on it.
-    int waitpid_status;
+    uptr waitpid_status;
     HANDLE_EINTR(waitpid_status, internal_waitpid(thread_id, NULL, __WALL));
-    if (waitpid_status < 0) {
+    int wperrno;
+    if (internal_iserror(waitpid_status, &wperrno)) {
       // Got a ECHILD error. I don't think this situation is possible, but it
       // doesn't hurt to report it.
       Report("Waiting on thread %d failed, detaching (errno %d).\n", thread_id,
-             errno);
+             wperrno);
       internal_ptrace(PTRACE_DETACH, thread_id, NULL, NULL);
       return false;
     }
@@ -124,14 +132,16 @@ bool ThreadSuspender::SuspendThread(SuspendedThreadID thread_id) {
 void ThreadSuspender::ResumeAllThreads() {
   for (uptr i = 0; i < suspended_threads_list_.thread_count(); i++) {
     pid_t tid = suspended_threads_list_.GetThreadID(i);
-    if (internal_ptrace(PTRACE_DETACH, tid, NULL, NULL) == 0) {
+    int pterrno;
+    if (!internal_iserror(internal_ptrace(PTRACE_DETACH, tid, NULL, NULL),
+                          &pterrno)) {
       if (SanitizerVerbosity > 0)
         Report("Detached from thread %d.\n", tid);
     } else {
       // Either the thread is dead, or we are already detached.
       // The latter case is possible, for instance, if this function was called
       // from a signal handler.
-      Report("Could not detach from thread %d (errno %d).\n", tid, errno);
+      Report("Could not detach from thread %d (errno %d).\n", tid, pterrno);
     }
   }
 }
@@ -143,27 +153,24 @@ void ThreadSuspender::KillAllThreads() {
 }
 
 bool ThreadSuspender::SuspendAllThreads() {
-  void *mem = InternalAlloc(sizeof(ThreadLister));
-  ThreadLister *thread_lister = new(mem) ThreadLister(pid_);
+  ThreadLister thread_lister(pid_);
   bool added_threads;
   do {
     // Run through the directory entries once.
     added_threads = false;
-    pid_t tid = thread_lister->GetNextTID();
+    pid_t tid = thread_lister.GetNextTID();
     while (tid >= 0) {
       if (SuspendThread(tid))
         added_threads = true;
-      tid = thread_lister->GetNextTID();
+      tid = thread_lister.GetNextTID();
     }
-    if (thread_lister->error()) {
+    if (thread_lister.error()) {
       // Detach threads and fail.
       ResumeAllThreads();
-      InternalFree(mem);
       return false;
     }
-    thread_lister->Reset();
+    thread_lister.Reset();
   } while (added_threads);
-  InternalFree(mem);
   return true;
 }
 
@@ -247,6 +254,30 @@ static int TracerThread(void* argument) {
   return exit_code;
 }
 
+class ScopedStackSpaceWithGuard {
+ public:
+  explicit ScopedStackSpaceWithGuard(uptr stack_size) {
+    stack_size_ = stack_size;
+    guard_size_ = GetPageSizeCached();
+    // FIXME: Omitting MAP_STACK here works in current kernels but might break
+    // in the future.
+    guard_start_ = (uptr)MmapOrDie(stack_size_ + guard_size_,
+                                   "ScopedStackWithGuard");
+    CHECK_EQ(guard_start_, (uptr)Mprotect((uptr)guard_start_, guard_size_));
+  }
+  ~ScopedStackSpaceWithGuard() {
+    UnmapOrDie((void *)guard_start_, stack_size_ + guard_size_);
+  }
+  void *Bottom() const {
+    return (void *)(guard_start_ + stack_size_ + guard_size_);
+  }
+
+ private:
+  uptr stack_size_;
+  uptr guard_size_;
+  uptr guard_start_;
+};
+
 static sigset_t blocked_sigset;
 static sigset_t old_sigset;
 static struct sigaction old_sigactions[ARRAY_SIZE(kUnblockedSignals)];
@@ -281,16 +312,12 @@ void StopTheWorld(StopTheWorldCallback callback, void *argument) {
   struct TracerThreadArgument tracer_thread_argument;
   tracer_thread_argument.callback = callback;
   tracer_thread_argument.callback_argument = argument;
+  const uptr kTracerStackSize = 2 * 1024 * 1024;
+  ScopedStackSpaceWithGuard tracer_stack(kTracerStackSize);
   // Block the execution of TracerThread until after we have set ptrace
   // permissions.
   tracer_thread_argument.mutex.Lock();
-  // The tracer thread will run on the same stack, so we must reserve some
-  // stack space for the caller thread to run in as it waits on the tracer.
-  const uptr kReservedStackSize = 4096;
-  // Get a 16-byte aligned pointer for stack.
-  int a_local_variable __attribute__((__aligned__(16)));
-  pid_t tracer_pid = clone(TracerThread,
-                          (char *)&a_local_variable - kReservedStackSize,
+  pid_t tracer_pid = clone(TracerThread, tracer_stack.Bottom(),
                           CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_UNTRACED,
                           &tracer_thread_argument, 0, 0, 0);
   if (tracer_pid < 0) {
@@ -308,9 +335,10 @@ void StopTheWorld(StopTheWorldCallback callback, void *argument) {
     // must avoid using errno while the tracer thread is running.
     // At this point, any signal will either be blocked or kill us, so waitpid
     // should never return (and set errno) while the tracer thread is alive.
-    int waitpid_status = internal_waitpid(tracer_pid, NULL, __WALL);
-    if (waitpid_status < 0)
-      Report("Waiting on the tracer thread failed (errno %d).\n", errno);
+    uptr waitpid_status = internal_waitpid(tracer_pid, NULL, __WALL);
+    int wperrno;
+    if (internal_iserror(waitpid_status, &wperrno))
+      Report("Waiting on the tracer thread failed (errno %d).\n", wperrno);
   }
   // Restore the dumpable flag.
   if (!process_was_dumpable)
@@ -324,6 +352,52 @@ void StopTheWorld(StopTheWorldCallback callback, void *argument) {
   sigprocmask(SIG_SETMASK, &old_sigset, &old_sigset);
 }
 
+// Platform-specific methods from SuspendedThreadsList.
+#if SANITIZER_ANDROID && defined(__arm__)
+typedef pt_regs regs_struct;
+#define REG_SP ARM_sp
+
+#elif SANITIZER_LINUX && defined(__arm__)
+typedef user_regs regs_struct;
+#define REG_SP uregs[13]
+
+#elif defined(__i386__) || defined(__x86_64__)
+typedef user_regs_struct regs_struct;
+#if defined(__i386__)
+#define REG_SP esp
+#else
+#define REG_SP rsp
+#endif
+
+#elif defined(__powerpc__) || defined(__powerpc64__)
+typedef pt_regs regs_struct;
+#define REG_SP gpr[PT_R1]
+
+#else
+#error "Unsupported architecture"
+#endif // SANITIZER_ANDROID && defined(__arm__)
+
+int SuspendedThreadsList::GetRegistersAndSP(uptr index,
+                                            uptr *buffer,
+                                            uptr *sp) const {
+  pid_t tid = GetThreadID(index);
+  regs_struct regs;
+  int pterrno;
+  if (internal_iserror(internal_ptrace(PTRACE_GETREGS, tid, NULL, &regs),
+                       &pterrno)) {
+    Report("Could not get registers from thread %d (errno %d).\n",
+           tid, pterrno);
+    return -1;
+  }
+
+  *sp = regs.REG_SP;
+  internal_memcpy(buffer, &regs, sizeof(regs));
+  return 0;
+}
+
+uptr SuspendedThreadsList::RegisterCount() {
+  return sizeof(regs_struct) / sizeof(uptr);
+}
 }  // namespace __sanitizer
 
-#endif  // __linux__
+#endif  // SANITIZER_LINUX

@@ -58,9 +58,9 @@ int GetMacosVersion() {
   uptr len = 0, maxlen = sizeof(version) / sizeof(version[0]);
   for (uptr i = 0; i < maxlen; i++) version[i] = '\0';
   // Get the version length.
-  CHECK(sysctl(mib, 2, 0, &len, 0, 0) != -1);
-  CHECK(len < maxlen);
-  CHECK(sysctl(mib, 2, version, &len, 0, 0) != -1);
+  CHECK_NE(sysctl(mib, 2, 0, &len, 0, 0), -1);
+  CHECK_LT(len, maxlen);
+  CHECK_NE(sysctl(mib, 2, version, &len, 0, 0), -1);
   switch (version[0]) {
     case '9': return MACOS_VERSION_LEOPARD;
     case '1': {
@@ -229,18 +229,6 @@ bool AsanInterceptsSignal(int signum) {
 void AsanPlatformThreadInit() {
 }
 
-void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp, bool fast) {
-  (void)fast;
-  stack->size = 0;
-  stack->trace[0] = pc;
-  if ((max_s) > 1) {
-    stack->max_size = max_s;
-    if (!asan_inited) return;
-    if (AsanThread *t = GetCurrentThread())
-      stack->FastUnwindStack(pc, bp, t->stack_top(), t->stack_bottom());
-  }
-}
-
 void ReadContextStack(void *context, uptr *stack, uptr *ssize) {
   UNIMPLEMENTED();
 }
@@ -288,7 +276,7 @@ typedef struct {
   u32 parent_tid;
 } asan_block_context_t;
 
-static ALWAYS_INLINE
+ALWAYS_INLINE
 void asan_register_worker_thread(int parent_tid, StackTrace *stack) {
   AsanThread *t = GetCurrentThread();
   if (!t) {
@@ -435,4 +423,4 @@ INTERCEPTOR(void, dispatch_source_set_event_handler,
 }
 #endif
 
-#endif  // __APPLE__
+#endif  // SANITIZER_MAC

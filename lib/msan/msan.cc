@@ -70,7 +70,7 @@ namespace __msan {
 
 static bool IsRunningUnderDr() {
   bool result = false;
-  MemoryMappingLayout proc_maps;
+  MemoryMappingLayout proc_maps(/*cache_enabled*/true);
   const sptr kBufSize = 4095;
   char *filename = (char*)MmapOrDie(kBufSize, __FUNCTION__);
   while (proc_maps.Next(/* start */0, /* end */0, /* file_offset */0,
@@ -114,6 +114,7 @@ static const char *StackOriginDescr[kNumStackOriginDescrs];
 static atomic_uint32_t NumStackOriginDescrs;
 
 static void ParseFlagsFromString(Flags *f, const char *str) {
+  ParseCommonFlagsFromString(str);
   ParseFlag(str, &f->poison_heap_with_zeroes, "poison_heap_with_zeroes");
   ParseFlag(str, &f->poison_stack_with_zeroes, "poison_stack_with_zeroes");
   ParseFlag(str, &f->poison_in_malloc, "poison_in_malloc");
@@ -123,27 +124,27 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
     f->exit_code = 1;
     Die();
   }
-  ParseFlag(str, &f->num_callers, "num_callers");
   ParseFlag(str, &f->report_umrs, "report_umrs");
   ParseFlag(str, &f->verbosity, "verbosity");
-  ParseFlag(str, &f->strip_path_prefix, "strip_path_prefix");
-  ParseFlag(str, &f->fast_unwind_on_fatal, "fast_unwind_on_fatal");
-  ParseFlag(str, &f->fast_unwind_on_malloc, "fast_unwind_on_malloc");
+  ParseFlag(str, &f->wrap_signals, "wrap_signals");
 }
 
 static void InitializeFlags(Flags *f, const char *options) {
-  internal_memset(f, 0, sizeof(*f));
+  CommonFlags *cf = common_flags();
+  cf->external_symbolizer_path = GetEnv("MSAN_SYMBOLIZER_PATH");
+  cf->strip_path_prefix = "";
+  cf->fast_unwind_on_fatal = false;
+  cf->fast_unwind_on_malloc = true;
+  cf->malloc_context_size = 20;
 
+  internal_memset(f, 0, sizeof(*f));
   f->poison_heap_with_zeroes = false;
   f->poison_stack_with_zeroes = false;
   f->poison_in_malloc = true;
   f->exit_code = 77;
-  f->num_callers = 20;
   f->report_umrs = true;
   f->verbosity = 0;
-  f->strip_path_prefix = "";
-  f->fast_unwind_on_fatal = false;
-  f->fast_unwind_on_malloc = true;
+  f->wrap_signals = true;
 
   // Override from user-specified string.
   if (__msan_default_options)
@@ -199,7 +200,8 @@ void PrintWarningWithOrigin(uptr pc, uptr bp, u32 origin) {
   ++msan_report_count;
 
   StackTrace stack;
-  GetStackTrace(&stack, kStackTraceMax, pc, bp, flags()->fast_unwind_on_fatal);
+  GetStackTrace(&stack, kStackTraceMax, pc, bp,
+                common_flags()->fast_unwind_on_fatal);
 
   u32 report_origin =
     (__msan_track_origins && OriginIsValid(origin)) ? origin : 0;
@@ -242,7 +244,8 @@ void __msan_init() {
   InitTlsSize();
   InitializeInterceptors();
 
-  ReplaceOperatorsNewAndDelete();
+  if (MSAN_REPLACE_OPERATORS_NEW_AND_DELETE)
+    ReplaceOperatorsNewAndDelete();
   const char *msan_options = GetEnv("MSAN_OPTIONS");
   InitializeFlags(&msan_flags, msan_options);
   if (StackSizeIsUnlimited()) {
@@ -273,7 +276,7 @@ void __msan_init() {
     Die();
   }
 
-  const char *external_symbolizer = GetEnv("MSAN_SYMBOLIZER_PATH");
+  const char *external_symbolizer = common_flags()->external_symbolizer_path;
   if (external_symbolizer && external_symbolizer[0]) {
     CHECK(InitializeExternalSymbolizer(external_symbolizer));
   }
@@ -299,7 +302,7 @@ void __msan_set_expect_umr(int expect_umr) {
     (void)sp;
     StackTrace stack;
     GetStackTrace(&stack, kStackTraceMax, pc, bp,
-                  flags()->fast_unwind_on_fatal);
+                  common_flags()->fast_unwind_on_fatal);
     ReportExpectedUMRNotFound(&stack);
     Die();
   }
@@ -326,6 +329,10 @@ void __msan_print_param_shadow() {
     Printf("#%d:%zx ", i, __msan_param_tls[i]);
   }
   Printf("\n");
+}
+
+void __msan_unpoison_param(uptr n) {
+  internal_memset(__msan_param_tls, 0, n * sizeof(*__msan_param_tls));
 }
 
 sptr __msan_test_shadow(const void *x, uptr size) {
@@ -376,7 +383,7 @@ int __msan_get_param_tls_offset() {
   return param_tls_p - tls_base_p;
 }
 
-void __msan_partial_poison(void* data, void* shadow, uptr size) {
+void __msan_partial_poison(const void* data, void* shadow, uptr size) {
   internal_memcpy((void*)MEM_TO_SHADOW((uptr)data), shadow, size);
 }
 
@@ -385,7 +392,7 @@ void __msan_load_unpoisoned(void *src, uptr size, void *dst) {
   __msan_unpoison(dst, size);
 }
 
-void __msan_set_origin(void *a, uptr size, u32 origin) {
+void __msan_set_origin(const void *a, uptr size, u32 origin) {
   // Origin mapping is 4 bytes per 4 bytes of application memory.
   // Here we extend the range such that its left and right bounds are both
   // 4 byte aligned.
@@ -439,7 +446,7 @@ const char *__msan_get_origin_descr_if_stack(u32 id) {
 }
 
 
-u32 __msan_get_origin(void *a) {
+u32 __msan_get_origin(const void *a) {
   if (!__msan_track_origins) return 0;
   uptr x = (uptr)a;
   uptr aligned = x & ~3ULL;

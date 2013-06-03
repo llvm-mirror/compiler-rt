@@ -2,6 +2,7 @@ include(CompilerRTCompile)
 
 set(SANITIZER_UNITTESTS
   sanitizer_allocator_test.cc
+  sanitizer_atomic_test.cc
   sanitizer_common_test.cc
   sanitizer_flags_test.cc
   sanitizer_libc_test.cc
@@ -96,11 +97,13 @@ if(COMPILER_RT_CAN_EXECUTE_TESTS)
   else()
     if(CAN_TARGET_x86_64)
       add_sanitizer_common_lib("RTSanitizerCommon.test.x86_64"
-                               $<TARGET_OBJECTS:RTSanitizerCommon.x86_64>)
+                               $<TARGET_OBJECTS:RTSanitizerCommon.x86_64>
+                               $<TARGET_OBJECTS:RTSanitizerCommonLibc.x86_64>)
     endif()
     if(CAN_TARGET_i386)
       add_sanitizer_common_lib("RTSanitizerCommon.test.i386"
-                               $<TARGET_OBJECTS:RTSanitizerCommon.i386>)
+                               $<TARGET_OBJECTS:RTSanitizerCommon.i386>
+                               $<TARGET_OBJECTS:RTSanitizerCommonLibc.i386>)
     endif()
   endif()
   if(CAN_TARGET_x86_64)

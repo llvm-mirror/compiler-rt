@@ -1,4 +1,4 @@
-//===-- sanitizer_symbolizer_linux.cc -------------------------------------===//
+//===-- sanitizer_symbolizer_linux_libcdep.cc -----------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -20,6 +20,9 @@
 #include "sanitizer_placement_new.h"
 #include "sanitizer_symbolizer.h"
 
+// Android NDK r8e elf.h depends on stdint.h without including the latter.
+#include <stdint.h>
+
 #include <elf.h>
 #include <errno.h>
 #include <poll.h>
@@ -28,7 +31,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#if !SANITIZER_ANDROID && !SANITIZER_ANDROID
+#if !SANITIZER_ANDROID
 #include <link.h>
 #endif
 
@@ -123,17 +126,20 @@ bool StartSymbolizerSubprocess(const char *path_to_symbolizer,
   return true;
 }
 
-#if SANITIZER_ANDROID || SANITIZER_ANDROID
-uptr GetListOfModules(LoadedModule *modules, uptr max_modules) {
-  UNIMPLEMENTED();
+#if SANITIZER_ANDROID
+uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
+                      string_predicate_t filter) {
+  return 0;
 }
-#else  // ANDROID
+#else  // SANITIZER_ANDROID
 typedef ElfW(Phdr) Elf_Phdr;
 
 struct DlIteratePhdrData {
   LoadedModule *modules;
   uptr current_n;
+  bool first;
   uptr max_n;
+  string_predicate_t filter;
 };
 
 static const uptr kMaxPathLength = 512;
@@ -144,17 +150,28 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
     return 0;
   InternalScopedBuffer<char> module_name(kMaxPathLength);
   module_name.data()[0] = '\0';
-  if (data->current_n == 0) {
+  if (data->first) {
+    data->first = false;
     // First module is the binary itself.
     uptr module_name_len = internal_readlink(
         "/proc/self/exe", module_name.data(), module_name.size());
-    CHECK_NE(module_name_len, (uptr)-1);
+    int readlink_error;
+    if (internal_iserror(module_name_len, &readlink_error)) {
+      // We can't read /proc/self/exe for some reason, assume the name of the
+      // binary is unknown.
+      Report("WARNING: readlink(\"/proc/self/exe\") failed with errno %d, some "
+             "stack frames may not be symbolized\n", readlink_error);
+      module_name_len = internal_snprintf(module_name.data(),
+                                          module_name.size(), "/proc/self/exe");
+    }
     CHECK_LT(module_name_len, module_name.size());
     module_name[module_name_len] = '\0';
   } else if (info->dlpi_name) {
     internal_strncpy(module_name.data(), info->dlpi_name, module_name.size());
   }
   if (module_name.data()[0] == '\0')
+    return 0;
+  if (data->filter && !data->filter(module_name.data()))
     return 0;
   void *mem = &data->modules[data->current_n];
   LoadedModule *cur_module = new(mem) LoadedModule(module_name.data(),
@@ -171,14 +188,15 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
   return 0;
 }
 
-uptr GetListOfModules(LoadedModule *modules, uptr max_modules) {
+uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
+                      string_predicate_t filter) {
   CHECK(modules);
-  DlIteratePhdrData data = {modules, 0, max_modules};
+  DlIteratePhdrData data = {modules, 0, true, max_modules, filter};
   dl_iterate_phdr(dl_iterate_phdr_cb, &data);
   return data.current_n;
 }
-#endif  // ANDROID
+#endif  // SANITIZER_ANDROID
 
 }  // namespace __sanitizer
 
-#endif  // __linux__
+#endif  // SANITIZER_LINUX

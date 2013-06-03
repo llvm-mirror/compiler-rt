@@ -384,6 +384,12 @@ class Shadow : public FastState {
 
 struct SignalContext;
 
+struct JmpBuf {
+  uptr sp;
+  uptr mangled_sp;
+  uptr *shadow_stack_pos;
+};
+
 // This struct is stored in TLS.
 struct ThreadState {
   FastState fast_state;
@@ -418,6 +424,7 @@ struct ThreadState {
   ThreadClock clock;
 #ifndef TSAN_GO
   AllocatorCache alloc_cache;
+  Vector<JmpBuf> jmp_bufs;
 #endif
   u64 stat[StatCnt];
   const int tid;
@@ -505,6 +512,7 @@ struct RacyAddress {
 struct FiredSuppression {
   ReportType type;
   uptr pc;
+  Suppression *supp;
 };
 
 struct Context {
@@ -572,11 +580,11 @@ void RestoreStack(int tid, const u64 epoch, StackTrace *stk, MutexSet *mset);
 
 void StatAggregate(u64 *dst, u64 *src);
 void StatOutput(u64 *stat);
-void ALWAYS_INLINE INLINE StatInc(ThreadState *thr, StatType typ, u64 n = 1) {
+void ALWAYS_INLINE StatInc(ThreadState *thr, StatType typ, u64 n = 1) {
   if (kCollectStats)
     thr->stat[typ] += n;
 }
-void ALWAYS_INLINE INLINE StatSet(ThreadState *thr, StatType typ, u64 n) {
+void ALWAYS_INLINE StatSet(ThreadState *thr, StatType typ, u64 n) {
   if (kCollectStats)
     thr->stat[typ] = n;
 }
@@ -597,6 +605,7 @@ bool IsFiredSuppression(Context *ctx,
                         const ScopedReport &srep,
                         const StackTrace &trace);
 bool IsExpectedReport(uptr addr, uptr size);
+void PrintMatchedBenignRaces();
 bool FrameIsInternal(const ReportStack *frame);
 ReportStack *SkipTsanInternalFrames(ReportStack *ent);
 
@@ -632,28 +641,30 @@ void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr,
     uptr size, bool is_write);
 void MemoryAccessRangeStep(ThreadState *thr, uptr pc, uptr addr,
     uptr size, uptr step, bool is_write);
+void UnalignedMemoryAccess(ThreadState *thr, uptr pc, uptr addr,
+    int size, bool kAccessIsWrite, bool kIsAtomic);
 
 const int kSizeLog1 = 0;
 const int kSizeLog2 = 1;
 const int kSizeLog4 = 2;
 const int kSizeLog8 = 3;
 
-void ALWAYS_INLINE INLINE MemoryRead(ThreadState *thr, uptr pc,
+void ALWAYS_INLINE MemoryRead(ThreadState *thr, uptr pc,
                                      uptr addr, int kAccessSizeLog) {
   MemoryAccess(thr, pc, addr, kAccessSizeLog, false, false);
 }
 
-void ALWAYS_INLINE INLINE MemoryWrite(ThreadState *thr, uptr pc,
+void ALWAYS_INLINE MemoryWrite(ThreadState *thr, uptr pc,
                                       uptr addr, int kAccessSizeLog) {
   MemoryAccess(thr, pc, addr, kAccessSizeLog, true, false);
 }
 
-void ALWAYS_INLINE INLINE MemoryReadAtomic(ThreadState *thr, uptr pc,
+void ALWAYS_INLINE MemoryReadAtomic(ThreadState *thr, uptr pc,
                                            uptr addr, int kAccessSizeLog) {
   MemoryAccess(thr, pc, addr, kAccessSizeLog, false, true);
 }
 
-void ALWAYS_INLINE INLINE MemoryWriteAtomic(ThreadState *thr, uptr pc,
+void ALWAYS_INLINE MemoryWriteAtomic(ThreadState *thr, uptr pc,
                                             uptr addr, int kAccessSizeLog) {
   MemoryAccess(thr, pc, addr, kAccessSizeLog, true, true);
 }
@@ -680,8 +691,8 @@ void ProcessPendingSignals(ThreadState *thr);
 void MutexCreate(ThreadState *thr, uptr pc, uptr addr,
                  bool rw, bool recursive, bool linker_init);
 void MutexDestroy(ThreadState *thr, uptr pc, uptr addr);
-void MutexLock(ThreadState *thr, uptr pc, uptr addr);
-void MutexUnlock(ThreadState *thr, uptr pc, uptr addr);
+void MutexLock(ThreadState *thr, uptr pc, uptr addr, int rec = 1);
+int  MutexUnlock(ThreadState *thr, uptr pc, uptr addr, bool all = false);
 void MutexReadLock(ThreadState *thr, uptr pc, uptr addr);
 void MutexReadUnlock(ThreadState *thr, uptr pc, uptr addr);
 void MutexReadOrWriteUnlock(ThreadState *thr, uptr pc, uptr addr);
@@ -720,7 +731,7 @@ uptr TraceParts();
 Trace *ThreadTrace(int tid);
 
 extern "C" void __tsan_trace_switch();
-void ALWAYS_INLINE INLINE TraceAddEvent(ThreadState *thr, FastState fs,
+void ALWAYS_INLINE TraceAddEvent(ThreadState *thr, FastState fs,
                                         EventType typ, u64 addr) {
   DCHECK_GE((int)typ, 0);
   DCHECK_LE((int)typ, 7);

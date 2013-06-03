@@ -64,7 +64,7 @@ static void PrintModuleAndOffset(const char *module, uptr offset,
 void StackTrace::PrintStack(const uptr *addr, uptr size,
                             bool symbolize, const char *strip_file_prefix,
                             SymbolizeCallback symbolize_callback ) {
-  MemoryMappingLayout proc_maps;
+  MemoryMappingLayout proc_maps(/*cache_enabled*/true);
   InternalScopedBuffer<char> buff(GetPageSizeCached() * 2);
   InternalScopedBuffer<AddressInfo> addr_frames(64);
   uptr frame_num = 0;
@@ -85,7 +85,7 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
         frame_num++;
       }
     }
-    if (symbolize && addr_frames_num == 0) {
+    if (symbolize && addr_frames_num == 0 && SymbolizeCode) {
       // Use our own (online) symbolizer, if necessary.
       addr_frames_num = SymbolizeCode(pc, addr_frames.data(),
                                       addr_frames.size());
@@ -137,6 +137,7 @@ void StackTrace::FastUnwindStack(uptr pc, uptr bp,
   while (frame > prev_frame &&
          frame < (uhwptr *)stack_top - 2 &&
          frame > (uhwptr *)stack_bottom &&
+         IsAligned((uptr)frame, sizeof(*frame)) &&
          size < max_size) {
     uhwptr pc1 = frame[1];
     if (pc1 != pc) {

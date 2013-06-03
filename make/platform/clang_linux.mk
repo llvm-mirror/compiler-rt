@@ -8,8 +8,8 @@ Configs :=
 
 # We don't currently have any general purpose way to target architectures other
 # than the compiler defaults (because there is no generalized way to invoke
-# cross compilers). For now, we just find the target archicture of the compiler
-# and only define configurations we know that compiler can generate.
+# cross compilers). For now, we just find the target architecture of the
+# compiler and only define configurations we know that compiler can generate.
 CompilerTargetTriple := $(shell \
 	$(CC) -v 2>&1 | grep 'Target:' | cut -d' ' -f2)
 ifneq ($(DEBUGMAKE),)
@@ -85,30 +85,31 @@ endif
 ###
 
 CFLAGS := -Wall -Werror -O3 -fomit-frame-pointer
+SANITIZER_CFLAGS := -fPIE -fno-builtin -gline-tables-only
 
 CFLAGS.full-i386 := $(CFLAGS) -m32
 CFLAGS.full-x86_64 := $(CFLAGS) -m64
 CFLAGS.profile-i386 := $(CFLAGS) -m32
 CFLAGS.profile-x86_64 := $(CFLAGS) -m64
-CFLAGS.san-i386 := $(CFLAGS) -m32 -fPIE -fno-builtin -fno-rtti
-CFLAGS.san-x86_64 := $(CFLAGS) -m64 -fPIE -fno-builtin -fno-rtti
-CFLAGS.asan-i386 := $(CFLAGS) -m32 -fPIE -fno-builtin -fno-rtti \
+CFLAGS.san-i386 := $(CFLAGS) -m32 $(SANITIZER_CFLAGS) -fno-rtti
+CFLAGS.san-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti
+CFLAGS.asan-i386 := $(CFLAGS) -m32 $(SANITIZER_CFLAGS) -fno-rtti \
                     -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
-CFLAGS.asan-x86_64 := $(CFLAGS) -m64 -fPIE -fno-builtin -fno-rtti \
+CFLAGS.asan-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti \
                     -DASAN_FLEXIBLE_MAPPING_AND_OFFSET=1
-CFLAGS.tsan-x86_64 := $(CFLAGS) -m64 -fPIE -fno-builtin -fno-rtti
-CFLAGS.msan-x86_64 := $(CFLAGS) -m64 -fPIE -fno-builtin -fno-rtti
-CFLAGS.ubsan-i386 := $(CFLAGS) -m32 -fPIE -fno-builtin -fno-rtti
-CFLAGS.ubsan-x86_64 := $(CFLAGS) -m64 -fPIE -fno-builtin -fno-rtti
-CFLAGS.ubsan_cxx-i386 := $(CFLAGS) -m32 -fPIE -fno-builtin
-CFLAGS.ubsan_cxx-x86_64 := $(CFLAGS) -m64 -fPIE -fno-builtin
+CFLAGS.tsan-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti
+CFLAGS.msan-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti
+CFLAGS.ubsan-i386 := $(CFLAGS) -m32 $(SANITIZER_CFLAGS) -fno-rtti
+CFLAGS.ubsan-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS) -fno-rtti
+CFLAGS.ubsan_cxx-i386 := $(CFLAGS) -m32 $(SANITIZER_CFLAGS)
+CFLAGS.ubsan_cxx-x86_64 := $(CFLAGS) -m64 $(SANITIZER_CFLAGS)
 
 SHARED_LIBRARY.asan-arm-android := 1
 ANDROID_COMMON_FLAGS := -target arm-linux-androideabi \
 	--sysroot=$(LLVM_ANDROID_TOOLCHAIN_DIR)/sysroot \
 	-B$(LLVM_ANDROID_TOOLCHAIN_DIR)
 CFLAGS.asan-arm-android := $(CFLAGS) -fPIC -fno-builtin \
-	$(ANDROID_COMMON_FLAGS) -mllvm -arm-enable-ehabi
+	$(ANDROID_COMMON_FLAGS) -mllvm -arm-enable-ehabi -fno-rtti
 LDFLAGS.asan-arm-android := $(LDFLAGS) $(ANDROID_COMMON_FLAGS) -ldl \
 	-Wl,-soname=libclang_rt.asan-arm-android.so
 

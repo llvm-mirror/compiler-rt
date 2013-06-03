@@ -12,7 +12,7 @@ BLACKLIST=$ROOTDIR/lit_tests/Helpers/blacklist.txt
 : ${FILECHECK:=FileCheck}
 
 # TODO: add testing for all of -O0...-O3
-CFLAGS="-fsanitize=thread -fsanitize-blacklist=$BLACKLIST -fPIE -O1 -g -fno-builtin -Wall"
+CFLAGS="-fsanitize=thread -fsanitize-blacklist=$BLACKLIST -fPIE -O1 -g -Wall"
 LDFLAGS="-pie -lpthread -ldl $ROOTDIR/rtl/libtsan.a"
 
 test_file() {
@@ -34,6 +34,10 @@ if [ "$1" == "" ]; then
   for c in $ROOTDIR/lit_tests/*.{c,cc}; do
     if [[ $c == */failing_* ]]; then
       echo SKIPPING FAILING TEST $c
+      continue
+    fi
+    if [[ $c == */load_shared_lib.cc ]]; then
+      echo TEST $c is not supported
       continue
     fi
     COMPILER=$CXX
