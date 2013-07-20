@@ -85,7 +85,7 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
         frame_num++;
       }
     }
-    if (symbolize && addr_frames_num == 0 && SymbolizeCode) {
+    if (symbolize && addr_frames_num == 0 && &SymbolizeCode) {
       // Use our own (online) symbolizer, if necessary.
       addr_frames_num = SymbolizeCode(pc, addr_frames.data(),
                                       addr_frames.size());
@@ -133,6 +133,7 @@ void StackTrace::FastUnwindStack(uptr pc, uptr bp,
   size = 1;
   uhwptr *frame = (uhwptr *)bp;
   uhwptr *prev_frame = frame - 1;
+  if (stack_top < 4096) return;  // Sanity check for stack top.
   // Avoid infinite loop when frame == frame[0] by using frame > prev_frame.
   while (frame > prev_frame &&
          frame < (uhwptr *)stack_top - 2 &&

@@ -53,7 +53,7 @@ static inline bool QuickCheckForUnpoisonedRegion(uptr beg, uptr size) {
   } while (0)
 
 #define ASAN_READ_RANGE(offset, size) ACCESS_MEMORY_RANGE(offset, size, false)
-#define ASAN_WRITE_RANGE(offset, size) ACCESS_MEMORY_RANGE(offset, size, true);
+#define ASAN_WRITE_RANGE(offset, size) ACCESS_MEMORY_RANGE(offset, size, true)
 
 // Behavior of functions like "memcpy" or "strcpy" is undefined
 // if memory intervals overlap. We report error in this case.
@@ -94,36 +94,47 @@ void SetThreadName(const char *name) {
     asanThreadRegistry().SetThreadName(t->tid(), name);
 }
 
-static void DisableStrictInitOrderChecker() {
-  if (flags()->strict_init_order)
-    flags()->check_initialization_order = false;
-}
-
 }  // namespace __asan
 
 // ---------------------- Wrappers ---------------- {{{1
 using namespace __asan;  // NOLINT
 
+DECLARE_REAL_AND_INTERCEPTOR(void *, malloc, uptr)
+DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
+
+#define COMMON_INTERCEPTOR_UNPOISON_PARAM(ctx, count) \
+  do {                                                \
+  } while (false)
 #define COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, size) \
   ASAN_WRITE_RANGE(ptr, size)
 #define COMMON_INTERCEPTOR_READ_RANGE(ctx, ptr, size) ASAN_READ_RANGE(ptr, size)
-#define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)  \
-  do {                                            \
-    if (asan_init_is_running)                     \
-      return REAL(func)(__VA_ARGS__);             \
-    ctx = 0;                                      \
-    (void)ctx;                                    \
-    ENSURE_ASAN_INITED();                         \
+#define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)              \
+  do {                                                        \
+    if (asan_init_is_running) return REAL(func)(__VA_ARGS__); \
+    ctx = 0;                                                  \
+    (void) ctx;                                               \
+    ENSURE_ASAN_INITED();                                     \
   } while (false)
-#define COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd) do { } while (false)
-#define COMMON_INTERCEPTOR_FD_RELEASE(ctx, fd) do { } while (false)
+#define COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd) \
+  do {                                         \
+  } while (false)
+#define COMMON_INTERCEPTOR_FD_RELEASE(ctx, fd) \
+  do {                                         \
+  } while (false)
+#define COMMON_INTERCEPTOR_FD_SOCKET_ACCEPT(ctx, fd, newfd) \
+  do {                                                      \
+  } while (false)
 #define COMMON_INTERCEPTOR_SET_THREAD_NAME(ctx, name) SetThreadName(name)
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
 
 #define COMMON_SYSCALL_PRE_READ_RANGE(p, s) ASAN_READ_RANGE(p, s)
 #define COMMON_SYSCALL_PRE_WRITE_RANGE(p, s) ASAN_WRITE_RANGE(p, s)
-#define COMMON_SYSCALL_POST_READ_RANGE(p, s)
-#define COMMON_SYSCALL_POST_WRITE_RANGE(p, s)
+#define COMMON_SYSCALL_POST_READ_RANGE(p, s) \
+  do {                                       \
+  } while (false)
+#define COMMON_SYSCALL_POST_WRITE_RANGE(p, s) \
+  do {                                        \
+  } while (false)
 #include "sanitizer_common/sanitizer_common_syscalls.inc"
 
 static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
@@ -137,8 +148,10 @@ extern "C" int pthread_attr_getdetachstate(void *attr, int *v);
 
 INTERCEPTOR(int, pthread_create, void *thread,
     void *attr, void *(*start_routine)(void*), void *arg) {
+  EnsureMainThreadIDIsCorrect();
   // Strict init-order checking in thread-hostile.
-  DisableStrictInitOrderChecker();
+  if (flags()->strict_init_order)
+    StopInitOrderChecking();
   GET_STACK_TRACE_THREAD;
   int detached = 0;
   if (attr != 0)
@@ -170,7 +183,7 @@ INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
 #elif SANITIZER_POSIX
 // We need to have defined REAL(sigaction) on posix systems.
 DEFINE_REAL(int, sigaction, int signum, const struct sigaction *act,
-    struct sigaction *oldact);
+    struct sigaction *oldact)
 #endif  // ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
 
 #if ASAN_INTERCEPT_SWAPCONTEXT
@@ -240,13 +253,15 @@ INTERCEPTOR(void, __cxa_throw, void *a, void *b, void *c) {
 // Since asan maps 16T of RAM, mlock is completely unfriendly to asan.
 // All functions return 0 (success).
 static void MlockIsUnsupported() {
-  static bool printed = 0;
+  static bool printed = false;
   if (printed) return;
   printed = true;
-  Printf("INFO: AddressSanitizer ignores mlock/mlockall/munlock/munlockall\n");
+  if (flags()->verbosity > 0) {
+    Printf("INFO: AddressSanitizer ignores "
+           "mlock/mlockall/munlock/munlockall\n");
+  }
 }
 
-extern "C" {
 INTERCEPTOR(int, mlock, const void *addr, uptr len) {
   MlockIsUnsupported();
   return 0;
@@ -266,7 +281,6 @@ INTERCEPTOR(int, munlockall, void) {
   MlockIsUnsupported();
   return 0;
 }
-}  // extern "C"
 
 static inline int CharCmp(unsigned char c1, unsigned char c2) {
   return (c1 == c2) ? 0 : (c1 < c2) ? -1 : 1;
@@ -375,7 +389,7 @@ INTERCEPTOR(char*, index, const char *string, int c)
 DECLARE_REAL(char*, index, const char *string, int c)
 OVERRIDE_FUNCTION(index, strchr);
 #  else
-DEFINE_REAL(char*, index, const char *string, int c);
+DEFINE_REAL(char*, index, const char *string, int c)
 #  endif
 # endif
 #endif  // ASAN_INTERCEPT_INDEX
@@ -457,21 +471,16 @@ INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
 
 #if ASAN_INTERCEPT_STRDUP
 INTERCEPTOR(char*, strdup, const char *s) {
-#if SANITIZER_MAC
-  // FIXME: because internal_strdup() uses InternalAlloc(), which currently
-  // just calls malloc() on Mac, we can't use internal_strdup() with the
-  // dynamic runtime. We can remove the call to REAL(strdup) once InternalAlloc
-  // starts using mmap() instead.
-  // See also http://code.google.com/p/address-sanitizer/issues/detail?id=123.
-  if (!asan_inited) return REAL(strdup)(s);
-#endif
   if (!asan_inited) return internal_strdup(s);
   ENSURE_ASAN_INITED();
+  uptr length = REAL(strlen)(s);
   if (flags()->replace_str) {
-    uptr length = REAL(strlen)(s);
     ASAN_READ_RANGE(s, length + 1);
   }
-  return REAL(strdup)(s);
+  GET_STACK_TRACE_MALLOC;
+  void *new_mem = asan_malloc(length + 1, &stack);
+  REAL(memcpy)(new_mem, s, length + 1);
+  return reinterpret_cast<char*>(new_mem);
 }
 #endif
 
@@ -636,26 +645,47 @@ INTERCEPTOR(long long, atoll, const char *nptr) {  // NOLINT
 }
 #endif  // ASAN_INTERCEPT_ATOLL_AND_STRTOLL
 
+static void AtCxaAtexit(void *unused) {
+  (void)unused;
+  StopInitOrderChecking();
+}
+
+#if ASAN_INTERCEPT___CXA_ATEXIT
+INTERCEPTOR(int, __cxa_atexit, void (*func)(void *), void *arg,
+            void *dso_handle) {
+  ENSURE_ASAN_INITED();
+  int res = REAL(__cxa_atexit)(func, arg, dso_handle);
+  REAL(__cxa_atexit)(AtCxaAtexit, 0, 0);
+  return res;
+}
+#endif  // ASAN_INTERCEPT___CXA_ATEXIT
+
+#if !SANITIZER_MAC
 #define ASAN_INTERCEPT_FUNC(name) do { \
       if (!INTERCEPT_FUNCTION(name) && flags()->verbosity > 0) \
         Report("AddressSanitizer: failed to intercept '" #name "'\n"); \
     } while (0)
+#else
+// OS X interceptors don't need to be initialized with INTERCEPT_FUNCTION.
+#define ASAN_INTERCEPT_FUNC(name)
+#endif  // SANITIZER_MAC
 
 #if SANITIZER_WINDOWS
 INTERCEPTOR_WINAPI(DWORD, CreateThread,
                    void* security, uptr stack_size,
                    DWORD (__stdcall *start_routine)(void*), void* arg,
-                   DWORD flags, void* tid) {
+                   DWORD thr_flags, void* tid) {
   // Strict init-order checking in thread-hostile.
-  DisableStrictInitOrderChecker();
+  if (flags()->strict_init_order)
+    StopInitOrderChecking();
   GET_STACK_TRACE_THREAD;
   u32 current_tid = GetCurrentTidOrInvalid();
   AsanThread *t = AsanThread::Create(start_routine, arg);
   CreateThreadContextArgs args = { t, &stack };
-  int detached = 0;  // FIXME: how can we determine it on Windows?
+  bool detached = false;  // FIXME: how can we determine it on Windows?
   asanThreadRegistry().CreateThread(*(uptr*)t, detached, current_tid, &args);
   return REAL(CreateThread)(security, stack_size,
-                            asan_thread_start, t, flags, tid);
+                            asan_thread_start, t, thr_flags, tid);
 }
 
 namespace __asan {
@@ -672,9 +702,6 @@ void InitializeAsanInterceptors() {
   static bool was_called_once;
   CHECK(was_called_once == false);
   was_called_once = true;
-#if SANITIZER_MAC
-  return;
-#else
   SANITIZER_COMMON_INTERCEPTORS_INIT;
 
   // Intercept mem* functions.
@@ -746,6 +773,11 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(pthread_create);
 #endif
 
+  // Intercept atexit function.
+#if ASAN_INTERCEPT___CXA_ATEXIT
+  ASAN_INTERCEPT_FUNC(__cxa_atexit);
+#endif
+
   // Some Windows-specific interceptors.
 #if SANITIZER_WINDOWS
   InitializeWindowsInterceptors();
@@ -754,7 +786,6 @@ void InitializeAsanInterceptors() {
   if (flags()->verbosity > 0) {
     Report("AddressSanitizer: libc interceptors initialized\n");
   }
-#endif  // SANITIZER_MAC
 }
 
 }  // namespace __asan

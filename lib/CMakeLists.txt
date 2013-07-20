@@ -7,6 +7,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux")
   add_subdirectory(interception)
   add_subdirectory(sanitizer_common)
   if(NOT ANDROID)
+    add_subdirectory(lsan)
     add_subdirectory(profile)
     add_subdirectory(ubsan)
   endif()
@@ -16,7 +17,6 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux" AND NOT ANDROID)
   add_subdirectory(tsan)
   add_subdirectory(msan)
   add_subdirectory(msandr)
-  add_subdirectory(lsan)
 endif()
 
 # The top-level lib directory contains a large amount of C code which provides
@@ -37,6 +37,8 @@ set(GENERIC_SOURCES
   ashlti3.c
   ashrdi3.c
   ashrti3.c
+  # FIXME: atomic.c may only be compiled if host compiler understands _Atomic
+  # atomic.c
   clear_cache.c
   clzdi2.c
   clzsi2.c
@@ -186,3 +188,13 @@ foreach(arch x86_64 i386)
       CFLAGS "-std=c99")
   endif()
 endforeach()
+
+# Generate configs for running lit and unit tests.
+configure_lit_site_cfg(
+  ${CMAKE_CURRENT_SOURCE_DIR}/lit.common.configured.in
+  ${CMAKE_CURRENT_BINARY_DIR}/lit.common.configured)
+
+configure_lit_site_cfg(
+  ${CMAKE_CURRENT_SOURCE_DIR}/lit.common.unit.configured.in
+  ${CMAKE_CURRENT_BINARY_DIR}/lit.common.unit.configured)
+

@@ -124,7 +124,7 @@ void *MapFileToMemory(const char *file_name, uptr *buff_size) {
 }
 
 static const int kMaxEnvNameLength = 128;
-static const int kMaxEnvValueLength = 32767;
+static const DWORD kMaxEnvValueLength = 32767;
 
 namespace {
 
@@ -196,6 +196,10 @@ void SleepForSeconds(int seconds) {
 
 void SleepForMillis(int millis) {
   Sleep(millis);
+}
+
+u64 NanoTime() {
+  return 0;
 }
 
 void Abort() {
@@ -341,12 +345,19 @@ void InitTlsSize() {
 
 void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
                           uptr *tls_addr, uptr *tls_size) {
+#ifdef SANITIZER_GO
+  *stk_addr = 0;
+  *stk_size = 0;
+  *tls_addr = 0;
+  *tls_size = 0;
+#else
   uptr stack_top, stack_bottom;
   GetThreadStackTopAndBottom(main, &stack_top, &stack_bottom);
   *stk_addr = stack_bottom;
   *stk_size = stack_top - stack_bottom;
   *tls_addr = 0;
   *tls_size = 0;
+#endif
 }
 
 void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp,

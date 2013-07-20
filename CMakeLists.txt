@@ -36,22 +36,19 @@ set(CMAKE_MODULE_PATH
 include(AddCompilerRT)
 
 set(COMPILER_RT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(COMPILER_RT_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 # Setup custom SDK sysroots.
 set(COMPILER_RT_DARWIN_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/darwin)
 set(COMPILER_RT_LINUX_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/linux)
 
 # Detect whether the current target platform is 32-bit or 64-bit, and setup
 # the correct commandline flags needed to attempt to target 32-bit and 64-bit.
-if(CMAKE_SIZEOF_VOID_P EQUAL 4 OR LLVM_BUILD_32_BITS)
-  set(TARGET_64_BIT_CFLAGS "-m64")
-  set(TARGET_32_BIT_CFLAGS "")
-else()
-  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "Please use a sane architecture with 4 or 8 byte pointers.")
-  endif()
-  set(TARGET_64_BIT_CFLAGS "")
-  set(TARGET_32_BIT_CFLAGS "-m32")
+if (NOT CMAKE_SIZEOF_VOID_P EQUAL 4 AND
+    NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  message(FATAL_ERROR "Please use architecture with 4 or 8 byte pointers.")
 endif()
+set(TARGET_64_BIT_CFLAGS "-m64")
+set(TARGET_32_BIT_CFLAGS "-m32")
 
 # List of architectures we can target.
 set(COMPILER_RT_SUPPORTED_ARCH)
@@ -89,10 +86,7 @@ if("${LLVM_NATIVE_ARCH}" STREQUAL "X86")
   test_target_arch(x86_64 ${TARGET_64_BIT_CFLAGS})
   test_target_arch(i386 ${TARGET_32_BIT_CFLAGS})
 elseif("${LLVM_NATIVE_ARCH}" STREQUAL "PowerPC")
-  # Explicitly set -m flag on powerpc, because on ppc64 defaults for gcc and
-  # clang are different.
-  test_target_arch(powerpc64 "-m64")
-  test_target_arch(powerpc "-m32")
+  test_target_arch(powerpc64 ${TARGET_64_BIT_CFLAGS})
 endif()
 
 # We only support running instrumented tests when we're not cross compiling
@@ -127,6 +121,7 @@ set(SANITIZER_COMMON_CFLAGS
   -fomit-frame-pointer
   -funwind-tables
   -fno-stack-protector
+  -Wno-gnu  # Variadic macros with 0 arguments for ...
   -O3
   )
 if(NOT WIN32)
@@ -169,7 +164,7 @@ endif()
 # Architectures supported by Sanitizer runtimes. Specific sanitizers may
 # support only subset of these (e.g. TSan works on x86_64 only).
 filter_available_targets(SANITIZER_COMMON_SUPPORTED_ARCH
-  x86_64 i386 powerpc64 powerpc)
+  x86_64 i386 powerpc64)
 
 # Add the public header's directory to the includes for all of compiler-rt.
 include_directories(include)

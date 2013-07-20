@@ -83,6 +83,9 @@ SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_set_exit_code(int exit_code);
 
 SANITIZER_INTERFACE_ATTRIBUTE
+void __msan_set_keep_going(int keep_going);
+
+SANITIZER_INTERFACE_ATTRIBUTE
 int __msan_set_poison_in_malloc(int do_poison);
 
 SANITIZER_WEAK_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE
@@ -120,9 +123,24 @@ void __msan_partial_poison(const void* data, void* shadow, uptr size);
 // Memory will be marked uninitialized, with origin at the call site.
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_allocated_memory(const void* data, uptr size);
-}  // extern "C"
 
-// Unpoison first n function arguments.
-void __msan_unpoison_param(uptr n);
+SANITIZER_INTERFACE_ATTRIBUTE
+u16 __sanitizer_unaligned_load16(const uu16 *p);
+
+SANITIZER_INTERFACE_ATTRIBUTE
+u32 __sanitizer_unaligned_load32(const uu32 *p);
+
+SANITIZER_INTERFACE_ATTRIBUTE
+u64 __sanitizer_unaligned_load64(const uu64 *p);
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void __sanitizer_unaligned_store16(uu16 *p, u16 x);
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void __sanitizer_unaligned_store32(uu32 *p, u32 x);
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void __sanitizer_unaligned_store64(uu64 *p, u64 x);
+}  // extern "C"
 
 #endif  // MSAN_INTERFACE_INTERNAL_H

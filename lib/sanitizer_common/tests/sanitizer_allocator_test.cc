@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "sanitizer_common/sanitizer_allocator.h"
+#include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_common.h"
 
 #include "sanitizer_test_utils.h"
@@ -65,6 +66,10 @@ TEST(SanitizerCommon, DefaultSizeClassMap) {
 
 TEST(SanitizerCommon, CompactSizeClassMap) {
   TestSizeClassMap<CompactSizeClassMap>();
+}
+
+TEST(SanitizerCommon, InternalSizeClassMap) {
+  TestSizeClassMap<InternalSizeClassMap>();
 }
 
 template <class Allocator>
@@ -611,6 +616,11 @@ TEST(Allocator, Stress) {
   }
 }
 
+TEST(Allocator, InternalAllocFailure) {
+  EXPECT_DEATH(Ident(InternalAlloc(10 << 20)),
+               "Unexpected mmap in InternalAllocator!");
+}
+
 TEST(Allocator, ScopedBuffer) {
   const int kSize = 512;
   {
@@ -625,16 +635,9 @@ TEST(Allocator, ScopedBuffer) {
   }
 }
 
-class IterationTestCallback {
- public:
-  explicit IterationTestCallback(std::set<void *> *chunks)
-    : chunks_(chunks) {}
-  void operator()(void *chunk) const {
-    chunks_->insert(chunk);
-  }
- private:
-  std::set<void *> *chunks_;
-};
+void IterationTestCallback(uptr chunk, void *arg) {
+  reinterpret_cast<std::set<uptr> *>(arg)->insert(chunk);
+}
 
 template <class Allocator>
 void TestSizeClassAllocatorIteration() {
@@ -663,15 +666,15 @@ void TestSizeClassAllocatorIteration() {
     }
   }
 
-  std::set<void *> reported_chunks;
-  IterationTestCallback callback(&reported_chunks);
+  std::set<uptr> reported_chunks;
   a->ForceLock();
-  a->ForEachChunk(callback);
+  a->ForEachChunk(IterationTestCallback, &reported_chunks);
   a->ForceUnlock();
 
   for (uptr i = 0; i < allocated.size(); i++) {
     // Don't use EXPECT_NE. Reporting the first mismatch is enough.
-    ASSERT_NE(reported_chunks.find(allocated[i]), reported_chunks.end());
+    ASSERT_NE(reported_chunks.find(reinterpret_cast<uptr>(allocated[i])),
+              reported_chunks.end());
   }
 
   a->TestOnlyUnmap();
@@ -698,21 +701,58 @@ TEST(SanitizerCommon, LargeMmapAllocatorIteration) {
   char *allocated[kNumAllocs];
   static const uptr size = 40;
   // Allocate some.
-  for (uptr i = 0; i < kNumAllocs; i++) {
+  for (uptr i = 0; i < kNumAllocs; i++)
     allocated[i] = (char *)a.Allocate(&stats, size, 1);
-  }
 
-  std::set<void *> reported_chunks;
-  IterationTestCallback callback(&reported_chunks);
+  std::set<uptr> reported_chunks;
   a.ForceLock();
-  a.ForEachChunk(callback);
+  a.ForEachChunk(IterationTestCallback, &reported_chunks);
   a.ForceUnlock();
 
   for (uptr i = 0; i < kNumAllocs; i++) {
     // Don't use EXPECT_NE. Reporting the first mismatch is enough.
-    ASSERT_NE(reported_chunks.find(allocated[i]), reported_chunks.end());
+    ASSERT_NE(reported_chunks.find(reinterpret_cast<uptr>(allocated[i])),
+              reported_chunks.end());
   }
+  for (uptr i = 0; i < kNumAllocs; i++)
+    a.Deallocate(&stats, allocated[i]);
 }
+
+TEST(SanitizerCommon, LargeMmapAllocatorBlockBegin) {
+  LargeMmapAllocator<> a;
+  a.Init();
+  AllocatorStats stats;
+  stats.Init();
+
+  static const uptr kNumAllocs = 1024;
+  static const uptr kNumExpectedFalseLookups = 10000000;
+  char *allocated[kNumAllocs];
+  static const uptr size = 4096;
+  // Allocate some.
+  for (uptr i = 0; i < kNumAllocs; i++) {
+    allocated[i] = (char *)a.Allocate(&stats, size, 1);
+  }
+
+  for (uptr i = 0; i < kNumAllocs  * kNumAllocs; i++) {
+    // if ((i & (i - 1)) == 0) fprintf(stderr, "[%zd]\n", i);
+    char *p1 = allocated[i % kNumAllocs];
+    EXPECT_EQ(p1, a.GetBlockBeginFastLocked(p1));
+    EXPECT_EQ(p1, a.GetBlockBeginFastLocked(p1 + size / 2));
+    EXPECT_EQ(p1, a.GetBlockBeginFastLocked(p1 + size - 1));
+    EXPECT_EQ(p1, a.GetBlockBeginFastLocked(p1 - 100));
+  }
+
+  for (uptr i = 0; i < kNumExpectedFalseLookups; i++) {
+    void *p = reinterpret_cast<void *>(i % 1024);
+    EXPECT_EQ((void *)0, a.GetBlockBeginFastLocked(p));
+    p = reinterpret_cast<void *>(~0L - (i % 1024));
+    EXPECT_EQ((void *)0, a.GetBlockBeginFastLocked(p));
+  }
+
+  for (uptr i = 0; i < kNumAllocs; i++)
+    a.Deallocate(&stats, allocated[i]);
+}
+
 
 #if SANITIZER_WORDSIZE == 64
 // Regression test for out-of-memory condition in PopulateFreeList().

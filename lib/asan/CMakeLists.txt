@@ -19,12 +19,10 @@ set(ASAN_SOURCES
   asan_stack.cc
   asan_stats.cc
   asan_thread.cc
-  asan_win.cc
-  )
+  asan_win.cc)
 
 set(ASAN_DYLIB_SOURCES
-  ${ASAN_SOURCES}
-  )
+  ${ASAN_SOURCES})
 
 include_directories(..)
 
@@ -48,7 +46,7 @@ endif()
 
 # Architectures supported by ASan.
 filter_available_targets(ASAN_SUPPORTED_ARCH
-  x86_64 i386 powerpc64 powerpc)
+  x86_64 i386 powerpc64)
 
 set(ASAN_RUNTIME_LIBRARIES)
 if(APPLE)
@@ -58,6 +56,7 @@ if(APPLE)
     SOURCES ${ASAN_DYLIB_SOURCES}
             $<TARGET_OBJECTS:RTInterception.osx>
             $<TARGET_OBJECTS:RTSanitizerCommon.osx>
+            $<TARGET_OBJECTS:RTLSanCommon.osx>
     CFLAGS ${ASAN_CFLAGS}
     DEFS ${ASAN_COMMON_DEFINITIONS}
     # Dynamic lookup is needed because shadow scale and offset are
@@ -85,12 +84,15 @@ else()
               $<TARGET_OBJECTS:RTInterception.${arch}>
               $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
               $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>
+              $<TARGET_OBJECTS:RTLSanCommon.${arch}>
       CFLAGS ${ASAN_CFLAGS}
       DEFS ${ASAN_COMMON_DEFINITIONS}
       SYMS asan.syms)
     list(APPEND ASAN_RUNTIME_LIBRARIES clang_rt.asan-${arch})
   endforeach()
 endif()
+
+add_compiler_rt_resource_file(asan_blacklist asan_blacklist.txt)
 
 if(LLVM_INCLUDE_TESTS)
   add_subdirectory(tests)

@@ -23,6 +23,7 @@
 #include "sanitizer_placement_new.h"
 #include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
+#include "sanitizer_symbolizer.h"
 
 #include <asm/param.h>
 #include <dlfcn.h>
@@ -305,6 +306,8 @@ void PrepareForSandboxing() {
   // process will be able to load additional libraries, so it's fine to use the
   // cached mappings.
   MemoryMappingLayout::CacheMemoryMappings();
+  // Same for /proc/self/exe in the symbolizer.
+  SymbolizerPrepareForSandboxing();
 }
 
 // ----------------- sanitizer_procmaps.h
@@ -439,7 +442,9 @@ bool MemoryMappingLayout::Next(uptr *start, uptr *end, uptr *offset,
   CHECK_EQ(*current_++, ' ');
   while (IsDecimal(*current_))
     current_++;
-  CHECK_EQ(*current_++, ' ');
+  // Qemu may lack the trailing space.
+  // http://code.google.com/p/address-sanitizer/issues/detail?id=160
+  // CHECK_EQ(*current_++, ' ');
   // Skip spaces.
   while (current_ < next_line && *current_ == ' ')
     current_++;

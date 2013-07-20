@@ -85,7 +85,7 @@ void ThreadContextBase::Reset() {
 
 // ThreadRegistry implementation.
 
-const u32 ThreadRegistry::kUnknownTid = -1U;
+const u32 ThreadRegistry::kUnknownTid = ~0U;
 
 ThreadRegistry::ThreadRegistry(ThreadContextFactory factory, u32 max_threads,
                                u32 thread_quarantine_size)
@@ -178,6 +178,17 @@ ThreadRegistry::FindThreadContextLocked(FindThreadCallback cb, void *arg) {
       return tctx;
   }
   return 0;
+}
+
+static bool FindThreadContextByOsIdCallback(ThreadContextBase *tctx,
+                                            void *arg) {
+  return (tctx->os_id == (uptr)arg && tctx->status != ThreadStatusInvalid &&
+      tctx->status != ThreadStatusDead);
+}
+
+ThreadContextBase *ThreadRegistry::FindThreadContextByOsIDLocked(uptr os_id) {
+  return FindThreadContextLocked(FindThreadContextByOsIdCallback,
+                                 (void *)os_id);
 }
 
 void ThreadRegistry::SetThreadName(u32 tid, const char *name) {

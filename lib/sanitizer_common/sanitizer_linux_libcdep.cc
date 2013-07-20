@@ -19,18 +19,11 @@
 #include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
 
-#ifdef __x86_64__
-#include <asm/prctl.h>
-#endif
 #include <dlfcn.h>
 #include <pthread.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <unwind.h>
-
-#ifdef __x86_64__
-extern "C" int arch_prctl(int code, __sanitizer::uptr *addr);
-#endif
 
 namespace __sanitizer {
 
@@ -70,6 +63,7 @@ void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
     return;
   }
   pthread_attr_t attr;
+  pthread_attr_init(&attr);
   CHECK_EQ(pthread_getattr_np(pthread_self(), &attr), 0);
   uptr stacksize = 0;
   void *stackaddr = 0;
@@ -200,20 +194,43 @@ uptr GetTlsSize() {
   return g_tls_size;
 }
 
+#if defined(__x86_64__) || defined(__i386__)
 // sizeof(struct thread) from glibc.
-#ifdef __x86_64__
-const uptr kThreadDescriptorSize = 2304;
+// There has been a report of this being different on glibc 2.11. We don't know
+// when this change happened, so 2.12 is a conservative estimate.
+#if __GLIBC_PREREQ(2, 12)
+const uptr kThreadDescriptorSize = FIRST_32_SECOND_64(1216, 2304);
+#else
+const uptr kThreadDescriptorSize = FIRST_32_SECOND_64(1168, 2304);
+#endif
 
 uptr ThreadDescriptorSize() {
   return kThreadDescriptorSize;
 }
+
+// The offset at which pointer to self is located in the thread descriptor.
+const uptr kThreadSelfOffset = FIRST_32_SECOND_64(8, 16);
+
+uptr ThreadSelfOffset() {
+  return kThreadSelfOffset;
+}
+
+uptr ThreadSelf() {
+  uptr descr_addr;
+#ifdef __i386__
+  asm("mov %%gs:%c1,%0" : "=r"(descr_addr) : "i"(kThreadSelfOffset));
+#else
+  asm("mov %%fs:%c1,%0" : "=r"(descr_addr) : "i"(kThreadSelfOffset));
 #endif
+  return descr_addr;
+}
+#endif  // defined(__x86_64__) || defined(__i386__)
 
 void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
                           uptr *tls_addr, uptr *tls_size) {
 #ifndef SANITIZER_GO
-#ifdef __x86_64__
-  arch_prctl(ARCH_GET_FS, tls_addr);
+#if defined(__x86_64__) || defined(__i386__)
+  *tls_addr = ThreadSelf();
   *tls_size = GetTlsSize();
   *tls_addr -= *tls_size;
   *tls_addr += kThreadDescriptorSize;

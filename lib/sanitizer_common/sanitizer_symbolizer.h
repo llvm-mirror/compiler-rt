@@ -43,7 +43,7 @@ struct AddressInfo {
     internal_memset(this, 0, sizeof(AddressInfo));
   }
   // Deletes all strings and sets all fields to zero.
-  void Clear();
+  void Clear() SANITIZER_WEAK_ATTRIBUTE;
 
   void FillAddressAndModuleInfo(uptr addr, const char *mod_name,
                                 uptr mod_offset) {
@@ -74,11 +74,15 @@ bool IsSymbolizerAvailable();
 void FlushSymbolizer();  // releases internal caches (if any)
 
 // Attempts to demangle the provided C++ mangled name.
-const char *Demangle(const char *Name);
+const char *Demangle(const char *name);
+// Attempts to demangle the name via __cxa_demangle from __cxxabiv1.
+const char *DemangleCXXABI(const char *name);
 
 // Starts external symbolizer program in a subprocess. Sanitizer communicates
 // with external symbolizer via pipes.
 bool InitializeExternalSymbolizer(const char *path_to_symbolizer);
+
+const int kSymbolizerStartupTimeMillis = 10;
 
 class LoadedModule {
  public:
@@ -113,6 +117,8 @@ bool StartSymbolizerSubprocess(const char *path_to_symbolizer,
 typedef bool (*string_predicate_t)(const char *);
 uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
                       string_predicate_t filter);
+
+void SymbolizerPrepareForSandboxing();
 
 }  // namespace __sanitizer
 

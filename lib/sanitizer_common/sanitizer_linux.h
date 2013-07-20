@@ -55,10 +55,15 @@ void AdjustStackSizeLinux(void *attr, int verbosity);
 
 // Exposed for testing.
 uptr ThreadDescriptorSize();
+uptr ThreadSelf();
+uptr ThreadSelfOffset();
 
 // Matches a library's file name against a base name (stripping path and version
 // information).
 bool LibraryNameIs(const char *full_name, const char *base_name);
+
+// Read the name of the current binary from /proc/self/exe.
+uptr ReadBinaryName(/*out*/char *buf, uptr buf_len);
 
 }  // namespace __sanitizer
 

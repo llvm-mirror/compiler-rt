@@ -63,6 +63,8 @@ class AsanThread {
   uptr stack_top() { return stack_top_; }
   uptr stack_bottom() { return stack_bottom_; }
   uptr stack_size() { return stack_top_ - stack_bottom_; }
+  uptr tls_begin() { return tls_begin_; }
+  uptr tls_end() { return tls_end_; }
   u32 tid() { return context_->tid; }
   AsanThreadContext *context() { return context_; }
   void set_context(AsanThreadContext *context) { context_ = context; }
@@ -73,21 +75,34 @@ class AsanThread {
     return addr >= stack_bottom_ && addr < stack_top_;
   }
 
-  FakeStack &fake_stack() { return fake_stack_; }
+  void LazyInitFakeStack() {
+    if (fake_stack_) return;
+    fake_stack_ = (FakeStack*)MmapOrDie(sizeof(FakeStack), "FakeStack");
+    fake_stack_->Init(stack_size());
+  }
+  void DeleteFakeStack() {
+    if (!fake_stack_) return;
+    fake_stack_->Cleanup();
+    UnmapOrDie(fake_stack_, sizeof(FakeStack));
+  }
+  FakeStack *fake_stack() { return fake_stack_; }
+
   AsanThreadLocalMallocStorage &malloc_storage() { return malloc_storage_; }
   AsanStats &stats() { return stats_; }
 
  private:
   AsanThread() {}
-  void SetThreadStackTopAndBottom();
-  void ClearShadowForThreadStack();
+  void SetThreadStackAndTls();
+  void ClearShadowForThreadStackAndTLS();
   AsanThreadContext *context_;
   thread_callback_t start_routine_;
   void *arg_;
   uptr  stack_top_;
   uptr  stack_bottom_;
+  uptr tls_begin_;
+  uptr tls_end_;
 
-  FakeStack fake_stack_;
+  FakeStack *fake_stack_;
   AsanThreadLocalMallocStorage malloc_storage_;
   AsanStats stats_;
 };
@@ -109,6 +124,8 @@ void SetCurrentThread(AsanThread *t);
 u32 GetCurrentTidOrInvalid();
 AsanThread *FindThreadByStackAddress(uptr addr);
 
+// Used to handle fork().
+void EnsureMainThreadIDIsCorrect();
 }  // namespace __asan
 
 #endif  // ASAN_THREAD_H

@@ -106,18 +106,6 @@ ThreadContext *CurrentThreadContext() {
   return (ThreadContext *)thread_registry->GetThreadLocked(GetCurrentThread());
 }
 
-bool FindThreadByOsIdCallback(ThreadContextBase *tctx, void *arg) {
-  return (tctx->os_id == (uptr)arg && tctx->status != ThreadStatusInvalid &&
-      tctx->status != ThreadStatusDead);
-}
-
-ThreadContext *FindThreadByOsIDLocked(uptr os_id) {
-  ThreadContextBase *tctx =
-    thread_registry->FindThreadContextLocked(FindThreadByOsIdCallback,
-                                             (void*)os_id);
-  return static_cast<ThreadContext *>(tctx);
-}
-
 static bool FindThreadByUid(ThreadContextBase *tctx, void *arg) {
   uptr uid = (uptr)arg;
   if (tctx->user_id == uid && tctx->status != ThreadStatusInvalid) {
@@ -135,14 +123,19 @@ void ThreadJoin(u32 tid) {
   thread_registry->JoinThread(tid, /* arg */0);
 }
 
+void EnsureMainThreadIDIsCorrect() {
+  if (GetCurrentThread() == 0)
+    CurrentThreadContext()->os_id = GetTid();
+}
+
 ///// Interface to the common LSan module. /////
 
 bool GetThreadRangesLocked(uptr os_id, uptr *stack_begin, uptr *stack_end,
                            uptr *tls_begin, uptr *tls_end,
                            uptr *cache_begin, uptr *cache_end) {
-  ThreadContext *context = FindThreadByOsIDLocked(os_id);
-  if (!context)
-    return false;
+  ThreadContext *context = static_cast<ThreadContext *>(
+      thread_registry->FindThreadContextByOsIDLocked(os_id));
+  if (!context) return false;
   *stack_begin = context->stack_begin();
   *stack_end = context->stack_end();
   *tls_begin = context->tls_begin();

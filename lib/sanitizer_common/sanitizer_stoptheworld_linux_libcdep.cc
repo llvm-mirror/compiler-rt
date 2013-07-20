@@ -278,11 +278,20 @@ class ScopedStackSpaceWithGuard {
   uptr guard_start_;
 };
 
+NOINLINE static void WipeStack() {
+  char arr[256];
+  internal_memset(arr, 0, sizeof(arr));
+}
+
 static sigset_t blocked_sigset;
 static sigset_t old_sigset;
 static struct sigaction old_sigactions[ARRAY_SIZE(kUnblockedSignals)];
 
 void StopTheWorld(StopTheWorldCallback callback, void *argument) {
+  // Glibc's sigaction() has a side-effect where it copies garbage stack values
+  // into oldact, which can cause false negatives in LSan. As a quick workaround
+  // we zero some stack space here.
+  WipeStack();
   // Block all signals that can be blocked safely, and install default handlers
   // for the remaining signals.
   // We cannot allow user-defined handlers to run while the ThreadSuspender
@@ -318,8 +327,8 @@ void StopTheWorld(StopTheWorldCallback callback, void *argument) {
   // permissions.
   tracer_thread_argument.mutex.Lock();
   pid_t tracer_pid = clone(TracerThread, tracer_stack.Bottom(),
-                          CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_UNTRACED,
-                          &tracer_thread_argument, 0, 0, 0);
+                           CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_UNTRACED,
+                           &tracer_thread_argument);
   if (tracer_pid < 0) {
     Report("Failed spawning a tracer thread (errno %d).\n", errno);
     tracer_thread_argument.mutex.Unlock();
@@ -372,6 +381,10 @@ typedef user_regs_struct regs_struct;
 #elif defined(__powerpc__) || defined(__powerpc64__)
 typedef pt_regs regs_struct;
 #define REG_SP gpr[PT_R1]
+
+#elif defined(__mips__)
+typedef struct user regs_struct;
+#define REG_SP regs[EF_REG29]
 
 #else
 #error "Unsupported architecture"

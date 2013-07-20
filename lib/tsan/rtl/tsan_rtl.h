@@ -27,7 +27,9 @@
 #define TSAN_RTL_H
 
 #include "sanitizer_common/sanitizer_allocator.h"
+#include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_suppressions.h"
 #include "sanitizer_common/sanitizer_thread_registry.h"
 #include "tsan_clock.h"
 #include "tsan_defs.h"
@@ -424,6 +426,7 @@ struct ThreadState {
   ThreadClock clock;
 #ifndef TSAN_GO
   AllocatorCache alloc_cache;
+  InternalAllocatorCache internal_alloc_cache;
   Vector<JmpBuf> jmp_bufs;
 #endif
   u64 stat[StatCnt];
@@ -531,7 +534,8 @@ struct Context {
 
   Vector<RacyStacks> racy_stacks;
   Vector<RacyAddress> racy_addresses;
-  Vector<FiredSuppression> fired_suppressions;
+  // Number of fired suppressions may be large enough.
+  InternalMmapVector<FiredSuppression> fired_suppressions;
 
   Flags flags;
 
@@ -600,7 +604,8 @@ void ReportRace(ThreadState *thr);
 bool OutputReport(Context *ctx,
                   const ScopedReport &srep,
                   const ReportStack *suppress_stack1 = 0,
-                  const ReportStack *suppress_stack2 = 0);
+                  const ReportStack *suppress_stack2 = 0,
+                  const ReportLocation *suppress_loc = 0);
 bool IsFiredSuppression(Context *ctx,
                         const ScopedReport &srep,
                         const StackTrace &trace);

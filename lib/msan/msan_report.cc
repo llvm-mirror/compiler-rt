@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "msan.h"
+#include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_mutex.h"
@@ -94,7 +95,7 @@ void ReportUMR(StackTrace *stack, u32 origin) {
 
   Decorator d;
   Printf("%s", d.Warning());
-  Report(" WARNING: Use of uninitialized value\n");
+  Report(" WARNING: MemorySanitizer: use-of-uninitialized-value\n");
   Printf("%s", d.End());
   PrintStack(stack->trace, stack->size);
   if (origin) {

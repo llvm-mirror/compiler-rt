@@ -71,8 +71,6 @@ class FakeFrameLifo {
 // call to __asan_stack_malloc.
 class FakeStack {
  public:
-  FakeStack();
-  explicit FakeStack(LinkerInitialized x) : call_stack_(x) {}
   void Init(uptr stack_size);
   void StopUsingFakeStack() { alive_ = false; }
   void Cleanup();
@@ -80,7 +78,7 @@ class FakeStack {
   static void OnFree(uptr ptr, uptr size, uptr real_stack);
   // Return the bottom of the maped region.
   uptr AddrIsInFakeStack(uptr addr);
-  bool StackSize() { return stack_size_; }
+  uptr StackSize() const { return stack_size_; }
 
  private:
   static const uptr kMinStackFrameSizeLog = 9;  // Min frame is 512B.
@@ -88,7 +86,7 @@ class FakeStack {
   static const uptr kMaxStackMallocSize = 1 << kMaxStackFrameSizeLog;
   static const uptr kNumberOfSizeClasses =
       kMaxStackFrameSizeLog - kMinStackFrameSizeLog + 1;
-  static const uptr kMaxRecursionDepth = 1023;
+  static const uptr kMaxRecursionDepth = 15000;
 
   bool AddrIsInSizeClass(uptr addr, uptr size_class);
 
@@ -111,6 +109,8 @@ class FakeStack {
   FakeFrameFifo size_classes_[kNumberOfSizeClasses];
   FakeFrameLifo<kMaxRecursionDepth> call_stack_;
 };
+
+COMPILER_CHECK(sizeof(FakeStack) <= (1 << 17));
 
 }  // namespace __asan
 

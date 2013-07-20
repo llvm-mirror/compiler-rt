@@ -42,13 +42,13 @@ void Init() {
   SanitizerToolName = "LeakSanitizer";
   InitializeCommonFlags();
   InitializeAllocator();
-  InitCommonLsan();
   InitTlsSize();
   InitializeInterceptors();
   InitializeThreadRegistry();
   u32 tid = ThreadCreate(0, 0, true);
   CHECK_EQ(tid, 0);
   ThreadStart(tid, GetTid());
+  SetCurrentThread(tid);
 
   // Start symbolizer process if necessary.
   const char* external_symbolizer = common_flags()->external_symbolizer_path;
@@ -56,6 +56,9 @@ void Init() {
       external_symbolizer[0]) {
     InitializeExternalSymbolizer(external_symbolizer);
   }
+
+  InitCommonLsan();
+  Atexit(DoLeakCheck);
 }
 
 }  // namespace __lsan

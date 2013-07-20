@@ -24,6 +24,7 @@
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
+#include "lsan/lsan_common.h"
 
 namespace __asan {
 
@@ -118,12 +119,12 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->disable_core, "disable_core");
   ParseFlag(str, &f->allow_reexec, "allow_reexec");
   ParseFlag(str, &f->print_full_thread_history, "print_full_thread_history");
-  ParseFlag(str, &f->log_path, "log_path");
   ParseFlag(str, &f->poison_heap, "poison_heap");
   ParseFlag(str, &f->alloc_dealloc_mismatch, "alloc_dealloc_mismatch");
   ParseFlag(str, &f->use_stack_depot, "use_stack_depot");
   ParseFlag(str, &f->strict_memcmp, "strict_memcmp");
   ParseFlag(str, &f->strict_init_order, "strict_init_order");
+  ParseFlag(str, &f->detect_leaks, "detect_leaks");
 }
 
 void InitializeFlags(Flags *f, const char *env) {
@@ -134,6 +135,8 @@ void InitializeFlags(Flags *f, const char *env) {
   cf->fast_unwind_on_fatal = false;
   cf->fast_unwind_on_malloc = true;
   cf->strip_path_prefix = "";
+  cf->handle_ioctl = false;
+  cf->log_path = 0;
 
   internal_memset(f, 0, sizeof(*f));
   f->quarantine_size = (ASAN_LOW_MEMORY) ? 1UL << 26 : 1UL << 28;
@@ -163,7 +166,6 @@ void InitializeFlags(Flags *f, const char *env) {
   f->disable_core = (SANITIZER_WORDSIZE == 64);
   f->allow_reexec = true;
   f->print_full_thread_history = true;
-  f->log_path = 0;
   f->poison_heap = true;
   // Turn off alloc/dealloc mismatch checker on Mac for now.
   // TODO(glider): Fix known issues and enable this back.
@@ -171,6 +173,7 @@ void InitializeFlags(Flags *f, const char *env) {
   f->use_stack_depot = true;
   f->strict_memcmp = true;
   f->strict_init_order = false;
+  f->detect_leaks = false;
 
   // Override from compile definition.
   ParseFlagsFromString(f, MaybeUseAsanDefaultOptionsCompileDefiniton());
@@ -184,6 +187,20 @@ void InitializeFlags(Flags *f, const char *env) {
 
   // Override from command line.
   ParseFlagsFromString(f, env);
+
+#if !CAN_SANITIZE_LEAKS
+  if (f->detect_leaks) {
+    Report("%s: detect_leaks is not supported on this platform.\n",
+           SanitizerToolName);
+    f->detect_leaks = false;
+  }
+#endif
+
+  if (f->detect_leaks && !f->use_stack_depot) {
+    Report("%s: detect_leaks is ignored (requires use_stack_depot).\n",
+           SanitizerToolName);
+    f->detect_leaks = false;
+  }
 }
 
 // -------------------------- Globals --------------------- {{{1
@@ -406,6 +423,20 @@ void NOINLINE __asan_handle_no_return() {
   uptr PageSize = GetPageSizeCached();
   uptr top = curr_thread->stack_top();
   uptr bottom = ((uptr)&local_stack - PageSize) & ~(PageSize-1);
+  static const uptr kMaxExpectedCleanupSize = 64 << 20;  // 64M
+  if (top - bottom > kMaxExpectedCleanupSize) {
+    static bool reported_warning = false;
+    if (reported_warning)
+      return;
+    reported_warning = true;
+    Report("WARNING: ASan is ignoring requested __asan_handle_no_return: "
+           "stack top: %p; bottom %p; size: %p (%zd)\n"
+           "False positive error reports may follow\n"
+           "For details see "
+           "http://code.google.com/p/address-sanitizer/issues/detail?id=189\n",
+           top, bottom, top - bottom, top - bottom);
+    return;
+  }
   PoisonShadow(bottom, top - bottom, 0);
 }
 
@@ -432,7 +463,7 @@ void __asan_init() {
   // initialization steps look at flags().
   const char *options = GetEnv("ASAN_OPTIONS");
   InitializeFlags(flags(), options);
-  __sanitizer_set_report_path(flags()->log_path);
+  __sanitizer_set_report_path(common_flags()->log_path);
 
   if (flags()->verbosity && options) {
     Report("Parsed ASAN_OPTIONS: %s\n", options);
@@ -504,6 +535,12 @@ void __asan_init() {
   }
 
   InstallSignalHandlers();
+
+  AsanTSDInit(AsanThread::TSDDtor);
+  // Allocator should be initialized before starting external symbolizer, as
+  // fork() on Mac locks the allocator.
+  InitializeAllocator();
+
   // Start symbolizer process if necessary.
   const char* external_symbolizer = common_flags()->external_symbolizer_path;
   if (common_flags()->symbolize && external_symbolizer &&
@@ -516,8 +553,9 @@ void __asan_init() {
   asan_inited = 1;
   asan_init_is_running = false;
 
+  InitTlsSize();
+
   // Create main thread.
-  AsanTSDInit(AsanThread::TSDDtor);
   AsanThread *main_thread = AsanThread::Create(0, 0);
   CreateThreadContextArgs create_main_args = { main_thread, 0 };
   u32 main_tid = asanThreadRegistry().CreateThread(
@@ -527,7 +565,12 @@ void __asan_init() {
   main_thread->ThreadStart(internal_getpid());
   force_interface_symbols();  // no-op.
 
-  InitializeAllocator();
+#if CAN_SANITIZE_LEAKS
+  __lsan::InitCommonLsan();
+  if (flags()->detect_leaks) {
+    Atexit(__lsan::DoLeakCheck);
+  }
+#endif  // CAN_SANITIZE_LEAKS
 
   if (flags()->verbosity) {
     Report("AddressSanitizer Init done\n");

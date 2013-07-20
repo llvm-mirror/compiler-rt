@@ -74,7 +74,7 @@ Context::Context()
       CreateThreadContext, kMaxTid, kThreadQuarantineSize))
   , racy_stacks(MBlockRacyStacks)
   , racy_addresses(MBlockRacyAddresses)
-  , fired_suppressions(MBlockRacyAddresses) {
+  , fired_suppressions(8) {
 }
 
 // The objects are allocated in TLS, so one may rely on zero-initialization.
@@ -556,7 +556,9 @@ static void MemoryRangeSet(ThreadState *thr, uptr pc, uptr addr, uptr size,
   // Don't want to touch lots of shadow memory.
   // If a program maps 10MB stack, there is no need reset the whole range.
   size = (size + (kShadowCell - 1)) & ~(kShadowCell - 1);
-  if (size < 64*1024) {
+  // UnmapOrDie/MmapFixedNoReserve does not work on Windows,
+  // so we do it only for C/C++.
+  if (kGoMode || size < 64*1024) {
     u64 *p = (u64*)MemToShadow(addr);
     CHECK(IsShadowMem((uptr)p));
     CHECK(IsShadowMem((uptr)(p + size * kShadowCnt / kShadowCell - 1)));

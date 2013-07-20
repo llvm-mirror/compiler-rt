@@ -41,7 +41,7 @@ struct DynInitGlobal {
   Global g;
   bool initialized;
 };
-typedef InternalVector<DynInitGlobal> VectorOfGlobals;
+typedef InternalMmapVector<DynInitGlobal> VectorOfGlobals;
 // Lazy-initialized and never deleted.
 static VectorOfGlobals *dynamic_init_globals;
 
@@ -121,6 +121,21 @@ static void UnregisterGlobal(const Global *g) {
   // We unpoison the shadow memory for the global but we do not remove it from
   // the list because that would require O(n^2) time with the current list
   // implementation. It might not be worth doing anyway.
+}
+
+void StopInitOrderChecking() {
+  BlockingMutexLock lock(&mu_for_globals);
+  if (!flags()->check_initialization_order || !dynamic_init_globals)
+    return;
+  flags()->check_initialization_order = false;
+  for (uptr i = 0, n = dynamic_init_globals->size(); i < n; ++i) {
+    DynInitGlobal &dyn_g = (*dynamic_init_globals)[i];
+    const Global *g = &dyn_g.g;
+    // Unpoison the whole global.
+    PoisonShadowForGlobal(g, 0);
+    // Poison redzones back.
+    PoisonRedZones(*g);
+  }
 }
 
 }  // namespace __asan
