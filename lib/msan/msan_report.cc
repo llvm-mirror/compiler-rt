@@ -13,15 +13,15 @@
 //===----------------------------------------------------------------------===//
 
 #include "msan.h"
+#include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_mutex.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 
 using namespace __sanitizer;
-
-static StaticSpinMutex report_mu;
 
 namespace __msan {
 
@@ -46,7 +46,8 @@ class Decorator: private __sanitizer::AnsiColorDecorator {
 
 static void PrintStack(const uptr *trace, uptr size) {
   SymbolizerScope sym_scope;
-  StackTrace::PrintStack(trace, size, true, flags()->strip_path_prefix, 0);
+  StackTrace::PrintStack(trace, size, true,
+                         common_flags()->strip_path_prefix, 0);
 }
 
 static void DescribeOrigin(u32 origin) {
@@ -61,7 +62,7 @@ static void DescribeOrigin(u32 origin) {
     Printf("%s", d.Origin());
     Printf("  %sUninitialized value was created by an allocation of '%s%s%s'"
            " in the stack frame of function '%s%s%s'%s\n",
-           d.Origin(), d.Name(), s, d.Origin(), d.Name(), sep + 1,
+           d.Origin(), d.Name(), s, d.Origin(), d.Name(), Demangle(sep + 1),
            d.Origin(), d.End());
     InternalFree(s);
   } else {
@@ -82,18 +83,19 @@ static void ReportSummary(const char *error_type, StackTrace *stack) {
     SymbolizeCode(pc, &ai, 1);
   }
   ReportErrorSummary(error_type,
-                     StripPathPrefix(ai.file, flags()->strip_path_prefix),
+                     StripPathPrefix(ai.file,
+                                     common_flags()->strip_path_prefix),
                      ai.line, ai.function);
 }
 
 void ReportUMR(StackTrace *stack, u32 origin) {
   if (!__msan::flags()->report_umrs) return;
 
-  GenericScopedLock<StaticSpinMutex> lock(&report_mu);
+  SpinMutexLock l(&CommonSanitizerReportMutex);
 
   Decorator d;
   Printf("%s", d.Warning());
-  Report(" WARNING: Use of uninitialized value\n");
+  Report(" WARNING: MemorySanitizer: use-of-uninitialized-value\n");
   Printf("%s", d.End());
   PrintStack(stack->trace, stack->size);
   if (origin) {
@@ -103,13 +105,15 @@ void ReportUMR(StackTrace *stack, u32 origin) {
 }
 
 void ReportExpectedUMRNotFound(StackTrace *stack) {
-  GenericScopedLock<StaticSpinMutex> lock(&report_mu);
+  SpinMutexLock l(&CommonSanitizerReportMutex);
 
   Printf(" WARNING: Expected use of uninitialized value not found\n");
   PrintStack(stack->trace, stack->size);
 }
 
 void ReportAtExitStatistics() {
+  SpinMutexLock l(&CommonSanitizerReportMutex);
+
   Decorator d;
   Printf("%s", d.Warning());
   Printf("MemorySanitizer: %d warnings reported.\n", msan_report_count);

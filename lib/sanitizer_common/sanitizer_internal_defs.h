@@ -15,9 +15,10 @@
 
 #include "sanitizer_platform.h"
 
+// Only use SANITIZER_*ATTRIBUTE* before the function return type!
 #if SANITIZER_WINDOWS
-// FIXME find out what we need on Windows. __declspec(dllexport) ?
-# define SANITIZER_INTERFACE_ATTRIBUTE
+# define SANITIZER_INTERFACE_ATTRIBUTE __declspec(dllexport)
+// FIXME find out what we need on Windows, if anything.
 # define SANITIZER_WEAK_ATTRIBUTE
 #elif defined(SANITIZER_GO)
 # define SANITIZER_INTERFACE_ATTRIBUTE
@@ -27,7 +28,7 @@
 # define SANITIZER_WEAK_ATTRIBUTE  __attribute__((weak))
 #endif
 
-#if SANITIZER_LINUX
+#if SANITIZER_LINUX && !defined(SANITIZER_GO)
 # define SANITIZER_SUPPORTS_WEAK_HOOKS 1
 #else
 # define SANITIZER_SUPPORTS_WEAK_HOOKS 0
@@ -82,25 +83,25 @@ typedef u64  OFF64_T;
 
 extern "C" {
   // Tell the tools to write their reports to "path.<pid>" instead of stderr.
-  void __sanitizer_set_report_path(const char *path)
-      SANITIZER_INTERFACE_ATTRIBUTE;
+  SANITIZER_INTERFACE_ATTRIBUTE
+  void __sanitizer_set_report_path(const char *path);
 
   // Tell the tools to write their reports to given file descriptor instead of
   // stderr.
-  void __sanitizer_set_report_fd(int fd)
-      SANITIZER_INTERFACE_ATTRIBUTE;
+  SANITIZER_INTERFACE_ATTRIBUTE
+  void __sanitizer_set_report_fd(int fd);
 
   // Notify the tools that the sandbox is going to be turned on. The reserved
   // parameter will be used in the future to hold a structure with functions
   // that the tools may call to bypass the sandbox.
-  void __sanitizer_sandbox_on_notify(void *reserved)
-      SANITIZER_WEAK_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE;
+  SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+  void __sanitizer_sandbox_on_notify(void *reserved);
 
   // This function is called by the tool when it has just finished reporting
   // an error. 'error_summary' is a one-line string that summarizes
   // the error message. This function can be overridden by the client.
-  void __sanitizer_report_error_summary(const char *error_summary)
-      SANITIZER_WEAK_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE;
+  SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+  void __sanitizer_report_error_summary(const char *error_summary);
 }  // extern "C"
 
 
@@ -109,13 +110,13 @@ using namespace __sanitizer;  // NOLINT
 // This header should NOT include any other headers to avoid portability issues.
 
 // Common defs.
-#define INLINE static inline
+#define INLINE inline
 #define INTERFACE_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE
 #define WEAK SANITIZER_WEAK_ATTRIBUTE
 
 // Platform-specific defs.
 #if defined(_MSC_VER)
-# define ALWAYS_INLINE static __forceinline
+# define ALWAYS_INLINE __forceinline
 // FIXME(timurrrr): do we need this on Windows?
 # define ALIAS(x)
 # define ALIGNED(x) __declspec(align(x))
@@ -132,6 +133,8 @@ using namespace __sanitizer;  // NOLINT
 #else  // _MSC_VER
 # define ALWAYS_INLINE inline __attribute__((always_inline))
 # define ALIAS(x) __attribute__((alias(x)))
+// Please only use the ALIGNED macro before the type.
+// Using ALIGNED after the variable declaration is not portable!
 # define ALIGNED(x) __attribute__((aligned(x)))
 # define FORMAT(f, a)  __attribute__((format(printf, f, a)))
 # define NOINLINE __attribute__((noinline))
@@ -149,6 +152,14 @@ using namespace __sanitizer;  // NOLINT
 #  define PREFETCH(x) __builtin_prefetch(x)
 # endif
 #endif  // _MSC_VER
+
+// Unaligned versions of basic types.
+typedef ALIGNED(1) u16 uu16;
+typedef ALIGNED(1) u32 uu32;
+typedef ALIGNED(1) u64 uu64;
+typedef ALIGNED(1) s16 us16;
+typedef ALIGNED(1) s32 us32;
+typedef ALIGNED(1) s64 us64;
 
 #if SANITIZER_WINDOWS
 typedef unsigned long DWORD;  // NOLINT
@@ -169,6 +180,9 @@ typedef thread_return_t (THREAD_CALLING_CONV *thread_callback_t)(void* arg);
 // NOTE: Functions below must be defined in each run-time.
 namespace __sanitizer {
 void NORETURN Die();
+
+// FIXME: No, this shouldn't be in the sanitizer interface.
+SANITIZER_INTERFACE_ATTRIBUTE
 void NORETURN CheckFailed(const char *file, int line, const char *cond,
                           u64 v1, u64 v2);
 }  // namespace __sanitizer
@@ -273,10 +287,12 @@ extern "C" void* _ReturnAddress(void);
 # define GET_CURRENT_FRAME() (uptr)0xDEADBEEF
 #endif
 
-#define HANDLE_EINTR(res, f) {                               \
-  do {                                                                  \
-    res = (f);                                                         \
-  } while (res == -1 && errno == EINTR); \
+#define HANDLE_EINTR(res, f)                                       \
+  {                                                                \
+    int rverrno;                                                   \
+    do {                                                           \
+      res = (f);                                                   \
+    } while (internal_iserror(res, &rverrno) && rverrno == EINTR); \
   }
 
 #endif  // SANITIZER_DEFS_H

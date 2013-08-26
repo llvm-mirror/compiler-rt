@@ -18,6 +18,21 @@
 
 namespace __sanitizer {
 
+CommonFlags common_flags_dont_use_directly;
+
+void ParseCommonFlagsFromString(const char *str) {
+  CommonFlags *f = common_flags();
+  ParseFlag(str, &f->malloc_context_size, "malloc_context_size");
+  ParseFlag(str, &f->strip_path_prefix, "strip_path_prefix");
+  ParseFlag(str, &f->fast_unwind_on_fatal, "fast_unwind_on_fatal");
+  ParseFlag(str, &f->fast_unwind_on_malloc, "fast_unwind_on_malloc");
+  ParseFlag(str, &f->symbolize, "symbolize");
+  ParseFlag(str, &f->handle_ioctl, "handle_ioctl");
+  ParseFlag(str, &f->log_path, "log_path");
+  ParseFlag(str, &f->detect_leaks, "detect_leaks");
+  ParseFlag(str, &f->leak_check_at_exit, "leak_check_at_exit");
+}
+
 static bool GetFlagValue(const char *env, const char *name,
                          const char **value, int *value_length) {
   if (env == 0)
@@ -86,7 +101,7 @@ void ParseFlag(const char *env, int *flag, const char *name) {
   int value_length;
   if (!GetFlagValue(env, name, &value, &value_length))
     return;
-  *flag = internal_atoll(value);
+  *flag = static_cast<int>(internal_atoll(value));
 }
 
 static LowLevelAllocator allocator_for_flags;

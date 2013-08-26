@@ -24,6 +24,7 @@
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
+#include "lsan/lsan_common.h"
 
 namespace __asan {
 
@@ -64,13 +65,9 @@ static void AsanCheckFailed(const char *file, int line, const char *cond,
 }
 
 // -------------------------- Flags ------------------------- {{{1
-static const int kDeafultMallocContextSize = 30;
+static const int kDefaultMallocContextSize = 30;
 
-static Flags asan_flags;
-
-Flags *flags() {
-  return &asan_flags;
-}
+Flags asan_flags_dont_use_directly;  // use via flags().
 
 static const char *MaybeCallAsanDefaultOptions() {
   return (&__asan_default_options) ? __asan_default_options() : "";
@@ -88,28 +85,30 @@ static const char *MaybeUseAsanDefaultOptionsCompileDefiniton() {
 }
 
 static void ParseFlagsFromString(Flags *f, const char *str) {
+  ParseCommonFlagsFromString(str);
+  CHECK((uptr)common_flags()->malloc_context_size <= kStackTraceMax);
+
   ParseFlag(str, &f->quarantine_size, "quarantine_size");
-  ParseFlag(str, &f->symbolize, "symbolize");
   ParseFlag(str, &f->verbosity, "verbosity");
   ParseFlag(str, &f->redzone, "redzone");
-  CHECK(f->redzone >= 16);
+  CHECK_GE(f->redzone, 16);
   CHECK(IsPowerOfTwo(f->redzone));
 
   ParseFlag(str, &f->debug, "debug");
   ParseFlag(str, &f->report_globals, "report_globals");
   ParseFlag(str, &f->check_initialization_order, "check_initialization_order");
-  ParseFlag(str, &f->malloc_context_size, "malloc_context_size");
-  CHECK((uptr)f->malloc_context_size <= kStackTraceMax);
 
   ParseFlag(str, &f->replace_str, "replace_str");
   ParseFlag(str, &f->replace_intrin, "replace_intrin");
   ParseFlag(str, &f->mac_ignore_invalid_free, "mac_ignore_invalid_free");
   ParseFlag(str, &f->use_fake_stack, "use_fake_stack");
   ParseFlag(str, &f->max_malloc_fill_size, "max_malloc_fill_size");
+  ParseFlag(str, &f->malloc_fill_byte, "malloc_fill_byte");
   ParseFlag(str, &f->exitcode, "exitcode");
   ParseFlag(str, &f->allow_user_poisoning, "allow_user_poisoning");
   ParseFlag(str, &f->sleep_before_dying, "sleep_before_dying");
   ParseFlag(str, &f->handle_segv, "handle_segv");
+  ParseFlag(str, &f->allow_user_segv_handler, "allow_user_segv_handler");
   ParseFlag(str, &f->use_sigaltstack, "use_sigaltstack");
   ParseFlag(str, &f->check_malloc_usable_size, "check_malloc_usable_size");
   ParseFlag(str, &f->unmap_shadow_on_exit, "unmap_shadow_on_exit");
@@ -118,40 +117,46 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->print_legend, "print_legend");
   ParseFlag(str, &f->atexit, "atexit");
   ParseFlag(str, &f->disable_core, "disable_core");
-  ParseFlag(str, &f->strip_path_prefix, "strip_path_prefix");
   ParseFlag(str, &f->allow_reexec, "allow_reexec");
   ParseFlag(str, &f->print_full_thread_history, "print_full_thread_history");
-  ParseFlag(str, &f->log_path, "log_path");
-  ParseFlag(str, &f->fast_unwind_on_fatal, "fast_unwind_on_fatal");
-  ParseFlag(str, &f->fast_unwind_on_malloc, "fast_unwind_on_malloc");
   ParseFlag(str, &f->poison_heap, "poison_heap");
   ParseFlag(str, &f->alloc_dealloc_mismatch, "alloc_dealloc_mismatch");
   ParseFlag(str, &f->use_stack_depot, "use_stack_depot");
   ParseFlag(str, &f->strict_memcmp, "strict_memcmp");
+  ParseFlag(str, &f->strict_init_order, "strict_init_order");
 }
 
-static const char *asan_external_symbolizer;
-
 void InitializeFlags(Flags *f, const char *env) {
-  internal_memset(f, 0, sizeof(*f));
+  CommonFlags *cf = common_flags();
+  cf->external_symbolizer_path = GetEnv("ASAN_SYMBOLIZER_PATH");
+  cf->symbolize = true;
+  cf->malloc_context_size = kDefaultMallocContextSize;
+  cf->fast_unwind_on_fatal = false;
+  cf->fast_unwind_on_malloc = true;
+  cf->strip_path_prefix = "";
+  cf->handle_ioctl = false;
+  cf->log_path = 0;
+  cf->detect_leaks = false;
+  cf->leak_check_at_exit = true;
 
+  internal_memset(f, 0, sizeof(*f));
   f->quarantine_size = (ASAN_LOW_MEMORY) ? 1UL << 26 : 1UL << 28;
-  f->symbolize = (asan_external_symbolizer != 0);
   f->verbosity = 0;
-  f->redzone = ASAN_ALLOCATOR_VERSION == 2 ? 16 : (ASAN_LOW_MEMORY) ? 64 : 128;
+  f->redzone = 16;
   f->debug = false;
   f->report_globals = 1;
   f->check_initialization_order = false;
-  f->malloc_context_size = kDeafultMallocContextSize;
   f->replace_str = true;
   f->replace_intrin = true;
   f->mac_ignore_invalid_free = false;
   f->use_fake_stack = true;
-  f->max_malloc_fill_size = 0;
+  f->max_malloc_fill_size = 0x1000;  // By default, fill only the first 4K.
+  f->malloc_fill_byte = 0xbe;
   f->exitcode = ASAN_DEFAULT_FAILURE_EXITCODE;
   f->allow_user_poisoning = true;
   f->sleep_before_dying = 0;
   f->handle_segv = ASAN_NEEDS_SEGV;
+  f->allow_user_segv_handler = false;
   f->use_sigaltstack = false;
   f->check_malloc_usable_size = true;
   f->unmap_shadow_on_exit = false;
@@ -160,18 +165,15 @@ void InitializeFlags(Flags *f, const char *env) {
   f->print_legend = true;
   f->atexit = false;
   f->disable_core = (SANITIZER_WORDSIZE == 64);
-  f->strip_path_prefix = "";
   f->allow_reexec = true;
   f->print_full_thread_history = true;
-  f->log_path = 0;
-  f->fast_unwind_on_fatal = false;
-  f->fast_unwind_on_malloc = true;
   f->poison_heap = true;
   // Turn off alloc/dealloc mismatch checker on Mac for now.
   // TODO(glider): Fix known issues and enable this back.
   f->alloc_dealloc_mismatch = (SANITIZER_MAC == 0);;
-  f->use_stack_depot = true;  // Only affects allocator2.
+  f->use_stack_depot = true;
   f->strict_memcmp = true;
+  f->strict_init_order = false;
 
   // Override from compile definition.
   ParseFlagsFromString(f, MaybeUseAsanDefaultOptionsCompileDefiniton());
@@ -185,6 +187,20 @@ void InitializeFlags(Flags *f, const char *env) {
 
   // Override from command line.
   ParseFlagsFromString(f, env);
+
+#if !CAN_SANITIZE_LEAKS
+  if (cf->detect_leaks) {
+    Report("%s: detect_leaks is not supported on this platform.\n",
+           SanitizerToolName);
+    cf->detect_leaks = false;
+  }
+#endif
+
+  if (cf->detect_leaks && !f->use_stack_depot) {
+    Report("%s: detect_leaks is ignored (requires use_stack_depot).\n",
+           SanitizerToolName);
+    cf->detect_leaks = false;
+  }
 }
 
 // -------------------------- Globals --------------------- {{{1
@@ -205,8 +221,8 @@ void ShowStatsAndAbort() {
 // ---------------------- mmap -------------------- {{{1
 // Reserve memory range [beg, end].
 static void ReserveShadowMemoryRange(uptr beg, uptr end) {
-  CHECK((beg % GetPageSizeCached()) == 0);
-  CHECK(((end + 1) % GetPageSizeCached()) == 0);
+  CHECK_EQ((beg % GetPageSizeCached()), 0);
+  CHECK_EQ(((end + 1) % GetPageSizeCached()), 0);
   uptr size = end - beg + 1;
   void *res = MmapFixedNoReserve(beg, size);
   if (res != (void*)beg) {
@@ -312,22 +328,12 @@ static void asan_atexit() {
 
 static void InitializeHighMemEnd() {
 #if !ASAN_FIXED_MAPPING
-#if SANITIZER_WORDSIZE == 64
-# if defined(__powerpc64__)
-  // FIXME:
-  // On PowerPC64 we have two different address space layouts: 44- and 46-bit.
-  // We somehow need to figure our which one we are using now and choose
-  // one of 0x00000fffffffffffUL and 0x00003fffffffffffUL.
-  // Note that with 'ulimit -s unlimited' the stack is moved away from the top
-  // of the address space, so simply checking the stack address is not enough.
-  kHighMemEnd = (1ULL << 44) - 1;  // 0x00000fffffffffffUL
-# else
-  kHighMemEnd = (1ULL << 47) - 1;  // 0x00007fffffffffffUL;
-# endif
-#else  // SANITIZER_WORDSIZE == 32
-  kHighMemEnd = (1ULL << 32) - 1;  // 0xffffffff;
-#endif  // SANITIZER_WORDSIZE
+  kHighMemEnd = GetMaxVirtualAddress();
+  // Increase kHighMemEnd to make sure it's properly
+  // aligned together with kHighMemBeg:
+  kHighMemEnd |= SHADOW_GRANULARITY * GetPageSizeCached() - 1;
 #endif  // !ASAN_FIXED_MAPPING
+  CHECK_EQ((kHighMemBeg % GetPageSizeCached()), 0);
 }
 
 static void ProtectGap(uptr a, uptr size) {
@@ -369,7 +375,8 @@ static void PrintAddressSpaceLayout() {
   }
   Printf("\n");
   Printf("red_zone=%zu\n", (uptr)flags()->redzone);
-  Printf("malloc_context_size=%zu\n", (uptr)flags()->malloc_context_size);
+  Printf("malloc_context_size=%zu\n",
+         (uptr)common_flags()->malloc_context_size);
 
   Printf("SHADOW_SCALE: %zx\n", (uptr)SHADOW_SCALE);
   Printf("SHADOW_GRANULARITY: %zx\n", (uptr)SHADOW_GRANULARITY);
@@ -388,7 +395,7 @@ using namespace __asan;  // NOLINT
 
 #if !SANITIZER_SUPPORTS_WEAK_HOOKS
 extern "C" {
-SANITIZER_WEAK_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
 const char* __asan_default_options() { return ""; }
 }  // extern "C"
 #endif
@@ -406,6 +413,20 @@ void NOINLINE __asan_handle_no_return() {
   uptr PageSize = GetPageSizeCached();
   uptr top = curr_thread->stack_top();
   uptr bottom = ((uptr)&local_stack - PageSize) & ~(PageSize-1);
+  static const uptr kMaxExpectedCleanupSize = 64 << 20;  // 64M
+  if (top - bottom > kMaxExpectedCleanupSize) {
+    static bool reported_warning = false;
+    if (reported_warning)
+      return;
+    reported_warning = true;
+    Report("WARNING: ASan is ignoring requested __asan_handle_no_return: "
+           "stack top: %p; bottom %p; size: %p (%zd)\n"
+           "False positive error reports may follow\n"
+           "For details see "
+           "http://code.google.com/p/address-sanitizer/issues/detail?id=189\n",
+           top, bottom, top - bottom, top - bottom);
+    return;
+  }
   PoisonShadow(bottom, top - bottom, 0);
 }
 
@@ -428,13 +449,11 @@ void __asan_init() {
   SetCheckFailedCallback(AsanCheckFailed);
   SetPrintfAndReportCallback(AppendToErrorMessageBuffer);
 
-  // Check if external symbolizer is defined before parsing the flags.
-  asan_external_symbolizer = GetEnv("ASAN_SYMBOLIZER_PATH");
   // Initialize flags. This must be done early, because most of the
   // initialization steps look at flags().
   const char *options = GetEnv("ASAN_OPTIONS");
   InitializeFlags(flags(), options);
-  __sanitizer_set_report_path(flags()->log_path);
+  __sanitizer_set_report_path(common_flags()->log_path);
 
   if (flags()->verbosity && options) {
     Report("Parsed ASAN_OPTIONS: %s\n", options);
@@ -457,10 +476,10 @@ void __asan_init() {
   ReplaceOperatorsNewAndDelete();
 
   uptr shadow_start = kLowShadowBeg;
-  if (kLowShadowBeg) shadow_start -= GetMmapGranularity();
-  uptr shadow_end = kHighShadowEnd;
+  if (kLowShadowBeg)
+    shadow_start -= GetMmapGranularity();
   bool full_shadow_is_available =
-      MemoryRangeIsAvailable(shadow_start, shadow_end);
+      MemoryRangeIsAvailable(shadow_start, kHighShadowEnd);
 
 #if SANITIZER_LINUX && defined(__x86_64__) && !ASAN_FIXED_MAPPING
   if (!full_shadow_is_available) {
@@ -486,7 +505,7 @@ void __asan_init() {
     ProtectGap(kShadowGapBeg, kShadowGapEnd - kShadowGapBeg + 1);
   } else if (kMidMemBeg &&
       MemoryRangeIsAvailable(shadow_start, kMidMemBeg - 1) &&
-      MemoryRangeIsAvailable(kMidMemEnd + 1, shadow_end)) {
+      MemoryRangeIsAvailable(kMidMemEnd + 1, kHighShadowEnd)) {
     CHECK(kLowShadowBeg != kLowShadowEnd);
     // mmap the low shadow plus at least one page at the left.
     ReserveShadowMemoryRange(shadow_start, kLowShadowEnd);
@@ -506,10 +525,17 @@ void __asan_init() {
   }
 
   InstallSignalHandlers();
+
+  AsanTSDInit(AsanThread::TSDDtor);
+  // Allocator should be initialized before starting external symbolizer, as
+  // fork() on Mac locks the allocator.
+  InitializeAllocator();
+
   // Start symbolizer process if necessary.
-  if (flags()->symbolize && asan_external_symbolizer &&
-      asan_external_symbolizer[0]) {
-    InitializeExternalSymbolizer(asan_external_symbolizer);
+  const char* external_symbolizer = common_flags()->external_symbolizer_path;
+  if (common_flags()->symbolize && external_symbolizer &&
+      external_symbolizer[0]) {
+    InitializeExternalSymbolizer(external_symbolizer);
   }
 
   // On Linux AsanThread::ThreadStart() calls malloc() that's why asan_inited
@@ -517,18 +543,24 @@ void __asan_init() {
   asan_inited = 1;
   asan_init_is_running = false;
 
+  InitTlsSize();
+
   // Create main thread.
-  AsanTSDInit(AsanThread::TSDDtor);
   AsanThread *main_thread = AsanThread::Create(0, 0);
   CreateThreadContextArgs create_main_args = { main_thread, 0 };
   u32 main_tid = asanThreadRegistry().CreateThread(
       0, true, 0, &create_main_args);
   CHECK_EQ(0, main_tid);
   SetCurrentThread(main_thread);
-  main_thread->ThreadStart(GetPid());
+  main_thread->ThreadStart(internal_getpid());
   force_interface_symbols();  // no-op.
 
-  InitializeAllocator();
+#if CAN_SANITIZE_LEAKS
+  __lsan::InitCommonLsan();
+  if (common_flags()->detect_leaks && common_flags()->leak_check_at_exit) {
+    Atexit(__lsan::DoLeakCheck);
+  }
+#endif  // CAN_SANITIZE_LEAKS
 
   if (flags()->verbosity) {
     Report("AddressSanitizer Init done\n");

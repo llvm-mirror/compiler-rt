@@ -92,6 +92,7 @@ void UnsetAlternateSignalStack();
 void InstallSignalHandlers();
 void ReadContextStack(void *context, uptr *stack, uptr *ssize);
 void AsanPlatformThreadInit();
+void StopInitOrderChecking();
 
 // Wrapper for TLS/TSD.
 void AsanTSDInit(void (*destructor)(void *tsd));
@@ -107,7 +108,7 @@ bool PlatformHasDifferentMemcpyAndMemmove();
     (PlatformHasDifferentMemcpyAndMemmove())
 #else
 # define PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE true
-#endif  // __APPLE__
+#endif  // SANITIZER_MAC
 
 // Add convenient macro for interface functions that may be represented as
 // weak hooks.

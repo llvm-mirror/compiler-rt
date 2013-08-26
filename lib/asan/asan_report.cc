@@ -18,6 +18,7 @@
 #include "asan_stack.h"
 #include "asan_thread.h"
 #include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 
@@ -124,12 +125,12 @@ static void PrintLegend() {
          "application bytes):\n", (int)SHADOW_GRANULARITY);
   PrintShadowByte("  Addressable:           ", 0);
   Printf("  Partially addressable: ");
-  for (uptr i = 1; i < SHADOW_GRANULARITY; i++)
+  for (u8 i = 1; i < SHADOW_GRANULARITY; i++)
     PrintShadowByte("", i, " ");
   Printf("\n");
   PrintShadowByte("  Heap left redzone:     ", kAsanHeapLeftRedzoneMagic);
-  PrintShadowByte("  Heap righ redzone:     ", kAsanHeapRightRedzoneMagic);
-  PrintShadowByte("  Freed Heap region:     ", kAsanHeapFreeMagic);
+  PrintShadowByte("  Heap right redzone:    ", kAsanHeapRightRedzoneMagic);
+  PrintShadowByte("  Freed heap region:     ", kAsanHeapFreeMagic);
   PrintShadowByte("  Stack left redzone:    ", kAsanStackLeftRedzoneMagic);
   PrintShadowByte("  Stack mid redzone:     ", kAsanStackMidRedzoneMagic);
   PrintShadowByte("  Stack right redzone:   ", kAsanStackRightRedzoneMagic);
@@ -266,12 +267,20 @@ const char *ThreadNameWithParenthesis(u32 tid, char buff[],
 bool DescribeAddressIfStack(uptr addr, uptr access_size) {
   AsanThread *t = FindThreadByStackAddress(addr);
   if (!t) return false;
-  const sptr kBufSize = 4095;
+  const s64 kBufSize = 4095;
   char buf[kBufSize];
   uptr offset = 0;
   uptr frame_pc = 0;
   char tname[128];
   const char *frame_descr = t->GetFrameNameByAddr(addr, &offset, &frame_pc);
+
+#ifdef __powerpc64__
+  // On PowerPC64, the address of a function actually points to a
+  // three-doubleword data structure with the first field containing
+  // the address of the function's code.
+  frame_pc = *reinterpret_cast<uptr *>(frame_pc);
+#endif
+
   // This string is created by the compiler and has the following form:
   // "n alloc_1 alloc_2 ... alloc_n"
   // where alloc_i looks like "offset size len ObjectName ".
@@ -297,13 +306,13 @@ bool DescribeAddressIfStack(uptr addr, uptr access_size) {
   PrintStack(&alloca_stack);
   // Report the number of stack objects.
   char *p;
-  uptr n_objects = internal_simple_strtoll(frame_descr, &p, 10);
-  CHECK(n_objects > 0);
+  s64 n_objects = internal_simple_strtoll(frame_descr, &p, 10);
+  CHECK_GT(n_objects, 0);
   Printf("  This frame has %zu object(s):\n", n_objects);
   // Report all objects in this frame.
-  for (uptr i = 0; i < n_objects; i++) {
-    uptr beg, size;
-    sptr len;
+  for (s64 i = 0; i < n_objects; i++) {
+    s64 beg, size;
+    s64 len;
     beg  = internal_simple_strtoll(p, &p, 10);
     size = internal_simple_strtoll(p, &p, 10);
     len  = internal_simple_strtoll(p, &p, 10);
@@ -314,9 +323,9 @@ bool DescribeAddressIfStack(uptr addr, uptr access_size) {
     }
     p++;
     buf[0] = 0;
-    internal_strncat(buf, p, Min(kBufSize, len));
+    internal_strncat(buf, p, static_cast<uptr>(Min(kBufSize, len)));
     p += len;
-    Printf("    [%zu, %zu) '%s'\n", beg, beg + size, buf);
+    Printf("    [%lld, %lld) '%s'\n", beg, beg + size, buf);
   }
   Printf("HINT: this may be a false positive if your program uses "
              "some custom stack unwind mechanism or swapcontext\n"
@@ -458,10 +467,12 @@ class ScopedInErrorReport {
       internal__exit(flags()->exitcode);
     }
     ASAN_ON_ERROR();
-    // Make sure the registry is locked while we're printing an error report.
-    // We can lock the registry only here to avoid self-deadlock in case of
+    // Make sure the registry and sanitizer report mutexes are locked while
+    // we're printing an error report.
+    // We can lock them only here to avoid self-deadlock in case of
     // recursive reports.
     asanThreadRegistry().Lock();
+    CommonSanitizerReportMutex.Lock();
     reporting_thread_tid = GetCurrentTidOrInvalid();
     Printf("===================================================="
            "=============\n");
@@ -470,7 +481,8 @@ class ScopedInErrorReport {
       // in case we call an instrumented function from a symbolizer.
       AsanThread *curr_thread = GetCurrentThread();
       CHECK(curr_thread);
-      curr_thread->fake_stack().StopUsingFakeStack();
+      if (curr_thread->fake_stack())
+        curr_thread->fake_stack()->StopUsingFakeStack();
     }
   }
   // Destructor is NORETURN, as functions that report errors are.
@@ -497,9 +509,11 @@ static void ReportSummary(const char *error_type, StackTrace *stack) {
     AddressInfo ai;
     // Currently, we include the first stack frame into the report summary.
     // Maybe sometimes we need to choose another frame (e.g. skip memcpy/etc).
-    SymbolizeCode(stack->trace[0], &ai, 1);
+    uptr pc = StackTrace::GetPreviousInstructionPc(stack->trace[0]);
+    SymbolizeCode(pc, &ai, 1);
     ReportErrorSummary(error_type,
-                       StripPathPrefix(ai.file, flags()->strip_path_prefix),
+                       StripPathPrefix(ai.file,
+                                       common_flags()->strip_path_prefix),
                        ai.line, ai.function);
   }
   // FIXME: do we need to print anything at all if there is no symbolizer?
@@ -745,6 +759,6 @@ void __asan_describe_address(uptr addr) {
 #if !SANITIZER_SUPPORTS_WEAK_HOOKS
 // Provide default implementation of __asan_on_error that does nothing
 // and may be overriden by user.
-SANITIZER_WEAK_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE NOINLINE
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE NOINLINE
 void __asan_on_error() {}
 #endif

@@ -39,32 +39,35 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <libkern/OSAtomic.h>
+#include <errno.h>
 
 namespace __sanitizer {
 
+#include "sanitizer_syscall_generic.inc"
+
 // ---------------------- sanitizer_libc.h
-void *internal_mmap(void *addr, size_t length, int prot, int flags,
-                    int fd, u64 offset) {
-  return mmap(addr, length, prot, flags, fd, offset);
+uptr internal_mmap(void *addr, size_t length, int prot, int flags,
+                   int fd, u64 offset) {
+  return (uptr)mmap(addr, length, prot, flags, fd, offset);
 }
 
-int internal_munmap(void *addr, uptr length) {
+uptr internal_munmap(void *addr, uptr length) {
   return munmap(addr, length);
 }
 
-int internal_close(fd_t fd) {
+uptr internal_close(fd_t fd) {
   return close(fd);
 }
 
-fd_t internal_open(const char *filename, int flags) {
+uptr internal_open(const char *filename, int flags) {
   return open(filename, flags);
 }
 
-fd_t internal_open(const char *filename, int flags, u32 mode) {
+uptr internal_open(const char *filename, int flags, u32 mode) {
   return open(filename, flags, mode);
 }
 
-fd_t OpenFile(const char *filename, bool write) {
+uptr OpenFile(const char *filename, bool write) {
   return internal_open(filename,
       write ? O_WRONLY | O_CREAT : O_RDONLY, 0660);
 }
@@ -77,15 +80,15 @@ uptr internal_write(fd_t fd, const void *buf, uptr count) {
   return write(fd, buf, count);
 }
 
-int internal_stat(const char *path, void *buf) {
+uptr internal_stat(const char *path, void *buf) {
   return stat(path, (struct stat *)buf);
 }
 
-int internal_lstat(const char *path, void *buf) {
+uptr internal_lstat(const char *path, void *buf) {
   return lstat(path, (struct stat *)buf);
 }
 
-int internal_fstat(fd_t fd, void *buf) {
+uptr internal_fstat(fd_t fd, void *buf) {
   return fstat(fd, (struct stat *)buf);
 }
 
@@ -96,7 +99,7 @@ uptr internal_filesize(fd_t fd) {
   return (uptr)st.st_size;
 }
 
-int internal_dup2(int oldfd, int newfd) {
+uptr internal_dup2(int oldfd, int newfd) {
   return dup2(oldfd, newfd);
 }
 
@@ -104,12 +107,16 @@ uptr internal_readlink(const char *path, char *buf, uptr bufsize) {
   return readlink(path, buf, bufsize);
 }
 
-int internal_sched_yield() {
+uptr internal_sched_yield() {
   return sched_yield();
 }
 
 void internal__exit(int exitcode) {
   _exit(exitcode);
+}
+
+uptr internal_getpid() {
+  return getpid();
 }
 
 // ----------------- sanitizer_common.h
@@ -161,6 +168,10 @@ void ReExec() {
 
 void PrepareForSandboxing() {
   // Nothing here for now.
+}
+
+uptr GetPageSize() {
+  return sysconf(_SC_PAGESIZE);
 }
 
 // ----------------- sanitizer_procmaps.h
@@ -332,6 +343,10 @@ void BlockingMutex::CheckLocked() {
   CHECK_EQ((uptr)pthread_self(), owner_);
 }
 
+u64 NanoTime() {
+  return 0;
+}
+
 uptr GetTlsSize() {
   return 0;
 }
@@ -339,6 +354,23 @@ uptr GetTlsSize() {
 void InitTlsSize() {
 }
 
+void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
+                          uptr *tls_addr, uptr *tls_size) {
+#ifndef SANITIZER_GO
+  uptr stack_top, stack_bottom;
+  GetThreadStackTopAndBottom(main, &stack_top, &stack_bottom);
+  *stk_addr = stack_bottom;
+  *stk_size = stack_top - stack_bottom;
+  *tls_addr = 0;
+  *tls_size = 0;
+#else
+  *stk_addr = 0;
+  *stk_size = 0;
+  *tls_addr = 0;
+  *tls_size = 0;
+#endif
+}
+
 }  // namespace __sanitizer
 
-#endif  // __APPLE__
+#endif  // SANITIZER_MAC

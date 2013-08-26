@@ -19,6 +19,15 @@ namespace __sanitizer {
 
 static const uptr kStackTraceMax = 256;
 
+#if SANITIZER_LINUX && (defined(__arm__) || \
+    defined(__powerpc__) || defined(__powerpc64__) || \
+    defined(__sparc__) || \
+    defined(__mips__))
+#define SANITIZER_CAN_FAST_UNWIND 0
+#else
+#define SANITIZER_CAN_FAST_UNWIND 1
+#endif
+
 struct StackTrace {
   typedef bool (*SymbolizeCallback)(const void *pc, char *out_buffer,
                                      int out_size);
@@ -51,8 +60,10 @@ struct StackTrace {
   static uptr GetCurrentPc();
   static uptr GetPreviousInstructionPc(uptr pc);
 
+  SANITIZER_INTERFACE_ATTRIBUTE
   static uptr CompressStack(StackTrace *stack,
                             u32 *compressed, uptr size);
+  SANITIZER_INTERFACE_ATTRIBUTE
   static void UncompressStack(StackTrace *stack,
                               u32 *compressed, uptr size);
 };
@@ -60,6 +71,9 @@ struct StackTrace {
 
 const char *StripPathPrefix(const char *filepath,
                             const char *strip_file_prefix);
+
+void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp,
+                   uptr stack_top, uptr stack_bottom, bool fast);
 
 }  // namespace __sanitizer
 

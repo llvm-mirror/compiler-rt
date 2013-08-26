@@ -22,23 +22,23 @@
 // because we do not require a C++ ABI library to be linked to a program
 // using sanitizers; if it's not present, we'll just use the mangled name.
 namespace __cxxabiv1 {
-  extern "C" char *__cxa_demangle(const char *mangled, char *buffer,
-                                  size_t *length, int *status)
-    SANITIZER_WEAK_ATTRIBUTE;
+  extern "C" SANITIZER_WEAK_ATTRIBUTE
+  char *__cxa_demangle(const char *mangled, char *buffer,
+                                  size_t *length, int *status);
 }
 
-const char *__sanitizer::Demangle(const char *MangledName) {
+const char *__sanitizer::DemangleCXXABI(const char *name) {
   // FIXME: __cxa_demangle aggressively insists on allocating memory.
   // There's not much we can do about that, short of providing our
   // own demangler (libc++abi's implementation could be adapted so that
   // it does not allocate). For now, we just call it anyway, and we leak
   // the returned value.
   if (__cxxabiv1::__cxa_demangle)
-    if (const char *Demangled =
-          __cxxabiv1::__cxa_demangle(MangledName, 0, 0, 0))
-      return Demangled;
+    if (const char *demangled_name =
+          __cxxabiv1::__cxa_demangle(name, 0, 0, 0))
+      return demangled_name;
 
-  return MangledName;
+  return name;
 }
 
-#endif  // __APPLE__ || __linux__
+#endif  // SANITIZER_MAC || SANITIZER_LINUX

@@ -20,6 +20,7 @@ SRCS="
 	../../sanitizer_common/sanitizer_flags.cc
 	../../sanitizer_common/sanitizer_libc.cc
 	../../sanitizer_common/sanitizer_printf.cc
+	../../sanitizer_common/sanitizer_suppressions.cc
 	../../sanitizer_common/sanitizer_thread_registry.cc
 "
 
@@ -30,7 +31,9 @@ if [ "`uname -a | grep Linux`" != "" ]; then
 	SRCS+="
 		../rtl/tsan_platform_linux.cc
 		../../sanitizer_common/sanitizer_posix.cc
+		../../sanitizer_common/sanitizer_posix_libcdep.cc
 		../../sanitizer_common/sanitizer_linux.cc
+		../../sanitizer_common/sanitizer_linux_libcdep.cc
 	"
 elif [ "`uname -a | grep Darwin`" != "" ]; then
 	SUFFIX="darwin_amd64"
@@ -40,6 +43,7 @@ elif [ "`uname -a | grep Darwin`" != "" ]; then
 		../rtl/tsan_platform_mac.cc
 		../../sanitizer_common/sanitizer_posix.cc
 		../../sanitizer_common/sanitizer_mac.cc
+		../../sanitizer_common/sanitizer_posix_libcdep.cc
 	"
 elif [ "`uname -a | grep MINGW`" != "" ]; then
 	SUFFIX="windows_amd64"
@@ -61,7 +65,7 @@ for F in $SRCS; do
 	cat $F >> gotsan.cc
 done
 
-FLAGS=" -I../rtl -I../.. -I../../sanitizer_common -I../../../include -m64 -Wall -Werror -fno-exceptions -fno-rtti -DTSAN_GO -DSANITIZER_GO -DTSAN_SHADOW_COUNT=4 $OSCFLAGS"
+FLAGS=" -I../rtl -I../.. -I../../sanitizer_common -I../../../include -m64 -Wall -Werror -Wno-maybe-uninitialized -fno-exceptions -fno-rtti -DTSAN_GO -DSANITIZER_GO -DTSAN_SHADOW_COUNT=4 $OSCFLAGS"
 if [ "$DEBUG" == "" ]; then
 	FLAGS+=" -DTSAN_DEBUG=0 -O3 -fomit-frame-pointer"
 else

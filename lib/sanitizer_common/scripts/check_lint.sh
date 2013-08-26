@@ -23,28 +23,34 @@ CPPLINT=${SCRIPT_DIR}/cpplint/cpplint.py
 # TODO: remove some of these filters
 COMMON_LINT_FILTER=-build/include,-build/header_guard,-legal/copyright,-whitespace/comments,-readability/casting,\
 -build/namespaces
-ASAN_RTL_LINT_FILTER=${COMMON_LINT_FILTER},-readability/check,-runtime/int
+ASAN_RTL_LINT_FILTER=${COMMON_LINT_FILTER},-runtime/int
 ASAN_TEST_LINT_FILTER=${COMMON_LINT_FILTER},-runtime/sizeof,-runtime/int,-runtime/printf
 ASAN_LIT_TEST_LINT_FILTER=${ASAN_TEST_LINT_FILTER},-whitespace/line_length
 TSAN_RTL_LINT_FILTER=${COMMON_LINT_FILTER}
 TSAN_TEST_LINT_FILTER=${TSAN_RTL_LINT_FILTER},-runtime/threadsafe_fn,-runtime/int
 TSAN_LIT_TEST_LINT_FILTER=${TSAN_TEST_LINT_FILTER},-whitespace/line_length
 MSAN_RTL_LINT_FILTER=${COMMON_LINT_FILTER}
+LSAN_RTL_LINT_FILTER=${COMMON_LINT_FILTER}
+LSAN_LIT_TEST_LINT_FILTER=${LSAN_RTL_LINT_FILTER},-whitespace/line_length
 COMMON_RTL_INC_LINT_FILTER=${COMMON_LINT_FILTER},-runtime/int,-runtime/sizeof,-runtime/printf
+SANITIZER_INCLUDES_LINT_FILTER=${COMMON_LINT_FILTER},-runtime/int
 
 cd ${LLVM_CHECKOUT}
+
+# FIXME: We should use some bash magic to continue cpplint invocations, but
+# still mark the whole run as failed if any invocation fails.
 
 # LLVM Instrumentation
 LLVM_INSTRUMENTATION=lib/Transforms/Instrumentation
 LLVM_LINT_FILTER=-,+whitespace
-${CPPLINT} --filter=${LLVM_LINT_FILTER} ${LLVM_INSTRUMENTATION}/*Sanitizer.cpp \
-                                        ${LLVM_INSTRUMENTATION}/BlackList.*
+${CPPLINT} --filter=${LLVM_LINT_FILTER} lib/Transforms/Instrumentation/*Sanitizer.cpp \
+                                        lib/Transforms/Utils/SpecialCaseList.cpp
 
 COMPILER_RT=projects/compiler-rt
 
 # Headers
 SANITIZER_INCLUDES=${COMPILER_RT}/include/sanitizer
-${CPPLINT} --filter=${TSAN_RTL_LINT_FILTER} ${SANITIZER_INCLUDES}/*.h
+${CPPLINT} --filter=${SANITIZER_INCLUDES_LINT_FILTER} ${SANITIZER_INCLUDES}/*.h
 
 # Sanitizer_common
 COMMON_RTL=${COMPILER_RT}/lib/sanitizer_common
@@ -59,8 +65,7 @@ ${CPPLINT} --filter=${ASAN_RTL_LINT_FILTER} ${INTERCEPTION}/*.{cc,h}
 ASAN_RTL=${COMPILER_RT}/lib/asan
 ${CPPLINT} --filter=${ASAN_RTL_LINT_FILTER} ${ASAN_RTL}/*.{cc,h}
 ${CPPLINT} --filter=${ASAN_TEST_LINT_FILTER} ${ASAN_RTL}/tests/*.{cc,h}
-${CPPLINT} --filter=${ASAN_LIT_TEST_LINT_FILTER} ${ASAN_RTL}/lit_tests/*.cc \
-                                             ${ASAN_RTL}/lit_tests/*/*.cc \
+${CPPLINT} --filter=${ASAN_LIT_TEST_LINT_FILTER} ${ASAN_RTL}/lit_tests/*/*.cc \
 
 # TSan
 TSAN_RTL=${COMPILER_RT}/lib/tsan
@@ -72,6 +77,12 @@ ${CPPLINT} --filter=${TSAN_LIT_TEST_LINT_FILTER} ${TSAN_RTL}/lit_tests/*.cc
 # MSan
 MSAN_RTL=${COMPILER_RT}/lib/msan
 ${CPPLINT} --filter=${MSAN_RTL_LINT_FILTER} ${MSAN_RTL}/*.{cc,h}
+
+# LSan
+LSAN_RTL=${COMPILER_RT}/lib/lsan
+${CPPLINT} --filter=${LSAN_RTL_LINT_FILTER} ${LSAN_RTL}/*.{cc,h}
+${CPPLINT} --filter=${LSAN_RTL_LINT_FILTER} ${LSAN_RTL}/tests/*.{cc,h}
+${CPPLINT} --filter=${LSAN_LIT_TEST_LINT_FILTER} ${LSAN_RTL}/lit_tests/*/*.cc
 
 set +e
 

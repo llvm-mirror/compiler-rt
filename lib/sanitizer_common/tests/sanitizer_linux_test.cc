@@ -11,15 +11,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifdef __linux__
+#include "sanitizer_common/sanitizer_platform.h"
+#if SANITIZER_LINUX
 
 #include "sanitizer_common/sanitizer_linux.h"
-#include "gtest/gtest.h"
 
 #include "sanitizer_common/sanitizer_common.h"
+#include "gtest/gtest.h"
 
 #include <pthread.h>
 #include <sched.h>
+#include <stdlib.h>
 
 #include <algorithm>
 #include <vector>
@@ -185,6 +187,74 @@ TEST_F(ThreadListerTest, ResetMakesNewThreadsKnown) {
   ASSERT_TRUE(HasElement(threads_after_extra, extra_tid));
 }
 
+TEST(SanitizerCommon, SetEnvTest) {
+  const char kEnvName[] = "ENV_FOO";
+  SetEnv(kEnvName, "value");
+  EXPECT_STREQ("value", getenv(kEnvName));
+  unsetenv(kEnvName);
+  EXPECT_EQ(0, getenv(kEnvName));
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+void *thread_self_offset_test_func(void *arg) {
+  bool result =
+      *(uptr *)((char *)ThreadSelf() + ThreadSelfOffset()) == ThreadSelf();
+  return (void *)result;
+}
+
+TEST(SanitizerLinux, ThreadSelfOffset) {
+  EXPECT_TRUE((bool)thread_self_offset_test_func(0));
+  pthread_t tid;
+  void *result;
+  ASSERT_EQ(0, pthread_create(&tid, 0, thread_self_offset_test_func, 0));
+  ASSERT_EQ(0, pthread_join(tid, &result));
+  EXPECT_TRUE((bool)result);
+}
+
+// libpthread puts the thread descriptor at the end of stack space.
+void *thread_descriptor_size_test_func(void *arg) {
+  uptr descr_addr = ThreadSelf();
+  pthread_attr_t attr;
+  pthread_getattr_np(pthread_self(), &attr);
+  void *stackaddr;
+  size_t stacksize;
+  pthread_attr_getstack(&attr, &stackaddr, &stacksize);
+  return (void *)((uptr)stackaddr + stacksize - descr_addr);
+}
+
+TEST(SanitizerLinux, ThreadDescriptorSize) {
+  pthread_t tid;
+  void *result;
+  ASSERT_EQ(0, pthread_create(&tid, 0, thread_descriptor_size_test_func, 0));
+  ASSERT_EQ(0, pthread_join(tid, &result));
+  EXPECT_EQ((uptr)result, ThreadDescriptorSize());
+}
+#endif
+
+TEST(SanitizerCommon, LibraryNameIs) {
+  EXPECT_FALSE(LibraryNameIs("", ""));
+
+  char full_name[256];
+  const char *paths[] = { "", "/", "/path/to/" };
+  const char *suffixes[] = { "", "-linux", ".1.2", "-linux.1.2" };
+  const char *base_names[] = { "lib", "lib.0", "lib-i386" };
+  const char *wrong_names[] = { "", "lib.9", "lib-x86_64" };
+  for (uptr i = 0; i < ARRAY_SIZE(paths); i++)
+    for (uptr j = 0; j < ARRAY_SIZE(suffixes); j++) {
+      for (uptr k = 0; k < ARRAY_SIZE(base_names); k++) {
+        internal_snprintf(full_name, ARRAY_SIZE(full_name), "%s%s%s.so",
+                          paths[i], base_names[k], suffixes[j]);
+        EXPECT_TRUE(LibraryNameIs(full_name, base_names[k]))
+            << "Full name " << full_name
+            << " doesn't match base name " << base_names[k];
+        for (uptr m = 0; m < ARRAY_SIZE(wrong_names); m++)
+          EXPECT_FALSE(LibraryNameIs(full_name, wrong_names[m]))
+            << "Full name " << full_name
+            << " matches base name " << wrong_names[m];
+      }
+    }
+}
+
 }  // namespace __sanitizer
 
-#endif  // __linux__
+#endif  // SANITIZER_LINUX

@@ -30,33 +30,13 @@ using namespace __tsan;  // NOLINT
 #define SCOPED_ATOMIC(func, ...) \
     const uptr callpc = (uptr)__builtin_return_address(0); \
     uptr pc = __sanitizer::StackTrace::GetCurrentPc(); \
-    pc = __sanitizer::StackTrace::GetPreviousInstructionPc(pc); \
     mo = ConvertOrder(mo); \
     mo = flags()->force_seq_cst_atomics ? (morder)mo_seq_cst : mo; \
     ThreadState *const thr = cur_thread(); \
     AtomicStatInc(thr, sizeof(*a), mo, StatAtomic##func); \
-    ScopedAtomic sa(thr, callpc, __FUNCTION__); \
+    ScopedAtomic sa(thr, callpc, a, mo, __FUNCTION__); \
     return Atomic##func(thr, pc, __VA_ARGS__); \
 /**/
-
-class ScopedAtomic {
- public:
-  ScopedAtomic(ThreadState *thr, uptr pc, const char *func)
-      : thr_(thr) {
-    CHECK_EQ(thr_->in_rtl, 0);
-    ProcessPendingSignals(thr);
-    FuncEntry(thr_, pc);
-    DPrintf("#%d: %s\n", thr_->tid, func);
-    thr_->in_rtl++;
-  }
-  ~ScopedAtomic() {
-    thr_->in_rtl--;
-    CHECK_EQ(thr_->in_rtl, 0);
-    FuncExit(thr_);
-  }
- private:
-  ThreadState *thr_;
-};
 
 // Some shortcuts.
 typedef __tsan_memory_order morder;
@@ -71,6 +51,26 @@ const morder mo_acquire = __tsan_memory_order_acquire;
 const morder mo_release = __tsan_memory_order_release;
 const morder mo_acq_rel = __tsan_memory_order_acq_rel;
 const morder mo_seq_cst = __tsan_memory_order_seq_cst;
+
+class ScopedAtomic {
+ public:
+  ScopedAtomic(ThreadState *thr, uptr pc, const volatile void *a,
+               morder mo, const char *func)
+      : thr_(thr) {
+    CHECK_EQ(thr_->in_rtl, 0);
+    ProcessPendingSignals(thr);
+    FuncEntry(thr_, pc);
+    DPrintf("#%d: %s(%p, %d)\n", thr_->tid, func, a, mo);
+    thr_->in_rtl++;
+  }
+  ~ScopedAtomic() {
+    thr_->in_rtl--;
+    CHECK_EQ(thr_->in_rtl, 0);
+    FuncExit(thr_);
+  }
+ private:
+  ThreadState *thr_;
+};
 
 static void AtomicStatInc(ThreadState *thr, uptr size, morder mo, StatType t) {
   StatInc(thr, StatAtomic);
@@ -659,14 +659,14 @@ a64 __tsan_atomic64_compare_exchange_val(volatile a64 *a, a64 c, a64 v,
 }
 
 #if __TSAN_HAS_INT128
-a128 __tsan_atomic64_compare_exchange_val(volatile a128 *a, a128 c, a128 v,
+a128 __tsan_atomic128_compare_exchange_val(volatile a128 *a, a128 c, a128 v,
     morder mo, morder fmo) {
   SCOPED_ATOMIC(CAS, a, c, v, mo, fmo);
 }
 #endif
 
 void __tsan_atomic_thread_fence(morder mo) {
-  char* a;
+  char* a = 0;
   SCOPED_ATOMIC(Fence, mo);
 }
 

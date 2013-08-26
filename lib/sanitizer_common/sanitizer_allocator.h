@@ -105,7 +105,7 @@ class SizeClassMap {
     void *batch[kMaxNumCached];
   };
 
-  static const uptr kMaxSize = 1 << kMaxSizeLog;
+  static const uptr kMaxSize = 1UL << kMaxSizeLog;
   static const uptr kNumClasses =
       kMidClass + ((kMaxSizeLog - kMidSizeLog) << S) + 1;
   COMPILER_CHECK(kNumClasses >= 32 && kNumClasses <= 256);
@@ -279,6 +279,9 @@ struct NoOpMapUnmapCallback {
   void OnUnmap(uptr p, uptr size) const { }
 };
 
+// Callback type for iterating over chunks.
+typedef void (*ForEachChunkCallback)(uptr chunk, void *arg);
+
 // SizeClassAllocator64 -- allocator for 64-bit address space.
 //
 // Space: a portion of address space of kSpaceSize bytes starting at
@@ -344,15 +347,15 @@ class SizeClassAllocator64 {
     region->n_freed += b->count;
   }
 
-  static bool PointerIsMine(void *p) {
+  static bool PointerIsMine(const void *p) {
     return reinterpret_cast<uptr>(p) / kSpaceSize == kSpaceBeg / kSpaceSize;
   }
 
-  static uptr GetSizeClass(void *p) {
+  static uptr GetSizeClass(const void *p) {
     return (reinterpret_cast<uptr>(p) / kRegionSize) % kNumClassesRounded;
   }
 
-  void *GetBlockBegin(void *p) {
+  void *GetBlockBegin(const void *p) {
     uptr class_id = GetSizeClass(p);
     uptr size = SizeClassMap::Size(class_id);
     if (!size) return 0;
@@ -374,7 +377,7 @@ class SizeClassAllocator64 {
 
   uptr ClassID(uptr size) { return SizeClassMap::ClassID(size); }
 
-  void *GetMetaData(void *p) {
+  void *GetMetaData(const void *p) {
     uptr class_id = GetSizeClass(p);
     uptr size = SizeClassMap::Size(class_id);
     uptr chunk_idx = GetChunkIdx(reinterpret_cast<uptr>(p), size);
@@ -433,20 +436,18 @@ class SizeClassAllocator64 {
     }
   }
 
-  // Iterate over existing chunks. May include chunks that are not currently
-  // allocated to the user (e.g. freed).
-  // The caller is expected to call ForceLock() before calling this function.
-  template<typename Callable>
-  void ForEachChunk(const Callable &callback) {
+  // Iterate over all existing chunks.
+  // The allocator must be locked when calling this function.
+  void ForEachChunk(ForEachChunkCallback callback, void *arg) {
     for (uptr class_id = 1; class_id < kNumClasses; class_id++) {
       RegionInfo *region = GetRegionInfo(class_id);
       uptr chunk_size = SizeClassMap::Size(class_id);
       uptr region_beg = kSpaceBeg + class_id * kRegionSize;
-      for (uptr p = region_beg;
-           p < region_beg + region->allocated_user;
-           p += chunk_size) {
-        // Too slow: CHECK_EQ((void *)p, GetBlockBegin((void *)p));
-        callback((void *)p);
+      for (uptr chunk = region_beg;
+           chunk < region_beg + region->allocated_user;
+           chunk += chunk_size) {
+        // Too slow: CHECK_EQ((void *)chunk, GetBlockBegin((void *)chunk));
+        callback(chunk, arg);
       }
     }
   }
@@ -492,11 +493,12 @@ class SizeClassAllocator64 {
   }
 
   static uptr GetChunkIdx(uptr chunk, uptr size) {
-    u32 offset = chunk % kRegionSize;
+    uptr offset = chunk % kRegionSize;
     // Here we divide by a non-constant. This is costly.
-    // We require that kRegionSize is at least 2^32 so that offset is 32-bit.
-    // We save 2x by using 32-bit div, but may need to use a 256-way switch.
-    return offset / (u32)size;
+    // size always fits into 32-bits. If the offset fits too, use 32-bit div.
+    if (offset >> (SANITIZER_WORDSIZE / 2))
+      return offset / size;
+    return (u32)offset / (u32)size;
   }
 
   NOINLINE Batch* PopulateFreeList(AllocatorStats *stat, AllocatorCache *c,
@@ -534,7 +536,7 @@ class SizeClassAllocator64 {
       region->mapped_meta += map_size;
     }
     CHECK_LE(region->allocated_meta, region->mapped_meta);
-    if (region->allocated_user + region->allocated_meta > kRegionSize) {
+    if (region->mapped_user + region->mapped_meta > kRegionSize) {
       Printf("%s: Out of memory. Dying. ", SanitizerToolName);
       Printf("The process has exhausted %zuMB for size class %zu.\n",
           kRegionSize / 1024 / 1024, size);
@@ -560,6 +562,30 @@ class SizeClassAllocator64 {
   }
 };
 
+// Maps integers in rage [0, kSize) to u8 values.
+template<u64 kSize>
+class FlatByteMap {
+ public:
+  void TestOnlyInit() {
+    internal_memset(map_, 0, sizeof(map_));
+  }
+
+  void set(uptr idx, u8 val) {
+    CHECK_LT(idx, kSize);
+    CHECK_EQ(0U, map_[idx]);
+    map_[idx] = val;
+  }
+  u8 operator[] (uptr idx) {
+    CHECK_LT(idx, kSize);
+    // FIXME: CHECK may be too expensive here.
+    return map_[idx];
+  }
+ private:
+  u8 map_[kSize];
+};
+
+// FIXME: Also implement TwoLevelByteMap.
+
 // SizeClassAllocator32 -- allocator for 32-bit address space.
 // This allocator can theoretically be used on 64-bit arch, but there it is less
 // efficient than SizeClassAllocator64.
@@ -571,7 +597,7 @@ class SizeClassAllocator64 {
 //   a result of a single call to MmapAlignedOrDie(kRegionSize, kRegionSize).
 // Since the regions are aligned by kRegionSize, there are exactly
 // kNumPossibleRegions possible regions in the address space and so we keep
-// an u8 array possible_regions[kNumPossibleRegions] to store the size classes.
+// a ByteMap possible_regions to store the size classes of each Region.
 // 0 size class means the region is not used by the allocator.
 //
 // One Region is used to allocate chunks of a single size class.
@@ -582,16 +608,19 @@ class SizeClassAllocator64 {
 // chache-line aligned.
 template <const uptr kSpaceBeg, const u64 kSpaceSize,
           const uptr kMetadataSize, class SizeClassMap,
+          const uptr kRegionSizeLog,
+          class ByteMap,
           class MapUnmapCallback = NoOpMapUnmapCallback>
 class SizeClassAllocator32 {
  public:
   typedef typename SizeClassMap::TransferBatch Batch;
   typedef SizeClassAllocator32<kSpaceBeg, kSpaceSize, kMetadataSize,
-      SizeClassMap, MapUnmapCallback> ThisT;
+      SizeClassMap, kRegionSizeLog, ByteMap, MapUnmapCallback> ThisT;
   typedef SizeClassAllocatorLocalCache<ThisT> AllocatorCache;
 
   void Init() {
-    state_ = reinterpret_cast<State *>(MapWithCallback(sizeof(State)));
+    possible_regions.TestOnlyInit();
+    internal_memset(size_class_info_array, 0, sizeof(size_class_info_array));
   }
 
   void *MapWithCallback(uptr size) {
@@ -611,7 +640,7 @@ class SizeClassAllocator32 {
       alignment <= SizeClassMap::kMaxSize;
   }
 
-  void *GetMetaData(void *p) {
+  void *GetMetaData(const void *p) {
     CHECK(PointerIsMine(p));
     uptr mem = reinterpret_cast<uptr>(p);
     uptr beg = ComputeRegionBeg(mem);
@@ -643,15 +672,15 @@ class SizeClassAllocator32 {
     sci->free_list.push_front(b);
   }
 
-  bool PointerIsMine(void *p) {
+  bool PointerIsMine(const void *p) {
     return GetSizeClass(p) != 0;
   }
 
-  uptr GetSizeClass(void *p) {
-    return state_->possible_regions[ComputeRegionId(reinterpret_cast<uptr>(p))];
+  uptr GetSizeClass(const void *p) {
+    return possible_regions[ComputeRegionId(reinterpret_cast<uptr>(p))];
   }
 
-  void *GetBlockBegin(void *p) {
+  void *GetBlockBegin(const void *p) {
     CHECK(PointerIsMine(p));
     uptr mem = reinterpret_cast<uptr>(p);
     uptr beg = ComputeRegionBeg(mem);
@@ -673,16 +702,15 @@ class SizeClassAllocator32 {
     // No need to lock here.
     uptr res = 0;
     for (uptr i = 0; i < kNumPossibleRegions; i++)
-      if (state_->possible_regions[i])
+      if (possible_regions[i])
         res += kRegionSize;
     return res;
   }
 
   void TestOnlyUnmap() {
     for (uptr i = 0; i < kNumPossibleRegions; i++)
-      if (state_->possible_regions[i])
+      if (possible_regions[i])
         UnmapWithCallback((i * kRegionSize), kRegionSize);
-    UnmapWithCallback(reinterpret_cast<uptr>(state_), sizeof(State));
   }
 
   // ForceLock() and ForceUnlock() are needed to implement Darwin malloc zone
@@ -699,21 +727,19 @@ class SizeClassAllocator32 {
     }
   }
 
-  // Iterate over existing chunks. May include chunks that are not currently
-  // allocated to the user (e.g. freed).
-  // The caller is expected to call ForceLock() before calling this function.
-  template<typename Callable>
-  void ForEachChunk(const Callable &callback) {
+  // Iterate over all existing chunks.
+  // The allocator must be locked when calling this function.
+  void ForEachChunk(ForEachChunkCallback callback, void *arg) {
     for (uptr region = 0; region < kNumPossibleRegions; region++)
-      if (state_->possible_regions[region]) {
-        uptr chunk_size = SizeClassMap::Size(state_->possible_regions[region]);
+      if (possible_regions[region]) {
+        uptr chunk_size = SizeClassMap::Size(possible_regions[region]);
         uptr max_chunks_in_region = kRegionSize / (chunk_size + kMetadataSize);
         uptr region_beg = region * kRegionSize;
-        for (uptr p = region_beg;
-             p < region_beg + max_chunks_in_region * chunk_size;
-             p += chunk_size) {
-          // Too slow: CHECK_EQ((void *)p, GetBlockBegin((void *)p));
-          callback((void *)p);
+        for (uptr chunk = region_beg;
+             chunk < region_beg + max_chunks_in_region * chunk_size;
+             chunk += chunk_size) {
+          // Too slow: CHECK_EQ((void *)chunk, GetBlockBegin((void *)chunk));
+          callback(chunk, arg);
         }
       }
   }
@@ -725,7 +751,6 @@ class SizeClassAllocator32 {
   static const uptr kNumClasses = SizeClassMap::kNumClasses;
 
  private:
-  static const uptr kRegionSizeLog = SANITIZER_WORDSIZE == 64 ? 24 : 20;
   static const uptr kRegionSize = 1 << kRegionSizeLog;
   static const uptr kNumPossibleRegions = kSpaceSize / kRegionSize;
 
@@ -753,14 +778,13 @@ class SizeClassAllocator32 {
     MapUnmapCallback().OnMap(res, kRegionSize);
     stat->Add(AllocatorStatMmapped, kRegionSize);
     CHECK_EQ(0U, (res & (kRegionSize - 1)));
-    CHECK_EQ(0U, state_->possible_regions[ComputeRegionId(res)]);
-    state_->possible_regions[ComputeRegionId(res)] = class_id;
+    possible_regions.set(ComputeRegionId(res), static_cast<u8>(class_id));
     return res;
   }
 
   SizeClassInfo *GetSizeClassInfo(uptr class_id) {
     CHECK_LT(class_id, kNumClasses);
-    return &state_->size_class_info_array[class_id];
+    return &size_class_info_array[class_id];
   }
 
   void PopulateFreeList(AllocatorStats *stat, AllocatorCache *c,
@@ -791,11 +815,8 @@ class SizeClassAllocator32 {
     }
   }
 
-  struct State {
-    u8 possible_regions[kNumPossibleRegions];
-    SizeClassInfo size_class_info_array[kNumClasses];
-  };
-  State *state_;
+  ByteMap possible_regions;
+  SizeClassInfo size_class_info_array[kNumClasses];
 };
 
 // Objects of this type should be used as local caches for SizeClassAllocator64
@@ -939,6 +960,7 @@ class LargeMmapAllocator {
     {
       SpinMutexLock l(&mutex_);
       uptr idx = n_chunks_++;
+      chunks_sorted_ = false;
       CHECK_LT(idx, kMaxNumChunks);
       h->chunk_idx = idx;
       chunks_[idx] = h;
@@ -962,6 +984,7 @@ class LargeMmapAllocator {
       chunks_[idx] = chunks_[n_chunks_ - 1];
       chunks_[idx]->chunk_idx = idx;
       n_chunks_--;
+      chunks_sorted_ = false;
       stats.n_frees++;
       stats.currently_allocated -= h->map_size;
       stat->Add(AllocatorStatFreed, h->map_size);
@@ -982,7 +1005,7 @@ class LargeMmapAllocator {
     return res;
   }
 
-  bool PointerIsMine(void *p) {
+  bool PointerIsMine(const void *p) {
     return GetBlockBegin(p) != 0;
   }
 
@@ -991,13 +1014,16 @@ class LargeMmapAllocator {
   }
 
   // At least page_size_/2 metadata bytes is available.
-  void *GetMetaData(void *p) {
+  void *GetMetaData(const void *p) {
     // Too slow: CHECK_EQ(p, GetBlockBegin(p));
-    CHECK(IsAligned(reinterpret_cast<uptr>(p), page_size_));
+    if (!IsAligned(reinterpret_cast<uptr>(p), page_size_)) {
+      Printf("%s: bad pointer %p\n", SanitizerToolName, p);
+      CHECK(IsAligned(reinterpret_cast<uptr>(p), page_size_));
+    }
     return GetHeader(p) + 1;
   }
 
-  void *GetBlockBegin(void *ptr) {
+  void *GetBlockBegin(const void *ptr) {
     uptr p = reinterpret_cast<uptr>(ptr);
     SpinMutexLock l(&mutex_);
     uptr nearest_chunk = 0;
@@ -1014,7 +1040,49 @@ class LargeMmapAllocator {
     CHECK_GE(nearest_chunk, h->map_beg);
     CHECK_LT(nearest_chunk, h->map_beg + h->map_size);
     CHECK_LE(nearest_chunk, p);
-    if (h->map_beg + h->map_size < p)
+    if (h->map_beg + h->map_size <= p)
+      return 0;
+    return GetUser(h);
+  }
+
+  // This function does the same as GetBlockBegin, but is much faster.
+  // Must be called with the allocator locked.
+  void *GetBlockBeginFastLocked(void *ptr) {
+    uptr p = reinterpret_cast<uptr>(ptr);
+    uptr n = n_chunks_;
+    if (!n) return 0;
+    if (!chunks_sorted_) {
+      // Do one-time sort. chunks_sorted_ is reset in Allocate/Deallocate.
+      SortArray(reinterpret_cast<uptr*>(chunks_), n);
+      for (uptr i = 0; i < n; i++)
+        chunks_[i]->chunk_idx = i;
+      chunks_sorted_ = true;
+      min_mmap_ = reinterpret_cast<uptr>(chunks_[0]);
+      max_mmap_ = reinterpret_cast<uptr>(chunks_[n - 1]) +
+          chunks_[n - 1]->map_size;
+    }
+    if (p < min_mmap_ || p >= max_mmap_)
+      return 0;
+    uptr beg = 0, end = n - 1;
+    // This loop is a log(n) lower_bound. It does not check for the exact match
+    // to avoid expensive cache-thrashing loads.
+    while (end - beg >= 2) {
+      uptr mid = (beg + end) / 2;  // Invariant: mid >= beg + 1
+      if (p < reinterpret_cast<uptr>(chunks_[mid]))
+        end = mid - 1;  // We are not interested in chunks_[mid].
+      else
+        beg = mid;  // chunks_[mid] may still be what we want.
+    }
+
+    if (beg < end) {
+      CHECK_EQ(beg + 1, end);
+      // There are 2 chunks left, choose one.
+      if (p >= reinterpret_cast<uptr>(chunks_[end]))
+        beg = end;
+    }
+
+    Header *h = chunks_[beg];
+    if (h->map_beg + h->map_size <= p || p < h->map_beg)
       return 0;
     return GetUser(h);
   }
@@ -1042,13 +1110,11 @@ class LargeMmapAllocator {
     mutex_.Unlock();
   }
 
-  // Iterate over existing chunks. May include chunks that are not currently
-  // allocated to the user (e.g. freed).
-  // The caller is expected to call ForceLock() before calling this function.
-  template<typename Callable>
-  void ForEachChunk(const Callable &callback) {
+  // Iterate over all existing chunks.
+  // The allocator must be locked when calling this function.
+  void ForEachChunk(ForEachChunkCallback callback, void *arg) {
     for (uptr i = 0; i < n_chunks_; i++)
-      callback(GetUser(chunks_[i]));
+      callback(reinterpret_cast<uptr>(GetUser(chunks_[i])), arg);
   }
 
  private:
@@ -1061,13 +1127,15 @@ class LargeMmapAllocator {
   };
 
   Header *GetHeader(uptr p) {
-    CHECK_EQ(p % page_size_, 0);
+    CHECK(IsAligned(p, page_size_));
     return reinterpret_cast<Header*>(p - page_size_);
   }
-  Header *GetHeader(void *p) { return GetHeader(reinterpret_cast<uptr>(p)); }
+  Header *GetHeader(const void *p) {
+    return GetHeader(reinterpret_cast<uptr>(p));
+  }
 
   void *GetUser(Header *h) {
-    CHECK_EQ((uptr)h % page_size_, 0);
+    CHECK(IsAligned((uptr)h, page_size_));
     return reinterpret_cast<void*>(reinterpret_cast<uptr>(h) + page_size_);
   }
 
@@ -1078,6 +1146,8 @@ class LargeMmapAllocator {
   uptr page_size_;
   Header *chunks_[kMaxNumChunks];
   uptr n_chunks_;
+  uptr min_mmap_, max_mmap_;
+  bool chunks_sorted_;
   struct Stats {
     uptr n_allocs, n_frees, currently_allocated, max_allocated, by_size_log[64];
   } stats;
@@ -1157,16 +1227,24 @@ class CombinedAllocator {
     return primary_.PointerIsMine(p);
   }
 
-  void *GetMetaData(void *p) {
+  void *GetMetaData(const void *p) {
     if (primary_.PointerIsMine(p))
       return primary_.GetMetaData(p);
     return secondary_.GetMetaData(p);
   }
 
-  void *GetBlockBegin(void *p) {
+  void *GetBlockBegin(const void *p) {
     if (primary_.PointerIsMine(p))
       return primary_.GetBlockBegin(p);
     return secondary_.GetBlockBegin(p);
+  }
+
+  // This function does the same as GetBlockBegin, but is much faster.
+  // Must be called with the allocator locked.
+  void *GetBlockBeginFastLocked(void *p) {
+    if (primary_.PointerIsMine(p))
+      return primary_.GetBlockBegin(p);
+    return secondary_.GetBlockBeginFastLocked(p);
   }
 
   uptr GetActuallyAllocatedSize(void *p) {
@@ -1214,13 +1292,11 @@ class CombinedAllocator {
     primary_.ForceUnlock();
   }
 
-  // Iterate over existing chunks. May include chunks that are not currently
-  // allocated to the user (e.g. freed).
-  // The caller is expected to call ForceLock() before calling this function.
-  template<typename Callable>
-  void ForEachChunk(const Callable &callback) {
-    primary_.ForEachChunk(callback);
-    secondary_.ForEachChunk(callback);
+  // Iterate over all existing chunks.
+  // The allocator must be locked when calling this function.
+  void ForEachChunk(ForEachChunkCallback callback, void *arg) {
+    primary_.ForEachChunk(callback, arg);
+    secondary_.ForEachChunk(callback, arg);
   }
 
  private:

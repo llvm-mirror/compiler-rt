@@ -36,22 +36,19 @@ set(CMAKE_MODULE_PATH
 include(AddCompilerRT)
 
 set(COMPILER_RT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(COMPILER_RT_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 # Setup custom SDK sysroots.
 set(COMPILER_RT_DARWIN_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/darwin)
 set(COMPILER_RT_LINUX_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/linux)
 
 # Detect whether the current target platform is 32-bit or 64-bit, and setup
 # the correct commandline flags needed to attempt to target 32-bit and 64-bit.
-if(CMAKE_SIZEOF_VOID_P EQUAL 4 OR LLVM_BUILD_32_BITS)
-  set(TARGET_64_BIT_CFLAGS "-m64")
-  set(TARGET_32_BIT_CFLAGS "")
-else()
-  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "Please use a sane architecture with 4 or 8 byte pointers.")
-  endif()
-  set(TARGET_64_BIT_CFLAGS "")
-  set(TARGET_32_BIT_CFLAGS "-m32")
+if (NOT CMAKE_SIZEOF_VOID_P EQUAL 4 AND
+    NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  message(FATAL_ERROR "Please use architecture with 4 or 8 byte pointers.")
 endif()
+set(TARGET_64_BIT_CFLAGS "-m64")
+set(TARGET_32_BIT_CFLAGS "-m32")
 
 # List of architectures we can target.
 set(COMPILER_RT_SUPPORTED_ARCH)
@@ -89,10 +86,7 @@ if("${LLVM_NATIVE_ARCH}" STREQUAL "X86")
   test_target_arch(x86_64 ${TARGET_64_BIT_CFLAGS})
   test_target_arch(i386 ${TARGET_32_BIT_CFLAGS})
 elseif("${LLVM_NATIVE_ARCH}" STREQUAL "PowerPC")
-  # Explicitly set -m flag on powerpc, because on ppc64 defaults for gcc and
-  # clang are different.
-  test_target_arch(powerpc64 "-m64")
-  test_target_arch(powerpc "-m32")
+  test_target_arch(powerpc64 ${TARGET_64_BIT_CFLAGS})
 endif()
 
 # We only support running instrumented tests when we're not cross compiling
@@ -126,6 +120,8 @@ set(SANITIZER_COMMON_CFLAGS
   -fno-exceptions
   -fomit-frame-pointer
   -funwind-tables
+  -fno-stack-protector
+  -Wno-gnu  # Variadic macros with 0 arguments for ...
   -O3
   )
 if(NOT WIN32)
@@ -159,7 +155,7 @@ if(APPLE)
   if(COMPILER_RT_USES_LIBCXX)
     set(SANITIZER_MIN_OSX_VERSION 10.7)
   else()
-    set(SANITIZER_MIN_OSX_VERSION 10.5)
+    set(SANITIZER_MIN_OSX_VERSION 10.6)
   endif()
   list(APPEND SANITIZER_COMMON_CFLAGS
     -mmacosx-version-min=${SANITIZER_MIN_OSX_VERSION})
@@ -168,51 +164,15 @@ endif()
 # Architectures supported by Sanitizer runtimes. Specific sanitizers may
 # support only subset of these (e.g. TSan works on x86_64 only).
 filter_available_targets(SANITIZER_COMMON_SUPPORTED_ARCH
-  x86_64 i386 powerpc64 powerpc)
-
-file(GLOB_RECURSE COMPILER_RT_HEADERS
-  RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/include"
-  "include/*.h")
-
-set(output_dir ${LLVM_BINARY_DIR}/lib/clang/${CLANG_VERSION}/include)
-
-if(MSVC_IDE OR XCODE)
-   set(other_output_dir ${LLVM_BINARY_DIR}/bin/lib/clang/${CLANG_VERSION}/include)
-endif()
-
-# Copy compiler-rt headers to the build tree.
-set(out_files)
-foreach( f ${COMPILER_RT_HEADERS} )
-  set( src ${CMAKE_CURRENT_SOURCE_DIR}/include/${f} )
-  set( dst ${output_dir}/${f} )
-  add_custom_command(OUTPUT ${dst}
-    DEPENDS ${src}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${src} ${dst}
-    COMMENT "Copying compiler-rt's ${f}...")
-  list(APPEND out_files ${dst})
-
-  if(other_output_dir)
-   set(other_dst ${other_output_dir}/${f})
-    add_custom_command(OUTPUT ${other_dst}
-      DEPENDS ${src}
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${src} ${other_dst}
-      COMMENT "Copying compiler-rt's ${f}...")    
-    list(APPEND out_files ${other_dst})
-  endif()
-endforeach( f )
-
-add_custom_target(compiler-rt-headers ALL DEPENDS ${out_files})
-
-# Install compiler-rt headers.
-install(DIRECTORY include/
-  DESTINATION ${LIBCLANG_INSTALL_PATH}/include
-  FILES_MATCHING
-  PATTERN "*.h"
-  PATTERN ".svn" EXCLUDE
-  )
+  x86_64 i386 powerpc64)
 
 # Add the public header's directory to the includes for all of compiler-rt.
 include_directories(include)
+add_subdirectory(include)
+
+set(SANITIZER_COMMON_LIT_TEST_DEPS
+  clang clang-headers FileCheck count not llvm-nm llvm-symbolizer
+  compiler-rt-headers)
 
 add_subdirectory(lib)
 

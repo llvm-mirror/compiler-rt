@@ -173,8 +173,8 @@ TEST(AddressSanitizer, UAF_char) {
 TEST(AddressSanitizer, UAF_long_double) {
   if (sizeof(long double) == sizeof(double)) return;
   long double *p = Ident(new long double[10]);
-  EXPECT_DEATH(Ident(p)[12] = 0, "WRITE of size 10");
-  EXPECT_DEATH(Ident(p)[0] = Ident(p)[12], "READ of size 10");
+  EXPECT_DEATH(Ident(p)[12] = 0, "WRITE of size 1[06]");
+  EXPECT_DEATH(Ident(p)[0] = Ident(p)[12], "READ of size 1[06]");
   delete [] Ident(p);
 }
 
@@ -227,14 +227,24 @@ TEST(AddressSanitizer, BitFieldNegativeTest) {
   delete Ident(x);
 }
 
+static size_t kOOMAllocationSize =
+  SANITIZER_WORDSIZE == 64 ? (size_t)(1ULL << 48) : (0xf0000000);
+
 TEST(AddressSanitizer, OutOfMemoryTest) {
-  size_t size = SANITIZER_WORDSIZE == 64 ? (size_t)(1ULL << 48) : (0xf0000000);
-  EXPECT_EQ(0, realloc(0, size));
+  EXPECT_EQ(0, realloc(0, kOOMAllocationSize));
   EXPECT_EQ(0, realloc(0, ~Ident(0)));
-  EXPECT_EQ(0, malloc(size));
+  EXPECT_EQ(0, malloc(kOOMAllocationSize));
   EXPECT_EQ(0, malloc(~Ident(0)));
-  EXPECT_EQ(0, calloc(1, size));
+  EXPECT_EQ(0, calloc(1, kOOMAllocationSize));
   EXPECT_EQ(0, calloc(1, ~Ident(0)));
+}
+
+TEST(AddressSanitizer, BadReallocTest) {
+  int *a = (int*)Ident(malloc(100));
+  a[0] = 42;
+  EXPECT_EQ(0, realloc(a, kOOMAllocationSize));
+  EXPECT_EQ(42, a[0]);
+  free(a);
 }
 
 #if ASAN_NEEDS_SEGV
@@ -353,6 +363,19 @@ TEST(AddressSanitizer, ReallocTest) {
   free(ptr2);
 }
 
+TEST(AddressSanitizer, ReallocFreedPointerTest) {
+  void *ptr = Ident(malloc(42));
+  ASSERT_TRUE(NULL != ptr);
+  free(ptr);
+  EXPECT_DEATH(ptr = realloc(ptr, 77), "attempting double-free");
+}
+
+TEST(AddressSanitizer, ReallocInvalidPointerTest) {
+  void *ptr = Ident(malloc(42));
+  EXPECT_DEATH(ptr = realloc((int*)ptr + 1, 77), "attempting free.*not malloc");
+  free(ptr);
+}
+
 TEST(AddressSanitizer, ZeroSizeMallocTest) {
   // Test that malloc(0) and similar functions don't return NULL.
   void *ptr = Ident(malloc(0));
@@ -389,6 +412,7 @@ TEST(AddressSanitizer, MallocUsableSizeTest) {
                kMallocUsableSizeErrorMsg);
   free(array);
   EXPECT_DEATH(malloc_usable_size(array), kMallocUsableSizeErrorMsg);
+  delete int_ptr;
 }
 #endif
 
@@ -567,7 +591,10 @@ TEST(AddressSanitizer, LongJmpTest) {
   }
 }
 
-#if not defined(__ANDROID__)
+#if !defined(__ANDROID__) && \
+    !defined(__powerpc64__) && !defined(__powerpc__)
+// Does not work on Power:
+// https://code.google.com/p/address-sanitizer/issues/detail?id=185
 TEST(AddressSanitizer, BuiltinLongJmpTest) {
   static jmp_buf buf;
   if (!__builtin_setjmp((void**)buf)) {
@@ -874,7 +901,11 @@ TEST(AddressSanitizer, ShadowGapTest) {
 #if SANITIZER_WORDSIZE == 32
   char *addr = (char*)0x22000000;
 #else
+# if defined(__powerpc64__)
+  char *addr = (char*)0x024000800000;
+# else
   char *addr = (char*)0x0000100000080000;
+# endif
 #endif
   EXPECT_DEATH(*addr = 1, "AddressSanitizer: SEGV on unknown");
 }
@@ -1082,7 +1113,9 @@ TEST(AddressSanitizer, AttributeNoAddressSafetyTest) {
 }
 
 // It doesn't work on Android, as calls to new/delete go through malloc/free.
-#if !defined(ANDROID) && !defined(__ANDROID__)
+// Neither it does on OS X, see
+// https://code.google.com/p/address-sanitizer/issues/detail?id=131.
+#if !defined(ANDROID) && !defined(__ANDROID__) && !defined(__APPLE__)
 static string MismatchStr(const string &str) {
   return string("AddressSanitizer: alloc-dealloc-mismatch \\(") + str;
 }
@@ -1195,4 +1228,17 @@ TEST(AddressSanitizer, LongDoubleNegativeTest) {
   static long double c;
   memcpy(Ident(&a), Ident(&b), sizeof(long double));
   memcpy(Ident(&c), Ident(&b), sizeof(long double));
+}
+
+TEST(AddressSanitizer, pthread_getschedparam) {
+  int policy;
+  struct sched_param param;
+  EXPECT_DEATH(
+      pthread_getschedparam(pthread_self(), &policy, Ident(&param) + 2),
+      "AddressSanitizer: stack-buffer-.*flow");
+  EXPECT_DEATH(
+      pthread_getschedparam(pthread_self(), Ident(&policy) - 1, &param),
+      "AddressSanitizer: stack-buffer-.*flow");
+  int res = pthread_getschedparam(pthread_self(), &policy, &param);
+  ASSERT_EQ(0, res);
 }

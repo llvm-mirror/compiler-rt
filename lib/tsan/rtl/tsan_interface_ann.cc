@@ -13,6 +13,7 @@
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
+#include "sanitizer_common/sanitizer_stacktrace.h"
 #include "tsan_interface_ann.h"
 #include "tsan_mutex.h"
 #include "tsan_report.h"
@@ -196,7 +197,7 @@ void PrintMatchedBenignRaces() {
       &ExpectRace::addcount);
   if (hit_matched.Size()) {
     Printf("ThreadSanitizer: Matched %d \"benign\" races (pid=%d):\n",
-        hit_count, GetPid());
+        hit_count, (int)internal_getpid());
     for (uptr i = 0; i < hit_matched.Size(); i++) {
       Printf("%d %s:%d %s\n",
           hit_matched[i].hitcount, hit_matched[i].file,
@@ -206,7 +207,7 @@ void PrintMatchedBenignRaces() {
   if (hit_matched.Size()) {
     Printf("ThreadSanitizer: Annotated %d \"benign\" races, %d unique"
            " (pid=%d):\n",
-        add_count, unique_count, GetPid());
+        add_count, unique_count, (int)internal_getpid());
     for (uptr i = 0; i < add_matched.Size(); i++) {
       Printf("%d %s:%d %s\n",
           add_matched[i].addcount, add_matched[i].file,
@@ -229,12 +230,12 @@ using namespace __tsan;  // NOLINT
 extern "C" {
 void INTERFACE_ATTRIBUTE AnnotateHappensBefore(char *f, int l, uptr addr) {
   SCOPED_ANNOTATION(AnnotateHappensBefore);
-  Release(cur_thread(), CALLERPC, addr);
+  Release(cur_thread(), pc, addr);
 }
 
 void INTERFACE_ATTRIBUTE AnnotateHappensAfter(char *f, int l, uptr addr) {
   SCOPED_ANNOTATION(AnnotateHappensAfter);
-  Acquire(cur_thread(), CALLERPC, addr);
+  Acquire(cur_thread(), pc, addr);
 }
 
 void INTERFACE_ATTRIBUTE AnnotateCondVarSignal(char *f, int l, uptr cv) {
@@ -416,6 +417,9 @@ void INTERFACE_ATTRIBUTE AnnotateThreadName(
   ThreadSetName(thr, name);
 }
 
+// We deliberately omit the implementation of WTFAnnotateHappensBefore() and
+// WTFAnnotateHappensAfter(). Those are being used by Webkit to annotate
+// atomic operations, which should be handled by ThreadSanitizer correctly.
 void INTERFACE_ATTRIBUTE WTFAnnotateHappensBefore(char *f, int l, uptr addr) {
   SCOPED_ANNOTATION(AnnotateHappensBefore);
 }
@@ -427,6 +431,7 @@ void INTERFACE_ATTRIBUTE WTFAnnotateHappensAfter(char *f, int l, uptr addr) {
 void INTERFACE_ATTRIBUTE WTFAnnotateBenignRaceSized(
     char *f, int l, uptr mem, uptr sz, char *desc) {
   SCOPED_ANNOTATION(AnnotateBenignRaceSized);
+  BenignRaceImpl(f, l, mem, 1, desc);
 }
 
 int INTERFACE_ATTRIBUTE RunningOnValgrind() {

@@ -17,11 +17,6 @@
 
 namespace __asan {
 
-FakeStack::FakeStack() {
-  CHECK(REAL(memset) != 0);
-  REAL(memset)(this, 0, sizeof(*this));
-}
-
 bool FakeStack::AddrIsInSizeClass(uptr addr, uptr size_class) {
   uptr mem = allocated_size_classes_[size_class];
   uptr size = ClassMmapSize(size_class);
@@ -30,24 +25,26 @@ bool FakeStack::AddrIsInSizeClass(uptr addr, uptr size_class) {
 }
 
 uptr FakeStack::AddrIsInFakeStack(uptr addr) {
-  for (uptr i = 0; i < kNumberOfSizeClasses; i++) {
-    if (AddrIsInSizeClass(addr, i)) return allocated_size_classes_[i];
+  for (uptr size_class = 0; size_class < kNumberOfSizeClasses; size_class++) {
+    if (!AddrIsInSizeClass(addr, size_class)) continue;
+    uptr size_class_first_ptr = allocated_size_classes_[size_class];
+    uptr size = ClassSize(size_class);
+    CHECK_LE(size_class_first_ptr, addr);
+    CHECK_GT(size_class_first_ptr + ClassMmapSize(size_class), addr);
+    return size_class_first_ptr + ((addr - size_class_first_ptr) / size) * size;
   }
   return 0;
 }
 
 // We may want to compute this during compilation.
-inline uptr FakeStack::ComputeSizeClass(uptr alloc_size) {
+ALWAYS_INLINE uptr FakeStack::ComputeSizeClass(uptr alloc_size) {
   uptr rounded_size = RoundUpToPowerOfTwo(alloc_size);
   uptr log = Log2(rounded_size);
-  CHECK(alloc_size <= (1UL << log));
-  if (!(alloc_size > (1UL << (log-1)))) {
-    Printf("alloc_size %zu log %zu\n", alloc_size, log);
-  }
-  CHECK(alloc_size > (1UL << (log-1)));
+  CHECK_LE(alloc_size, (1UL << log));
+  CHECK_GT(alloc_size, (1UL << (log-1)));
   uptr res = log < kMinStackFrameSizeLog ? 0 : log - kMinStackFrameSizeLog;
-  CHECK(res < kNumberOfSizeClasses);
-  CHECK(ClassSize(res) >= rounded_size);
+  CHECK_LT(res, kNumberOfSizeClasses);
+  CHECK_GE(ClassSize(res), rounded_size);
   return res;
 }
 
@@ -95,7 +92,10 @@ void FakeStack::Cleanup() {
 }
 
 uptr FakeStack::ClassMmapSize(uptr size_class) {
-  return RoundUpToPowerOfTwo(stack_size_);
+  // Limit allocation size to ClassSize * MaxDepth when running with unlimited
+  // stack.
+  return RoundUpTo(Min(ClassSize(size_class) * kMaxRecursionDepth, stack_size_),
+                   GetPageSizeCached());
 }
 
 void FakeStack::AllocateOneSizeClass(uptr size_class) {
@@ -115,7 +115,7 @@ void FakeStack::AllocateOneSizeClass(uptr size_class) {
   allocated_size_classes_[size_class] = new_mem;
 }
 
-uptr FakeStack::AllocateStack(uptr size, uptr real_stack) {
+ALWAYS_INLINE uptr FakeStack::AllocateStack(uptr size, uptr real_stack) {
   if (!alive_) return real_stack;
   CHECK(size <= kMaxStackMallocSize && size > 1);
   uptr size_class = ComputeSizeClass(size);
@@ -137,9 +137,9 @@ uptr FakeStack::AllocateStack(uptr size, uptr real_stack) {
   return ptr;
 }
 
-void FakeStack::DeallocateFrame(FakeFrame *fake_frame) {
+ALWAYS_INLINE void FakeStack::DeallocateFrame(FakeFrame *fake_frame) {
   CHECK(alive_);
-  uptr size = fake_frame->size_minus_one + 1;
+  uptr size = static_cast<uptr>(fake_frame->size_minus_one + 1);
   uptr size_class = ComputeSizeClass(size);
   CHECK(allocated_size_classes_[size_class]);
   uptr ptr = (uptr)fake_frame;
@@ -148,11 +148,11 @@ void FakeStack::DeallocateFrame(FakeFrame *fake_frame) {
   size_classes_[size_class].FifoPush(fake_frame);
 }
 
-void FakeStack::OnFree(uptr ptr, uptr size, uptr real_stack) {
+ALWAYS_INLINE void FakeStack::OnFree(uptr ptr, uptr size, uptr real_stack) {
   FakeFrame *fake_frame = (FakeFrame*)ptr;
-  CHECK(fake_frame->magic = kRetiredStackFrameMagic);
-  CHECK(fake_frame->descr != 0);
-  CHECK(fake_frame->size_minus_one == size - 1);
+  CHECK_EQ(fake_frame->magic, kRetiredStackFrameMagic);
+  CHECK_NE(fake_frame->descr, 0);
+  CHECK_EQ(fake_frame->size_minus_one, size - 1);
   PoisonShadow(ptr, size, kAsanStackAfterReturnMagic);
 }
 
@@ -168,7 +168,8 @@ uptr __asan_stack_malloc(uptr size, uptr real_stack) {
     // TSD is gone, use the real stack.
     return real_stack;
   }
-  uptr ptr = t->fake_stack().AllocateStack(size, real_stack);
+  t->LazyInitFakeStack();
+  uptr ptr = t->fake_stack()->AllocateStack(size, real_stack);
   // Printf("__asan_stack_malloc %p %zu %p\n", ptr, size, real_stack);
   return ptr;
 }

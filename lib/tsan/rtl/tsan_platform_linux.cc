@@ -23,7 +23,6 @@
 #include "tsan_rtl.h"
 #include "tsan_flags.h"
 
-#include <asm/prctl.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -46,7 +45,6 @@
 #include <resolv.h>
 #include <malloc.h>
 
-extern "C" int arch_prctl(int code, __sanitizer::uptr *addr);
 extern "C" struct mallinfo __libc_mallinfo();
 
 namespace __tsan {
@@ -178,11 +176,12 @@ static void MapRodata() {
   if (tmpdir == 0)
     return;
   char filename[256];
-  internal_snprintf(filename, sizeof(filename), "%s/tsan.rodata.%u",
-                    tmpdir, GetPid());
-  fd_t fd = internal_open(filename, O_RDWR | O_CREAT | O_EXCL, 0600);
-  if (fd == kInvalidFd)
+  internal_snprintf(filename, sizeof(filename), "%s/tsan.rodata.%d",
+                    tmpdir, (int)internal_getpid());
+  uptr openrv = internal_open(filename, O_RDWR | O_CREAT | O_EXCL, 0600);
+  if (internal_iserror(openrv))
     return;
+  fd_t fd = openrv;
   // Fill the file with kShadowRodata.
   const uptr kMarkerSize = 512 * 1024 / sizeof(u64);
   InternalScopedBuffer<u64> marker(kMarkerSize);
@@ -190,9 +189,9 @@ static void MapRodata() {
     *p = kShadowRodata;
   internal_write(fd, marker.data(), marker.size());
   // Map the file into memory.
-  void *page = internal_mmap(0, kPageSize, PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS, fd, 0);
-  if (page == MAP_FAILED) {
+  uptr page = internal_mmap(0, kPageSize, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, fd, 0);
+  if (internal_iserror(page)) {
     internal_close(fd);
     internal_unlink(filename);
     return;
@@ -356,35 +355,6 @@ const char *InitializePlatform() {
   InitDataSeg();
 #endif
   return GetEnv(kTsanOptionsEnv);
-}
-
-void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
-                          uptr *tls_addr, uptr *tls_size) {
-#ifndef TSAN_GO
-  arch_prctl(ARCH_GET_FS, tls_addr);
-  *tls_size = GetTlsSize();
-  *tls_addr -= *tls_size;
-
-  uptr stack_top, stack_bottom;
-  GetThreadStackTopAndBottom(main, &stack_top, &stack_bottom);
-  *stk_addr = stack_bottom;
-  *stk_size = stack_top - stack_bottom;
-
-  if (!main) {
-    // If stack and tls intersect, make them non-intersecting.
-    if (*tls_addr > *stk_addr && *tls_addr < *stk_addr + *stk_size) {
-      CHECK_GT(*tls_addr + *tls_size, *stk_addr);
-      CHECK_LE(*tls_addr + *tls_size, *stk_addr + *stk_size);
-      *stk_size -= *tls_size;
-      *tls_addr = *stk_addr + *stk_size;
-    }
-  }
-#else
-  *stk_addr = 0;
-  *stk_size = 0;
-  *tls_addr = 0;
-  *tls_size = 0;
-#endif
 }
 
 bool IsGlobalVar(uptr addr) {
