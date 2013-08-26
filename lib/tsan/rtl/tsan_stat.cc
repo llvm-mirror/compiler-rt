@@ -255,8 +255,10 @@ void StatOutput(u64 *stat) {
   name[StatInt_epoll_ctl]                = "  epoll_ctl                       ";
   name[StatInt_epoll_wait]               = "  epoll_wait                      ";
   name[StatInt_poll]                     = "  poll                            ";
+  name[StatInt_ppoll]                    = "  ppoll                           ";
   name[StatInt_sigaction]                = "  sigaction                       ";
   name[StatInt_signal]                   = "  signal                          ";
+  name[StatInt_sigsuspend]               = "  sigsuspend                      ";
   name[StatInt_raise]                    = "  raise                           ";
   name[StatInt_kill]                     = "  kill                            ";
   name[StatInt_pthread_kill]             = "  pthread_kill                    ";
@@ -351,6 +353,13 @@ void StatOutput(u64 *stat) {
   name[StatInt_tcgetattr]                = "  tcgetattr                       ";
   name[StatInt_realpath]                 = "  realpath                        ";
   name[StatInt_canonicalize_file_name]   = "  canonicalize_file_name          ";
+  name[StatInt_confstr]                  = "  confstr                         ";
+  name[StatInt_sched_getaffinity]        = "  sched_getaffinity               ";
+  name[StatInt_strerror]                 = "  strerror                        ";
+  name[StatInt_strerror_r]               = "  strerror_r                      ";
+  name[StatInt_scandir]                  = "  scandir                         ";
+  name[StatInt_scandir64]                = "  scandir64                       ";
+  name[StatInt_getgroups]                = "  getgroups                       ";
 
   name[StatAnnotation]                   = "Dynamic annotations               ";
   name[StatAnnotateHappensBefore]        = "  HappensBefore                   ";

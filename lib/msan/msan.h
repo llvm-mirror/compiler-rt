@@ -31,8 +31,6 @@
 #define MEM_IS_SHADOW(mem) ((uptr)mem >=         0x200000000000ULL && \
                             (uptr)mem <=         0x400000000000ULL)
 
-struct link_map;  // Opaque type returned by dlopen().
-
 const int kMsanParamTlsSizeInWords = 100;
 const int kMsanRetvalTlsSizeInWords = 100;
 
@@ -76,7 +74,6 @@ void ReportUMR(StackTrace *stack, u32 origin);
 void ReportExpectedUMRNotFound(StackTrace *stack);
 void ReportAtExitStatistics();
 
-void UnpoisonMappedDSO(struct link_map *map);
 // Unpoison first n function arguments.
 void UnpoisonParam(uptr n);
 
@@ -89,5 +86,10 @@ void UnpoisonParam(uptr n);
         common_flags()->fast_unwind_on_malloc)
 
 }  // namespace __msan
+
+#define MSAN_MALLOC_HOOK(ptr, size) \
+  if (&__msan_malloc_hook) __msan_malloc_hook(ptr, size)
+#define MSAN_FREE_HOOK(ptr) \
+  if (&__msan_free_hook) __msan_free_hook(ptr)
 
 #endif  // MSAN_H

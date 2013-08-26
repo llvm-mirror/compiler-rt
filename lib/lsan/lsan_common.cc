@@ -125,7 +125,7 @@ void ScanRangeForPointers(uptr begin, uptr end,
   if (pp % alignment)
     pp = pp + alignment - pp % alignment;
   for (; pp + sizeof(void *) <= end; pp += alignment) {  // NOLINT
-    void *p = *reinterpret_cast<void**>(pp);
+    void *p = *reinterpret_cast<void **>(pp);
     if (!CanBeAHeapPointer(reinterpret_cast<uptr>(p))) continue;
     uptr chunk = PointsIntoChunk(p);
     if (!chunk) continue;
@@ -353,7 +353,7 @@ void DoLeakCheck() {
   EnsureMainThreadIDIsCorrect();
   BlockingMutexLock l(&global_mutex);
   static bool already_done;
-  CHECK(!already_done);
+  if (already_done) return;
   already_done = true;
   if (&__lsan_is_turned_off && __lsan_is_turned_off())
     return;
@@ -438,8 +438,11 @@ void LeakReport::Add(u32 stack_trace_id, uptr leaked_size, ChunkTag tag) {
   leaks_.push_back(leak);
 }
 
-static bool IsLarger(const Leak &leak1, const Leak &leak2) {
-  return leak1.total_size > leak2.total_size;
+static bool LeakComparator(const Leak &leak1, const Leak &leak2) {
+  if (leak1.is_directly_leaked == leak2.is_directly_leaked)
+    return leak1.total_size > leak2.total_size;
+  else
+    return leak1.is_directly_leaked;
 }
 
 void LeakReport::PrintLargest(uptr num_leaks_to_print) {
@@ -455,7 +458,7 @@ void LeakReport::PrintLargest(uptr num_leaks_to_print) {
     if (!leaks_[i].is_suppressed) unsuppressed_count++;
   if (num_leaks_to_print > 0 && num_leaks_to_print < unsuppressed_count)
     Printf("The %zu largest leak(s):\n", num_leaks_to_print);
-  InternalSort(&leaks_, leaks_.size(), IsLarger);
+  InternalSort(&leaks_, leaks_.size(), LeakComparator);
   uptr leaks_printed = 0;
   for (uptr i = 0; i < leaks_.size(); i++) {
     if (leaks_[i].is_suppressed) continue;
@@ -544,8 +547,16 @@ void __lsan_enable() {
 #endif
 }
 
+SANITIZER_INTERFACE_ATTRIBUTE
+void __lsan_do_leak_check() {
+#if CAN_SANITIZE_LEAKS
+  if (common_flags()->detect_leaks)
+    __lsan::DoLeakCheck();
+#endif  // CAN_SANITIZE_LEAKS
+}
+
 #if !SANITIZER_SUPPORTS_WEAK_HOOKS
-SANITIZER_WEAK_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
 int __lsan_is_turned_off() {
   return 0;
 }

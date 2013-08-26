@@ -34,6 +34,7 @@
 #include <link.h>
 #include <limits.h>
 #include <sys/time.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -524,10 +525,40 @@ LargeStruct LargeRetTest() {
   return res;
 }
 
+TEST(MemorySanitizer, strcmp) {
+  char s1[10];
+  char s2[10];
+  strncpy(s1, "foo", 10);
+  s2[0] = 'f';
+  s2[1] = 'n';
+  EXPECT_GT(strcmp(s1, s2), 0);
+  s2[1] = 'o';
+  int res;
+  EXPECT_UMR(res = strcmp(s1, s2));
+  EXPECT_NOT_POISONED(res);
+  EXPECT_EQ(strncmp(s1, s2, 1), 0);
+}
+
 TEST(MemorySanitizer, LargeRet) {
   LargeStruct a = LargeRetTest();
   EXPECT_POISONED(a.x[0]);
   EXPECT_POISONED(a.x[9]);
+}
+
+TEST(MemorySanitizer, strerror) {
+  char *buf = strerror(EINVAL);
+  EXPECT_NOT_POISONED(strlen(buf));
+  buf = strerror(123456);
+  EXPECT_NOT_POISONED(strlen(buf));
+}
+
+TEST(MemorySanitizer, strerror_r) {
+  errno = 0;
+  char buf[1000];
+  char *res = strerror_r(EINVAL, buf, sizeof(buf));
+  ASSERT_EQ(0, errno);
+  if (!res) res = buf; // POSIX version success.
+  EXPECT_NOT_POISONED(strlen(res));
 }
 
 TEST(MemorySanitizer, fread) {
@@ -675,6 +706,45 @@ TEST(MemorySanitizer, socketpair) {
   EXPECT_NOT_POISONED(sv[1]);
   close(sv[0]);
   close(sv[1]);
+}
+
+TEST(MemorySanitizer, poll) {
+  int* pipefd = new int[2];
+  int res = pipe(pipefd);
+  ASSERT_EQ(0, res);
+
+  char data = 42;
+  res = write(pipefd[1], &data, 1);
+  ASSERT_EQ(1, res);
+
+  pollfd fds[2];
+  fds[0].fd = pipefd[0];
+  fds[0].events = POLLIN;
+  fds[1].fd = pipefd[1];
+  fds[1].events = POLLIN;
+  res = poll(fds, 2, 500);
+  ASSERT_EQ(1, res);
+  EXPECT_NOT_POISONED(fds[0].revents);
+  EXPECT_NOT_POISONED(fds[1].revents);
+
+  close(pipefd[0]);
+  close(pipefd[1]);
+}
+
+TEST(MemorySanitizer, poll_positive) {
+  int* pipefd = new int[2];
+  int res = pipe(pipefd);
+  ASSERT_EQ(0, res);
+
+  pollfd fds[2];
+  fds[0].fd = pipefd[0];
+  fds[0].events = POLLIN;
+  // fds[1].fd uninitialized
+  fds[1].events = POLLIN;
+  EXPECT_UMR(poll(fds, 2, 0));
+
+  close(pipefd[0]);
+  close(pipefd[1]);
 }
 
 TEST(MemorySanitizer, bind_getsockname) {
@@ -912,6 +982,22 @@ TEST(MemorySanitizer, get_current_dir_name) {
   free(res);
 }
 
+TEST(MemorySanitizer, confstr) {
+  char buf[3];
+  size_t res = confstr(_CS_PATH, buf, sizeof(buf));
+  ASSERT_GT(res, sizeof(buf));
+  EXPECT_NOT_POISONED(buf[0]);
+  EXPECT_NOT_POISONED(buf[sizeof(buf) - 1]);
+
+  char buf2[1000];
+  res = confstr(_CS_PATH, buf2, sizeof(buf2));
+  ASSERT_LT(res, sizeof(buf2));
+  EXPECT_NOT_POISONED(buf2[0]);
+  EXPECT_NOT_POISONED(buf2[res - 1]);
+  EXPECT_POISONED(buf2[res]);
+  ASSERT_EQ(res, strlen(buf2) + 1);
+}
+
 TEST(MemorySanitizer, readdir) {
   DIR *dir = opendir(".");
   struct dirent *d = readdir(dir);
@@ -954,6 +1040,25 @@ TEST(MemorySanitizer, canonicalize_file_name) {
   assert(res);
   EXPECT_NOT_POISONED(res[0]);
   free(res);
+}
+
+extern char **environ;
+
+TEST(MemorySanitizer, setenv) {
+  setenv("AAA", "BBB", 1);
+  for (char **envp = environ; *envp; ++envp) {
+    EXPECT_NOT_POISONED(*envp);
+    EXPECT_NOT_POISONED(*envp[0]);
+  }
+}
+
+TEST(MemorySanitizer, putenv) {
+  char s[] = "AAA=BBB";
+  putenv(s);
+  for (char **envp = environ; *envp; ++envp) {
+    EXPECT_NOT_POISONED(*envp);
+    EXPECT_NOT_POISONED(*envp[0]);
+  }
 }
 
 TEST(MemorySanitizer, memcpy) {
@@ -1346,6 +1451,13 @@ TEST(MemorySanitizer, getitimer) {
   memset(&it1, 0, sizeof(it1));
   res = setitimer(ITIMER_VIRTUAL, &it1, 0);
   assert(!res);
+}
+
+TEST(MemorySanitizer, setitimer_null) {
+  setitimer(ITIMER_VIRTUAL, 0, 0);
+  // Not testing the return value, since it the behaviour seems to differ
+  // between libc implementations and POSIX.
+  // Should never crash, though.
 }
 
 TEST(MemorySanitizer, time) {
@@ -1921,6 +2033,8 @@ TEST(MemorySanitizer, dladdr) {
   EXPECT_NOT_POISONED((unsigned long)info.dli_saddr);
 }
 
+#ifndef MSAN_TEST_DISABLE_DLOPEN
+
 static int dl_phdr_callback(struct dl_phdr_info *info, size_t size, void *data) {
   (*(int *)data)++;
   EXPECT_NOT_POISONED(info->dlpi_addr);
@@ -1930,8 +2044,6 @@ static int dl_phdr_callback(struct dl_phdr_info *info, size_t size, void *data) 
     EXPECT_NOT_POISONED(info->dlpi_phdr[i]);
   return 0;
 }
-
-#ifndef MSAN_TEST_DISABLE_DLOPEN
 
 // Compute the path to our loadable DSO.  We assume it's in the same
 // directory.  Only use string routines that we intercept so far to do this.
@@ -1998,6 +2110,13 @@ TEST(MemorySanitizer, dlopenFailed) {
 
 #endif // MSAN_TEST_DISABLE_DLOPEN
 
+TEST(MemorySanitizer, sched_getaffinity) {
+  cpu_set_t mask;
+  int res = sched_getaffinity(getpid(), sizeof(mask), &mask);
+  ASSERT_EQ(0, res);
+  EXPECT_NOT_POISONED(mask);
+}
+
 TEST(MemorySanitizer, scanf) {
   const char *input = "42 hello";
   int* d = new int;
@@ -2029,8 +2148,7 @@ TEST(MemorySanitizer, SimpleThread) {
   EXPECT_NOT_POISONED(t);
   res = pthread_join(t, &p);
   assert(!res);
-  if (!__msan_has_dynamic_component())  // FIXME: intercept pthread_join (?).
-    __msan_unpoison(&p, sizeof(p));
+  EXPECT_NOT_POISONED(p);
   delete (int*)p;
 }
 
@@ -2195,6 +2313,15 @@ TEST(MemorySanitizer, getgrnam_r) {
   assert(grp.gr_name);
   EXPECT_NOT_POISONED(grp.gr_name[0]);
   EXPECT_NOT_POISONED(grp.gr_gid);
+}
+
+TEST(MemorySanitizer, getgroups) {
+  int n = getgroups(0, 0);
+  gid_t *gids = new gid_t[n];
+  int res = getgroups(n, gids);
+  ASSERT_EQ(n, res);
+  for (int i = 0; i < n; ++i)
+    EXPECT_NOT_POISONED(gids[i]);
 }
 
 template<class T>
@@ -2736,4 +2863,40 @@ TEST(MemorySanitizer, CallocOverflow) {
 
 TEST(MemorySanitizerStress, DISABLED_MallocStackTrace) {
   RecursiveMalloc(22);
+}
+
+TEST(MemorySanitizerAllocator, get_estimated_allocated_size) {
+  size_t sizes[] = {0, 20, 5000, 1<<20};
+  for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); ++i) {
+    size_t alloc_size = __msan_get_estimated_allocated_size(sizes[i]);
+    EXPECT_EQ(alloc_size, sizes[i]);
+  }
+}
+
+TEST(MemorySanitizerAllocator, get_allocated_size_and_ownership) {
+  char *array = reinterpret_cast<char*>(malloc(100));
+  int *int_ptr = new int;
+
+  EXPECT_TRUE(__msan_get_ownership(array));
+  EXPECT_EQ(100, __msan_get_allocated_size(array));
+
+  EXPECT_TRUE(__msan_get_ownership(int_ptr));
+  EXPECT_EQ(sizeof(*int_ptr), __msan_get_allocated_size(int_ptr));
+
+  void *wild_addr = reinterpret_cast<void*>(0x1);
+  EXPECT_FALSE(__msan_get_ownership(wild_addr));
+  EXPECT_EQ(0, __msan_get_allocated_size(wild_addr));
+
+  EXPECT_FALSE(__msan_get_ownership(array + 50));
+  EXPECT_EQ(0, __msan_get_allocated_size(array + 50));
+
+  // NULL is a valid argument for GetAllocatedSize but is not owned.                                                  
+  EXPECT_FALSE(__msan_get_ownership(NULL));
+  EXPECT_EQ(0, __msan_get_allocated_size(NULL));
+ 
+  free(array);
+  EXPECT_FALSE(__msan_get_ownership(array));
+  EXPECT_EQ(0, __msan_get_allocated_size(array));
+
+  delete int_ptr;
 }
