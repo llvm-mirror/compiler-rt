@@ -15,6 +15,9 @@ include(LLVMParseArguments)
 # runtime libraries.
 cmake_minimum_required(VERSION 2.8.8)
 
+# Top level target used to build all compiler-rt libraries.
+add_custom_target(compiler-rt)
+
 # Compute the Clang version from the LLVM version.
 # FIXME: We should be able to reuse CLANG_VERSION variable calculated
 #        in Clang cmake files, instead of copying the rules here.
@@ -40,6 +43,7 @@ set(COMPILER_RT_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 # Setup custom SDK sysroots.
 set(COMPILER_RT_DARWIN_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/darwin)
 set(COMPILER_RT_LINUX_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/linux)
+include(SanitizerUtils)
 
 # Detect whether the current target platform is 32-bit or 64-bit, and setup
 # the correct commandline flags needed to attempt to target 32-bit and 64-bit.
@@ -47,8 +51,13 @@ if (NOT CMAKE_SIZEOF_VOID_P EQUAL 4 AND
     NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Please use architecture with 4 or 8 byte pointers.")
 endif()
-set(TARGET_64_BIT_CFLAGS "-m64")
-set(TARGET_32_BIT_CFLAGS "-m32")
+if (NOT MSVC)
+  set(TARGET_64_BIT_CFLAGS "-m64")
+  set(TARGET_32_BIT_CFLAGS "-m32")
+else()
+  set(TARGET_64_BIT_CFLAGS "")
+  set(TARGET_32_BIT_CFLAGS "")
+endif()
 
 # List of architectures we can target.
 set(COMPILER_RT_SUPPORTED_ARCH)
@@ -83,7 +92,9 @@ macro(test_target_arch arch)
 endmacro()
 
 if("${LLVM_NATIVE_ARCH}" STREQUAL "X86")
-  test_target_arch(x86_64 ${TARGET_64_BIT_CFLAGS})
+  if (NOT MSVC)
+    test_target_arch(x86_64 ${TARGET_64_BIT_CFLAGS})
+  endif()
   test_target_arch(i386 ${TARGET_32_BIT_CFLAGS})
 elseif("${LLVM_NATIVE_ARCH}" STREQUAL "PowerPC")
   test_target_arch(powerpc64 ${TARGET_64_BIT_CFLAGS})
@@ -114,25 +125,35 @@ function(filter_available_targets out_var)
 endfunction()
 
 # Provide some common commmandline flags for Sanitizer runtimes.
-set(SANITIZER_COMMON_CFLAGS
-  -fPIC
-  -fno-builtin
-  -fno-exceptions
-  -fomit-frame-pointer
-  -funwind-tables
-  -fno-stack-protector
-  -Wno-gnu  # Variadic macros with 0 arguments for ...
-  -O3
-  )
-if(NOT WIN32)
-  list(APPEND SANITIZER_COMMON_CFLAGS -fvisibility=hidden)
-endif()
-# Build sanitizer runtimes with debug info.
-check_cxx_compiler_flag(-gline-tables-only SUPPORTS_GLINE_TABLES_ONLY_FLAG)
-if(SUPPORTS_GLINE_TABLES_ONLY_FLAG)
-  list(APPEND SANITIZER_COMMON_CFLAGS -gline-tables-only)
+if (NOT MSVC)
+  set(SANITIZER_COMMON_CFLAGS
+    -fPIC
+    -fno-builtin
+    -fno-exceptions
+    -fomit-frame-pointer
+    -funwind-tables
+    -fno-stack-protector
+    -Wno-gnu  # Variadic macros with 0 arguments for ...
+    -O3
+    -fvisibility=hidden
+    )
 else()
-  list(APPEND SANITIZER_COMMON_CFLAGS -g)
+  set(SANITIZER_COMMON_CFLAGS
+    /MT
+    /Zi
+    /Oy-
+    /GS-
+    /wd4722
+    )
+endif()
+# Build sanitizer runtimes with debug info. (MSVC gets /Zi above)
+if (NOT MSVC)
+  check_cxx_compiler_flag(-gline-tables-only SUPPORTS_GLINE_TABLES_ONLY_FLAG)
+  if(SUPPORTS_GLINE_TABLES_ONLY_FLAG)
+    list(APPEND SANITIZER_COMMON_CFLAGS -gline-tables-only)
+  else()
+    list(APPEND SANITIZER_COMMON_CFLAGS -g)
+  endif()
 endif()
 # Warnings suppressions.
 check_cxx_compiler_flag(-Wno-variadic-macros SUPPORTS_NO_VARIADIC_MACROS_FLAG)
@@ -149,6 +170,8 @@ check_cxx_compiler_flag(-Wno-non-virtual-dtor SUPPORTS_NO_NON_VIRTUAL_DTOR_FLAG)
 if (SUPPORTS_NO_NON_VIRTUAL_DTOR_FLAG)
   list(APPEND SANITIZER_COMMON_CFLAGS -Wno-non-virtual-dtor)
 endif()
+check_cxx_compiler_flag(-Wglobal-constructors SUPPORTS_GLOBAL_CONSTRUCTORS_FLAG)
+# Not all sanitizers forbid global constructors.
 
 # Setup min Mac OS X version.
 if(APPLE)
@@ -173,6 +196,10 @@ add_subdirectory(include)
 set(SANITIZER_COMMON_LIT_TEST_DEPS
   clang clang-headers FileCheck count not llvm-nm llvm-symbolizer
   compiler-rt-headers)
+# Check code style when running lit tests for sanitizers.
+if(UNIX)
+  list(APPEND SANITIZER_COMMON_LIT_TEST_DEPS SanitizerLintCheck)
+endif()
 
 add_subdirectory(lib)
 

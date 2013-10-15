@@ -218,6 +218,9 @@ struct AsanChunk: ChunkBase {
   }
 };
 
+bool AsanChunkView::IsValid() {
+  return chunk_ != 0 && chunk_->chunk_state != CHUNK_AVAILABLE;
+}
 uptr AsanChunkView::Beg() { return chunk_->Beg(); }
 uptr AsanChunkView::End() { return Beg() + UsedSize(); }
 uptr AsanChunkView::UsedSize() { return chunk_->UsedSize(); }
@@ -228,9 +231,8 @@ static void GetStackTraceFromId(u32 id, StackTrace *stack) {
   CHECK(id);
   uptr size = 0;
   const uptr *trace = StackDepotGet(id, &size);
-  CHECK_LT(size, kStackTraceMax);
-  internal_memcpy(stack->trace, trace, sizeof(uptr) * size);
-  stack->size = size;
+  CHECK(trace);
+  stack->CopyFrom(trace, size);
 }
 
 void AsanChunkView::GetAllocStack(StackTrace *stack) {
@@ -345,7 +347,7 @@ static void *Allocate(uptr size, uptr alignment, StackTrace *stack,
   if (size > kMaxAllowedMallocSize || needed_size > kMaxAllowedMallocSize) {
     Report("WARNING: AddressSanitizer failed to allocate %p bytes\n",
            (void*)size);
-    return 0;
+    return AllocatorReturnNull();
   }
 
   AsanThread *t = GetCurrentThread();
@@ -619,24 +621,22 @@ void PrintInternalAllocatorStats() {
   allocator.PrintStats();
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
 void *asan_memalign(uptr alignment, uptr size, StackTrace *stack,
                     AllocType alloc_type) {
   return Allocate(size, alignment, stack, alloc_type, true);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
 void asan_free(void *ptr, StackTrace *stack, AllocType alloc_type) {
   Deallocate(ptr, stack, alloc_type);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
 void *asan_malloc(uptr size, StackTrace *stack) {
   return Allocate(size, 8, stack, FROM_MALLOC, true);
 }
 
 void *asan_calloc(uptr nmemb, uptr size, StackTrace *stack) {
-  if (CallocShouldReturnNullDueToOverflow(size, nmemb)) return 0;
+  if (CallocShouldReturnNullDueToOverflow(size, nmemb))
+    return AllocatorReturnNull();
   void *ptr = Allocate(nmemb * size, 8, stack, FROM_MALLOC, false);
   // If the memory comes from the secondary allocator no need to clear it
   // as it comes directly from mmap.
@@ -677,7 +677,6 @@ int asan_posix_memalign(void **memptr, uptr alignment, uptr size,
   return 0;
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
 uptr asan_malloc_usable_size(void *ptr, StackTrace *stack) {
   CHECK(stack);
   if (ptr == 0) return 0;

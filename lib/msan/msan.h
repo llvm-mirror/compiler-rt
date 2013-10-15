@@ -46,10 +46,12 @@ void InitializeInterceptors();
 
 void *MsanReallocate(StackTrace *stack, void *oldp, uptr size,
                      uptr alignment, bool zeroise);
-void MsanDeallocate(void *ptr);
+void MsanDeallocate(StackTrace *stack, void *ptr);
 void InstallTrapHandler();
 void InstallAtExitHandler();
 void ReplaceOperatorsNewAndDelete();
+
+const char *GetOriginDescrIfStack(u32 id, uptr *pc);
 
 void EnterSymbolizer();
 void ExitSymbolizer();
@@ -76,6 +78,7 @@ void ReportAtExitStatistics();
 
 // Unpoison first n function arguments.
 void UnpoisonParam(uptr n);
+void UnpoisonThreadLocalState();
 
 #define GET_MALLOC_STACK_TRACE                                     \
   StackTrace stack;                                                \
@@ -85,6 +88,15 @@ void UnpoisonParam(uptr n);
         StackTrace::GetCurrentPc(), GET_CURRENT_FRAME(),           \
         common_flags()->fast_unwind_on_malloc)
 
+class ScopedThreadLocalStateBackup {
+ public:
+  ScopedThreadLocalStateBackup() { Backup(); }
+  ~ScopedThreadLocalStateBackup() { Restore(); }
+  void Backup();
+  void Restore();
+ private:
+  u64 va_arg_overflow_size_tls;
+};
 }  // namespace __msan
 
 #define MSAN_MALLOC_HOOK(ptr, size) \

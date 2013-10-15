@@ -13,6 +13,8 @@
 #ifndef SANITIZER_LINUX_H
 #define SANITIZER_LINUX_H
 
+#include "sanitizer_platform.h"
+#if SANITIZER_LINUX
 #include "sanitizer_common.h"
 #include "sanitizer_internal_defs.h"
 
@@ -29,6 +31,10 @@ uptr internal_getdents(fd_t fd, struct linux_dirent *dirp, unsigned int count);
 uptr internal_prctl(int option, uptr arg2, uptr arg3, uptr arg4, uptr arg5);
 uptr internal_sigaltstack(const struct sigaltstack* ss,
                           struct sigaltstack* oss);
+#ifdef __x86_64__
+uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+                    int *parent_tidptr, void *newtls, int *child_tidptr);
+#endif
 
 // This class reads thread IDs from /proc/<pid>/task using only syscalls.
 class ThreadLister {
@@ -65,10 +71,12 @@ bool LibraryNameIs(const char *full_name, const char *base_name);
 
 // Read the name of the current binary from /proc/self/exe.
 uptr ReadBinaryName(/*out*/char *buf, uptr buf_len);
+// Cache the value of /proc/self/exe.
+void CacheBinaryName();
 
 // Call cb for each region mapped by map.
 void ForEachMappedRegion(link_map *map, void (*cb)(const void *, uptr));
-
 }  // namespace __sanitizer
 
+#endif  // SANITIZER_LINUX
 #endif  // SANITIZER_LINUX_H

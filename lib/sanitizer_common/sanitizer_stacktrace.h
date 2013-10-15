@@ -32,27 +32,23 @@ struct StackTrace {
   typedef bool (*SymbolizeCallback)(const void *pc, char *out_buffer,
                                      int out_size);
   uptr size;
-  uptr max_size;
   uptr trace[kStackTraceMax];
-  static void PrintStack(const uptr *addr, uptr size,
-                         bool symbolize, const char *strip_file_prefix,
-                         SymbolizeCallback symbolize_callback);
-  void CopyTo(uptr *dst, uptr dst_size) {
-    for (uptr i = 0; i < size && i < dst_size; i++)
-      dst[i] = trace[i];
-    for (uptr i = size; i < dst_size; i++)
-      dst[i] = 0;
-  }
 
-  void CopyFrom(uptr *src, uptr src_size) {
+  static void PrintStack(const uptr *addr, uptr size, bool symbolize,
+                         SymbolizeCallback symbolize_callback);
+
+  void CopyFrom(const uptr *src, uptr src_size) {
     size = src_size;
     if (size > kStackTraceMax) size = kStackTraceMax;
-    for (uptr i = 0; i < size; i++) {
+    for (uptr i = 0; i < size; i++)
       trace[i] = src[i];
-    }
   }
 
-  void FastUnwindStack(uptr pc, uptr bp, uptr stack_top, uptr stack_bottom);
+  void Unwind(uptr max_depth, uptr pc, uptr bp, uptr stack_top,
+              uptr stack_bottom, bool fast);
+  // FIXME: Make FastUnwindStack and SlowUnwindStack private methods.
+  void FastUnwindStack(uptr pc, uptr bp, uptr stack_top, uptr stack_bottom,
+                       uptr max_depth);
   void SlowUnwindStack(uptr pc, uptr max_depth);
 
   void PopStackFrames(uptr count);
@@ -60,20 +56,11 @@ struct StackTrace {
   static uptr GetCurrentPc();
   static uptr GetPreviousInstructionPc(uptr pc);
 
-  SANITIZER_INTERFACE_ATTRIBUTE
   static uptr CompressStack(StackTrace *stack,
                             u32 *compressed, uptr size);
-  SANITIZER_INTERFACE_ATTRIBUTE
   static void UncompressStack(StackTrace *stack,
                               u32 *compressed, uptr size);
 };
-
-
-const char *StripPathPrefix(const char *filepath,
-                            const char *strip_file_prefix);
-
-void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp,
-                   uptr stack_top, uptr stack_bottom, bool fast);
 
 }  // namespace __sanitizer
 

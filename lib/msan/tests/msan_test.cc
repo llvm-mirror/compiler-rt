@@ -26,6 +26,7 @@
 #include <assert.h>
 #include <wchar.h>
 #include <math.h>
+#include <malloc.h>
 
 #include <arpa/inet.h>
 #include <dlfcn.h>
@@ -48,6 +49,7 @@
 #include <pwd.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <wordexp.h>
 
 #if defined(__i386__) || defined(__x86_64__)
 # include <emmintrin.h>
@@ -55,6 +57,8 @@
 #else
 # define MSAN_HAS_M128 0
 #endif
+
+static const int kPageSize = 4096;
 
 typedef unsigned char      U1;
 typedef unsigned short     U2;  // NOLINT
@@ -669,6 +673,18 @@ TEST(MemorySanitizer, stat) {
   EXPECT_NOT_POISONED(st->st_size);
 }
 
+TEST(MemorySanitizer, fstatat) {
+  struct stat* st = new struct stat;
+  int dirfd = open("/proc/self", O_RDONLY);
+  assert(dirfd > 0);
+  int res = fstatat(dirfd, "stat", st, 0);
+  assert(!res);
+  EXPECT_NOT_POISONED(st->st_dev);
+  EXPECT_NOT_POISONED(st->st_mode);
+  EXPECT_NOT_POISONED(st->st_size);
+  close(dirfd);
+}
+
 TEST(MemorySanitizer, statfs) {
   struct statfs* st = new struct statfs;
   int res = statfs("/", st);
@@ -723,6 +739,31 @@ TEST(MemorySanitizer, poll) {
   fds[1].fd = pipefd[1];
   fds[1].events = POLLIN;
   res = poll(fds, 2, 500);
+  ASSERT_EQ(1, res);
+  EXPECT_NOT_POISONED(fds[0].revents);
+  EXPECT_NOT_POISONED(fds[1].revents);
+
+  close(pipefd[0]);
+  close(pipefd[1]);
+}
+
+TEST(MemorySanitizer, ppoll) {
+  int* pipefd = new int[2];
+  int res = pipe(pipefd);
+  ASSERT_EQ(0, res);
+
+  char data = 42;
+  res = write(pipefd[1], &data, 1);
+  ASSERT_EQ(1, res);
+
+  pollfd fds[2];
+  fds[0].fd = pipefd[0];
+  fds[0].events = POLLIN;
+  fds[1].fd = pipefd[1];
+  fds[1].events = POLLIN;
+  sigset_t ss;
+  sigemptyset(&ss);
+  res = ppoll(fds, 2, NULL, &ss);
   ASSERT_EQ(1, res);
   EXPECT_NOT_POISONED(fds[0].revents);
   EXPECT_NOT_POISONED(fds[1].revents);
@@ -1228,6 +1269,17 @@ TEST(MemorySanitizer, strtod) {
   EXPECT_NOT_POISONED((S8) e);
 }
 
+#ifdef __GLIBC__
+extern "C" double __strtod_l(const char *nptr, char **endptr, locale_t loc);
+TEST(MemorySanitizer, __strtod_l) {
+  locale_t loc = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+  char *e;
+  assert(0 != __strtod_l("1.5", &e, loc));
+  EXPECT_NOT_POISONED((S8) e);
+  freelocale(loc);
+}
+#endif  // __GLIBC__
+
 TEST(MemorySanitizer, strtof) {
   char *e;
   assert(0 != strtof("1.5", &e));
@@ -1476,6 +1528,7 @@ TEST(MemorySanitizer, localtime) {
   EXPECT_NOT_POISONED(time->tm_hour);
   EXPECT_NOT_POISONED(time->tm_year);
   EXPECT_NOT_POISONED(time->tm_isdst);
+  EXPECT_NE(0, strlen(time->tm_zone));
 }
 
 TEST(MemorySanitizer, localtime_r) {
@@ -1487,6 +1540,7 @@ TEST(MemorySanitizer, localtime_r) {
   EXPECT_NOT_POISONED(time.tm_hour);
   EXPECT_NOT_POISONED(time.tm_year);
   EXPECT_NOT_POISONED(time.tm_isdst);
+  EXPECT_NE(0, strlen(time.tm_zone));
 }
 
 TEST(MemorySanitizer, mmap) {
@@ -1600,6 +1654,39 @@ TEST(MemorySanitizer, sigaction) {
 }
 
 } // namespace
+
+
+TEST(MemorySanitizer, sigemptyset) {
+  sigset_t s;
+  EXPECT_POISONED(s);
+  int res = sigemptyset(&s);
+  ASSERT_EQ(0, res);
+  EXPECT_NOT_POISONED(s);
+}
+
+TEST(MemorySanitizer, sigfillset) {
+  sigset_t s;
+  EXPECT_POISONED(s);
+  int res = sigfillset(&s);
+  ASSERT_EQ(0, res);
+  EXPECT_NOT_POISONED(s);
+}
+
+TEST(MemorySanitizer, sigpending) {
+  sigset_t s;
+  EXPECT_POISONED(s);
+  int res = sigpending(&s);
+  ASSERT_EQ(0, res);
+  EXPECT_NOT_POISONED(s);
+}
+
+TEST(MemorySanitizer, sigprocmask) {
+  sigset_t s;
+  EXPECT_POISONED(s);
+  int res = sigprocmask(SIG_BLOCK, 0, &s);
+  ASSERT_EQ(0, res);
+  EXPECT_NOT_POISONED(s);
+}
 
 struct StructWithDtor {
   ~StructWithDtor();
@@ -2228,6 +2315,31 @@ TEST(MemorySanitizer, posix_memalign) {
   int res = posix_memalign(&p, 4096, 13);
   ASSERT_EQ(0, res);
   EXPECT_NOT_POISONED(p);
+  EXPECT_EQ(0U, (uintptr_t)p % 4096);
+  free(p);
+}
+
+TEST(MemorySanitizer, memalign) {
+  void *p = memalign(4096, 13);
+  EXPECT_EQ(0U, (uintptr_t)p % kPageSize);
+  free(p);
+}
+
+TEST(MemorySanitizer, valloc) {
+  void *a = valloc(100);
+  EXPECT_EQ(0U, (uintptr_t)a % kPageSize);
+  free(a);
+}
+
+TEST(MemorySanitizer, pvalloc) {
+  void *p = pvalloc(kPageSize + 100);
+  EXPECT_EQ(0U, (uintptr_t)p % kPageSize);
+  EXPECT_EQ(2 * kPageSize, __msan_get_allocated_size(p));
+  free(p);
+
+  p = pvalloc(0);  // pvalloc(0) should allocate at least one page.
+  EXPECT_EQ(0U, (uintptr_t)p % kPageSize);
+  EXPECT_EQ(kPageSize, __msan_get_allocated_size(p));
   free(p);
 }
 
@@ -2333,6 +2445,16 @@ TEST(MemorySanitizer, getgroups) {
   ASSERT_EQ(n, res);
   for (int i = 0; i < n; ++i)
     EXPECT_NOT_POISONED(gids[i]);
+}
+
+TEST(MemorySanitizer, wordexp) {
+  wordexp_t w;
+  int res = wordexp("a b c", &w, 0);
+  ASSERT_EQ(0, res);
+  ASSERT_EQ(3, w.we_wordc);
+  ASSERT_STREQ("a", w.we_wordv[0]);
+  ASSERT_STREQ("b", w.we_wordv[1]);
+  ASSERT_STREQ("c", w.we_wordv[2]);
 }
 
 template<class T>
@@ -2868,8 +2990,17 @@ TEST(MemorySanitizer, CallocOverflow) {
   size_t kArraySize = 4096;
   volatile size_t kMaxSizeT = std::numeric_limits<size_t>::max();
   volatile size_t kArraySize2 = kMaxSizeT / kArraySize + 10;
-  void *p = calloc(kArraySize, kArraySize2);  // Should return 0.
+  void *p = 0;
+  EXPECT_DEATH(p = calloc(kArraySize, kArraySize2),
+               "llocator is terminating the process instead of returning 0");
   EXPECT_EQ(0L, Ident(p));
+}
+
+TEST(MemorySanitizer, Select) {
+  int x;
+  int volatile* p = &x;
+  int z = *p ? 1 : 0;
+  EXPECT_POISONED(z);
 }
 
 TEST(MemorySanitizerStress, DISABLED_MallocStackTrace) {

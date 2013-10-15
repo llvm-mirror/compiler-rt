@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_common.h"
+#include "sanitizer_flags.h"
 #include "sanitizer_libc.h"
 
 namespace __sanitizer {
@@ -26,20 +27,27 @@ uptr GetPageSizeCached() {
   return PageSize;
 }
 
-static bool log_to_file = false;  // Set to true by __sanitizer_set_report_path
 
 // By default, dump to stderr. If |log_to_file| is true and |report_fd_pid|
 // isn't equal to the current PID, try to obtain file descriptor by opening
 // file "report_path_prefix.<PID>".
 fd_t report_fd = kStderrFd;
-static char report_path_prefix[4096];  // Set via __sanitizer_set_report_path.
+
+// Set via __sanitizer_set_report_path.
+bool log_to_file = false;
+char report_path_prefix[sizeof(report_path_prefix)];
+
 // PID of process that opened |report_fd|. If a fork() occurs, the PID of the
 // child thread will be different from |report_fd_pid|.
-static uptr report_fd_pid = 0;
+uptr report_fd_pid = 0;
 
-static void (*DieCallback)(void);
-void SetDieCallback(void (*callback)(void)) {
+static DieCallbackType DieCallback;
+void SetDieCallback(DieCallbackType callback) {
   DieCallback = callback;
+}
+
+DieCallbackType GetDieCallback() {
+  return DieCallback;
 }
 
 void NORETURN Die() {
@@ -62,36 +70,6 @@ void NORETURN CheckFailed(const char *file, int line, const char *cond,
   Report("Sanitizer CHECK failed: %s:%d %s (%lld, %lld)\n", file, line, cond,
                                                             v1, v2);
   Die();
-}
-
-void MaybeOpenReportFile() {
-  if (!log_to_file || (report_fd_pid == internal_getpid())) return;
-  InternalScopedBuffer<char> report_path_full(4096);
-  internal_snprintf(report_path_full.data(), report_path_full.size(),
-                    "%s.%d", report_path_prefix, internal_getpid());
-  uptr openrv = OpenFile(report_path_full.data(), true);
-  if (internal_iserror(openrv)) {
-    report_fd = kStderrFd;
-    log_to_file = false;
-    Report("ERROR: Can't open file: %s\n", report_path_full.data());
-    Die();
-  }
-  if (report_fd != kInvalidFd) {
-    // We're in the child. Close the parent's log.
-    internal_close(report_fd);
-  }
-  report_fd = openrv;
-  report_fd_pid = internal_getpid();
-}
-
-void RawWrite(const char *buffer) {
-  static const char *kRawWriteError = "RawWrite can't output requested buffer!";
-  uptr length = (uptr)internal_strlen(buffer);
-  MaybeOpenReportFile();
-  if (length != internal_write(report_fd, buffer, length)) {
-    internal_write(report_fd, kRawWriteError, internal_strlen(kRawWriteError));
-    Die();
-  }
 }
 
 uptr ReadFileToBuffer(const char *file_name, char **buff,
@@ -159,14 +137,63 @@ void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type) {
   return (void*)res;
 }
 
+const char *StripPathPrefix(const char *filepath,
+                            const char *strip_path_prefix) {
+  if (filepath == 0) return 0;
+  if (strip_path_prefix == 0) return filepath;
+  const char *pos = internal_strstr(filepath, strip_path_prefix);
+  if (pos == 0) return filepath;
+  pos += internal_strlen(strip_path_prefix);
+  if (pos[0] == '.' && pos[1] == '/')
+    pos += 2;
+  return pos;
+}
+
+void PrintSourceLocation(const char *file, int line, int column) {
+  CHECK(file);
+  Printf("%s", StripPathPrefix(file, common_flags()->strip_path_prefix));
+  if (line > 0) {
+    Printf(":%d", line);
+    if (column > 0)
+      Printf(":%d", column);
+  }
+}
+
+void PrintModuleAndOffset(const char *module, uptr offset) {
+  Printf("(%s+0x%zx)",
+         StripPathPrefix(module, common_flags()->strip_path_prefix), offset);
+}
+
 void ReportErrorSummary(const char *error_type, const char *file,
                         int line, const char *function) {
   const int kMaxSize = 1024;  // We don't want a summary too long.
   InternalScopedBuffer<char> buff(kMaxSize);
-  internal_snprintf(buff.data(), kMaxSize, "%s: %s %s:%d %s",
-                    SanitizerToolName, error_type,
-                    file ? file : "??", line, function ? function : "??");
+  internal_snprintf(
+      buff.data(), kMaxSize, "%s: %s %s:%d %s", SanitizerToolName, error_type,
+      file ? StripPathPrefix(file, common_flags()->strip_path_prefix) : "??",
+      line, function ? function : "??");
   __sanitizer_report_error_summary(buff.data());
+}
+
+LoadedModule::LoadedModule(const char *module_name, uptr base_address) {
+  full_name_ = internal_strdup(module_name);
+  base_address_ = base_address;
+  n_ranges_ = 0;
+}
+
+void LoadedModule::addAddressRange(uptr beg, uptr end) {
+  CHECK_LT(n_ranges_, kMaxNumberOfAddressRanges);
+  ranges_[n_ranges_].beg = beg;
+  ranges_[n_ranges_].end = end;
+  n_ranges_++;
+}
+
+bool LoadedModule::containsAddress(uptr address) const {
+  for (uptr i = 0; i < n_ranges_; i++) {
+    if (ranges_[i].beg <= address && address < ranges_[i].end)
+      return true;
+  }
+  return false;
 }
 
 }  // namespace __sanitizer

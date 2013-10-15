@@ -15,6 +15,7 @@
 #ifndef SANITIZER_PLATFORM_LIMITS_POSIX_H
 #define SANITIZER_PLATFORM_LIMITS_POSIX_H
 
+#include "sanitizer_internal_defs.h"
 #include "sanitizer_platform.h"
 
 namespace __sanitizer {
@@ -22,10 +23,8 @@ namespace __sanitizer {
   extern unsigned struct_stat_sz;
   extern unsigned struct_stat64_sz;
   extern unsigned struct_rusage_sz;
-  extern unsigned struct_tm_sz;
   extern unsigned struct_passwd_sz;
   extern unsigned struct_group_sz;
-  extern unsigned struct_sigaction_sz;
   extern unsigned siginfo_t_sz;
   extern unsigned struct_itimerval_sz;
   extern unsigned pthread_t_sz;
@@ -33,18 +32,52 @@ namespace __sanitizer {
   extern unsigned timeval_sz;
   extern unsigned uid_t_sz;
   extern unsigned mbstate_t_sz;
-  extern unsigned sigset_t_sz;
+  extern unsigned struct_timezone_sz;
+  extern unsigned struct_tms_sz;
+  extern unsigned struct_itimerspec_sz;
+  extern unsigned struct_sigevent_sz;
+  extern unsigned struct_sched_param_sz;
 
 #if !SANITIZER_ANDROID
   extern unsigned ucontext_t_sz;
 #endif // !SANITIZER_ANDROID
 
 #if SANITIZER_LINUX
+  extern unsigned struct___old_kernel_stat_sz;
+  extern unsigned struct_kernel_stat_sz;
+  extern unsigned struct_kernel_stat64_sz;
+  extern unsigned struct_io_event_sz;
+  extern unsigned struct_iocb_sz;
+  extern unsigned struct_utimbuf_sz;
+  extern unsigned struct_new_utsname_sz;
+  extern unsigned struct_old_utsname_sz;
+  extern unsigned struct_oldold_utsname_sz;
+  extern unsigned struct_msqid_ds_sz;
+  extern unsigned struct_shmid_ds_sz;
+  extern unsigned struct_mq_attr_sz;
+  extern unsigned struct_perf_event_attr_sz;
+  extern unsigned struct_timex_sz;
+  extern unsigned struct_ustat_sz;
+
   extern unsigned struct_rlimit_sz;
   extern unsigned struct_statfs_sz;
   extern unsigned struct_epoll_event_sz;
   extern unsigned struct_sysinfo_sz;
   extern unsigned struct_timespec_sz;
+  extern unsigned __user_cap_header_struct_sz;
+  extern unsigned __user_cap_data_struct_sz;
+  const unsigned old_sigset_t_sz = sizeof(unsigned long);
+  const unsigned struct_kexec_segment_sz = 4 * sizeof(unsigned long);
+
+  struct __sanitizer___sysctl_args {
+    int *name;
+    int nlen;
+    void *oldval;
+    uptr *oldlenp;
+    void *newval;
+    uptr newlen;
+    unsigned long ___unused[4];
+  };
 #endif // SANITIZER_LINUX
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
@@ -62,6 +95,20 @@ namespace __sanitizer {
 #else
   typedef unsigned __sanitizer_pthread_key_t;
 #endif
+
+  struct __sanitizer_tm {
+    int tm_sec;
+    int tm_min;
+    int tm_hour;
+    int tm_mday;
+    int tm_mon;
+    int tm_year;
+    int tm_wday;
+    int tm_yday;
+    int tm_isdst;
+    long int tm_gmtoff;
+    const char *tm_zone;
+  };
 
 #if SANITIZER_ANDROID || SANITIZER_MAC
   struct __sanitizer_msghdr {
@@ -127,6 +174,23 @@ namespace __sanitizer {
   };
 #endif
 
+#if SANITIZER_LINUX
+#ifdef _LP64
+  typedef unsigned __sanitizer___kernel_uid_t;
+  typedef unsigned __sanitizer___kernel_gid_t;
+#else
+  typedef unsigned short __sanitizer___kernel_uid_t;
+  typedef unsigned short __sanitizer___kernel_gid_t;
+#endif
+  typedef unsigned short __sanitizer___kernel_old_uid_t;
+  typedef unsigned short __sanitizer___kernel_old_gid_t;
+  typedef long __sanitizer___kernel_off_t;
+  typedef long long __sanitizer___kernel_loff_t;
+  typedef struct {
+    unsigned long fds_bits[1024 / (8 * sizeof(long))];
+  } __sanitizer___kernel_fd_set;
+#endif
+
   // This thing depends on the platform. We are only interested in the upper
   // limit. Verified with a compiler assert in .cc.
   const int pthread_attr_t_max_sz = 128;
@@ -135,17 +199,32 @@ namespace __sanitizer {
     void *align;
   };
 
-  uptr __sanitizer_get_sigaction_sa_sigaction(void *act);
-  void __sanitizer_set_sigaction_sa_sigaction(void *act, uptr cb);
-  bool __sanitizer_get_sigaction_sa_siginfo(void *act);
+#if SANITIZER_ANDROID
+  typedef unsigned long __sanitizer_sigset_t;
+#elif SANITIZER_MAC
+  typedef unsigned __sanitizer_sigset_t;
+#elif SANITIZER_LINUX
+  struct __sanitizer_sigset_t {
+    // The size is determined by looking at sizeof of real sigset_t on linux.
+    uptr val[128 / sizeof(uptr)];
+  };
+#endif
 
-  const unsigned struct_sigaction_max_sz = 256;
-  union __sanitizer_sigaction {
-    char size[struct_sigaction_max_sz]; // NOLINT
+  struct __sanitizer_sigaction {
+    union {
+      void (*sa_handler)(int sig);
+      void (*sa_sigaction)(int sig, void *siginfo, void *uctx);
+    };
+    __sanitizer_sigset_t sa_mask;
+    int sa_flags;
+#if SANITIZER_LINUX
+    void (*sa_restorer)();
+#endif
   };
 
   extern uptr sig_ign;
   extern uptr sig_dfl;
+  extern uptr sa_siginfo;
 
 #if SANITIZER_LINUX
   extern int e_tabsz;
@@ -220,6 +299,12 @@ namespace __sanitizer {
 #endif
 
   extern unsigned path_max;
+
+  struct __sanitizer_wordexp_t {
+    uptr we_wordc;
+    char **we_wordv;
+    uptr we_offs;
+  };
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID && \
       (defined(__i386) || defined (__x86_64))  // NOLINT
@@ -737,6 +822,7 @@ namespace __sanitizer {
   extern unsigned IOCTL_TIOCSERSETMULTI;
   extern unsigned IOCTL_TIOCSSERIAL;
 #endif
+
 }  // namespace __sanitizer
 
 #endif

@@ -94,6 +94,11 @@ void SetThreadName(const char *name) {
     asanThreadRegistry().SetThreadName(t->tid(), name);
 }
 
+int OnExit() {
+  // FIXME: ask frontend whether we need to return failure.
+  return 0;
+}
+
 }  // namespace __asan
 
 // ---------------------- Wrappers ---------------- {{{1
@@ -126,6 +131,7 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
   } while (false)
 #define COMMON_INTERCEPTOR_SET_THREAD_NAME(ctx, name) SetThreadName(name)
 #define COMMON_INTERCEPTOR_BLOCK_REAL(name) REAL(name)
+#define COMMON_INTERCEPTOR_ON_EXIT(ctx) OnExit()
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
 
 #define COMMON_SYSCALL_PRE_READ_RANGE(p, s) ASAN_READ_RANGE(p, s)
@@ -315,7 +321,23 @@ INTERCEPTOR(int, memcmp, const void *a1, const void *a2, uptr size) {
   return REAL(memcmp(a1, a2, size));
 }
 
+#define MEMMOVE_BODY { \
+  if (!asan_inited) return internal_memmove(to, from, size); \
+  if (asan_init_is_running) { \
+    return REAL(memmove)(to, from, size); \
+  } \
+  ENSURE_ASAN_INITED(); \
+  if (flags()->replace_intrin) { \
+    ASAN_READ_RANGE(from, size); \
+    ASAN_WRITE_RANGE(to, size); \
+  } \
+  return internal_memmove(to, from, size); \
+}
+
+INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) MEMMOVE_BODY
+
 INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
+#if !SANITIZER_MAC
   if (!asan_inited) return internal_memcpy(to, from, size);
   // memcpy is called during __asan_init() from the internals
   // of printf(...).
@@ -332,24 +354,19 @@ INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
     ASAN_READ_RANGE(from, size);
     ASAN_WRITE_RANGE(to, size);
   }
-  // Interposing of resolver functions is broken on Mac OS 10.7 and 10.8.
+  // Interposing of resolver functions is broken on Mac OS 10.7 and 10.8, so
+  // calling REAL(memcpy) here leads to infinite recursion.
   // See also http://code.google.com/p/address-sanitizer/issues/detail?id=116.
   return internal_memcpy(to, from, size);
-}
-
-INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) {
-  if (!asan_inited) return internal_memmove(to, from, size);
-  if (asan_init_is_running) {
-    return REAL(memmove)(to, from, size);
-  }
-  ENSURE_ASAN_INITED();
-  if (flags()->replace_intrin) {
-    ASAN_READ_RANGE(from, size);
-    ASAN_WRITE_RANGE(to, size);
-  }
-  // Interposing of resolver functions is broken on Mac OS 10.7 and 10.8.
-  // See also http://code.google.com/p/address-sanitizer/issues/detail?id=116.
-  return internal_memmove(to, from, size);
+#else
+  // At least on 10.7 and 10.8 both memcpy() and memmove() are being replaced
+  // with WRAP(memcpy). As a result, false positives are reported for memmove()
+  // calls. If we just disable error reporting with
+  // ASAN_OPTIONS=replace_intrin=0, memmove() is still replaced with
+  // internal_memcpy(), which may lead to crashes, see
+  // http://llvm.org/bugs/show_bug.cgi?id=16362.
+  MEMMOVE_BODY
+#endif  // !SANITIZER_MAC
 }
 
 INTERCEPTOR(void*, memset, void *block, int c, uptr size) {
@@ -478,6 +495,15 @@ INTERCEPTOR(uptr, strlen, const char *s) {
   uptr length = REAL(strlen)(s);
   if (flags()->replace_str) {
     ASAN_READ_RANGE(s, length + 1);
+  }
+  return length;
+}
+
+INTERCEPTOR(uptr, wcslen, const wchar_t *s) {
+  uptr length = REAL(wcslen)(s);
+  if (!asan_init_is_running) {
+    ENSURE_ASAN_INITED();
+    ASAN_READ_RANGE(s, (length + 1) * sizeof(wchar_t));
   }
   return length;
 }
@@ -680,6 +706,7 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(strchr);
   ASAN_INTERCEPT_FUNC(strcpy);  // NOLINT
   ASAN_INTERCEPT_FUNC(strlen);
+  ASAN_INTERCEPT_FUNC(wcslen);
   ASAN_INTERCEPT_FUNC(strncat);
   ASAN_INTERCEPT_FUNC(strncpy);
 #if ASAN_INTERCEPT_STRDUP

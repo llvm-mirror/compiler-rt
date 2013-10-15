@@ -6,13 +6,16 @@ include(CompilerRTUtils)
 # with name "<name>.<arch>" if architecture can be targeted.
 # add_compiler_rt_object_library(<name> <arch>
 #                                SOURCES <source files>
-#                                CFLAGS <compile flags>)
+#                                CFLAGS <compile flags>
+#                                DEFS <compile definitions>)
 macro(add_compiler_rt_object_library name arch)
   if(CAN_TARGET_${arch})
-    parse_arguments(LIB "SOURCES;CFLAGS" "" ${ARGN})
+    parse_arguments(LIB "SOURCES;CFLAGS;DEFS" "" ${ARGN})
     add_library(${name}.${arch} OBJECT ${LIB_SOURCES})
     set_target_compile_flags(${name}.${arch}
       ${TARGET_${arch}_CFLAGS} ${LIB_CFLAGS})
+    set_property(TARGET ${name}.${arch} APPEND PROPERTY
+      COMPILE_DEFINITIONS ${LIB_DEFS})
   else()
     message(FATAL_ERROR "Archtecture ${arch} can't be targeted")
   endif()
@@ -23,12 +26,15 @@ endmacro()
 # add_compiler_rt_osx_object_library(<name> ARCH <architectures>
 #                                           SOURCES <source files>
 #                                           CFLAGS <compile flags>)
+#                                           DEFS <compile definitions>)
 macro(add_compiler_rt_osx_object_library name)
-  parse_arguments(LIB "ARCH;SOURCES;CFLAGS" "" ${ARGN})
+  parse_arguments(LIB "ARCH;SOURCES;CFLAGS;DEFS" "" ${ARGN})
   set(libname "${name}.osx")
   add_library(${libname} OBJECT ${LIB_SOURCES})
   set_target_compile_flags(${libname} ${LIB_CFLAGS})
   set_target_properties(${libname} PROPERTIES OSX_ARCHITECTURES "${LIB_ARCH}")
+  set_property(TARGET ${libname} APPEND PROPERTY
+    COMPILE_DEFINITIONS ${LIB_DEFS})
 endmacro()
 
 # Adds static runtime for a given architecture and puts it in the proper
@@ -36,11 +42,10 @@ endmacro()
 # add_compiler_rt_static_runtime(<name> <arch>
 #                                SOURCES <source files>
 #                                CFLAGS <compile flags>
-#                                DEFS <compile definitions>
-#                                SYMS <symbols file>)
+#                                DEFS <compile definitions>)
 macro(add_compiler_rt_static_runtime name arch)
   if(CAN_TARGET_${arch})
-    parse_arguments(LIB "SOURCES;CFLAGS;DEFS;SYMS" "" ${ARGN})
+    parse_arguments(LIB "SOURCES;CFLAGS;DEFS" "" ${ARGN})
     add_library(${name} STATIC ${LIB_SOURCES})
     # Setup compile flags and definitions.
     set_target_compile_flags(${name}
@@ -53,13 +58,7 @@ macro(add_compiler_rt_static_runtime name arch)
     # Add installation command.
     install(TARGETS ${name}
       ARCHIVE DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
-    # Generate the .syms file if possible.
-    if(LIB_SYMS)
-      get_target_property(libfile ${name} LOCATION)
-      configure_file(${LIB_SYMS} ${libfile}.syms)
-      install(FILES ${libfile}.syms
-        DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
-    endif(LIB_SYMS)
+    add_dependencies(compiler-rt ${name})
   else()
     message(FATAL_ERROR "Archtecture ${arch} can't be targeted")
   endif()
@@ -82,6 +81,7 @@ macro(add_compiler_rt_osx_static_runtime name)
     ARCHIVE_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
   install(TARGETS ${name}
     ARCHIVE DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
+  add_dependencies(compiler-rt ${name})
 endmacro()
 
 # Adds dynamic runtime library on osx, which supports multiple architectures.
@@ -102,6 +102,7 @@ macro(add_compiler_rt_osx_dynamic_runtime name)
     LIBRARY_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
   install(TARGETS ${name}
     LIBRARY DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
+  add_dependencies(compiler-rt ${name})
 endmacro()
 
 # Unittests support.

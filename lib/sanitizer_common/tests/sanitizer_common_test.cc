@@ -10,6 +10,7 @@
 // This file is a part of ThreadSanitizer/AddressSanitizer runtime.
 //
 //===----------------------------------------------------------------------===//
+#include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_platform.h"
@@ -156,6 +157,39 @@ TEST(SanitizerCommon, ThreadStackTlsWorker) {
   pthread_t t;
   pthread_create(&t, 0, WorkerThread, 0);
   pthread_join(t, 0);
+}
+
+bool UptrLess(uptr a, uptr b) {
+  return a < b;
+}
+
+TEST(SanitizerCommon, InternalBinarySearch) {
+  static const uptr kSize = 5;
+  uptr arr[kSize];
+  for (uptr i = 0; i < kSize; i++) arr[i] = i * i;
+
+  for (uptr i = 0; i < kSize; i++)
+    ASSERT_EQ(InternalBinarySearch(arr, 0, kSize, i * i, UptrLess), i);
+
+  ASSERT_EQ(InternalBinarySearch(arr, 0, kSize, 7, UptrLess), kSize + 1);
+}
+
+#if SANITIZER_LINUX && !SANITIZER_ANDROID
+TEST(SanitizerCommon, FindPathToBinary) {
+  char *true_path = FindPathToBinary("true");
+  EXPECT_NE((char*)0, internal_strstr(true_path, "/bin/true"));
+  InternalFree(true_path);
+  EXPECT_EQ(0, FindPathToBinary("unexisting_binary.ergjeorj"));
+}
+#endif
+
+TEST(SanitizerCommon, StripPathPrefix) {
+  EXPECT_EQ(0, StripPathPrefix(0, "prefix"));
+  EXPECT_STREQ("foo", StripPathPrefix("foo", 0));
+  EXPECT_STREQ("dir/file.cc",
+               StripPathPrefix("/usr/lib/dir/file.cc", "/usr/lib/"));
+  EXPECT_STREQ("/file.cc", StripPathPrefix("/usr/myroot/file.cc", "/myroot"));
+  EXPECT_STREQ("file.h", StripPathPrefix("/usr/lib/./file.h", "/usr/lib/"));
 }
 
 }  // namespace __sanitizer

@@ -25,9 +25,12 @@ if(CAN_TARGET_${arch})
             $<TARGET_OBJECTS:RTInterception.${arch}>
             $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
             $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>
-    CFLAGS ${MSAN_RTL_CFLAGS}
-    SYMS msan.syms)
+    CFLAGS ${MSAN_RTL_CFLAGS})
   list(APPEND MSAN_RUNTIME_LIBRARIES clang_rt.msan-${arch})
+  if(UNIX)
+    add_sanitizer_rt_symbols(clang_rt.msan-${arch} msan.syms.extra)
+    list(APPEND MSAN_RUNTIME_LIBRARIES clang_rt.msan-${arch}-symbols)
+  endif()
 endif()
 
 add_compiler_rt_resource_file(msan_blacklist msan_blacklist.txt)

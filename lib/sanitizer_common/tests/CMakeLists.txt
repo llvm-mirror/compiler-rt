@@ -11,6 +11,7 @@ set(SANITIZER_UNITTESTS
   sanitizer_list_test.cc
   sanitizer_mutex_test.cc
   sanitizer_nolibc_test.cc
+  sanitizer_posix_test.cc
   sanitizer_printf_test.cc
   sanitizer_scanf_interceptor_test.cc
   sanitizer_stackdepot_test.cc
@@ -18,10 +19,10 @@ set(SANITIZER_UNITTESTS
   sanitizer_stoptheworld_test.cc
   sanitizer_suppressions_test.cc
   sanitizer_test_main.cc
-  sanitizer_thread_registry_test.cc
-  )
+  sanitizer_thread_registry_test.cc)
 
-set(SANITIZER_TEST_HEADERS)
+set(SANITIZER_TEST_HEADERS
+  sanitizer_test_utils.h)
 foreach(header ${SANITIZER_HEADERS})
   list(APPEND SANITIZER_TEST_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/../${header})
 endforeach()

@@ -36,6 +36,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <termios.h>
@@ -43,6 +44,7 @@
 #include <wchar.h>
 
 #if SANITIZER_LINUX
+#include <utime.h>
 #include <sys/mount.h>
 #include <sys/ptrace.h>
 #include <sys/sysinfo.h>
@@ -54,14 +56,19 @@
 #include <linux/input.h>
 #include <linux/ioctl.h>
 #include <linux/soundcard.h>
+#include <linux/sysctl.h>
+#include <linux/utsname.h>
+#include <linux/posix_types.h>
 #endif
 
 #if !SANITIZER_ANDROID
 #include <sys/ucontext.h>
+#include <wordexp.h>
 #endif
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
 #include <glob.h>
+#include <mqueue.h>
 #include <net/if_ppp.h>
 #include <netax25/ax25.h>
 #include <netipx/ipx.h>
@@ -69,7 +76,10 @@
 #include <scsi/scsi.h>
 #include <sys/mtio.h>
 #include <sys/kd.h>
+#include <sys/shm.h>
+#include <sys/timex.h>
 #include <sys/user.h>
+#include <sys/ustat.h>
 #include <linux/cyclades.h>
 #include <linux/if_eql.h>
 #include <linux/if_plip.h>
@@ -78,6 +88,7 @@
 #include <linux/mroute6.h>
 #include <linux/scc.h>
 #include <linux/serial.h>
+#include <sys/msg.h>
 #endif // SANITIZER_LINUX && !SANITIZER_ANDROID
 
 #if SANITIZER_ANDROID
@@ -91,6 +102,8 @@
 #include <link.h>
 #include <sys/vfs.h>
 #include <sys/epoll.h>
+// #include <asm/stat.h>
+#include <linux/capability.h>
 #endif // SANITIZER_LINUX
 
 #if SANITIZER_MAC
@@ -116,6 +129,10 @@ namespace __sanitizer {
   unsigned uid_t_sz = sizeof(uid_t);
   unsigned mbstate_t_sz = sizeof(mbstate_t);
   unsigned sigset_t_sz = sizeof(sigset_t);
+  unsigned struct_timezone_sz = sizeof(struct timezone);
+  unsigned struct_tms_sz = sizeof(struct tms);
+  unsigned struct_sigevent_sz = sizeof(struct sigevent);
+  unsigned struct_sched_param_sz = sizeof(struct sched_param);
 
 #if !SANITIZER_ANDROID
   unsigned ucontext_t_sz = sizeof(ucontext_t);
@@ -127,34 +144,33 @@ namespace __sanitizer {
   unsigned struct_epoll_event_sz = sizeof(struct epoll_event);
   unsigned struct_sysinfo_sz = sizeof(struct sysinfo);
   unsigned struct_timespec_sz = sizeof(struct timespec);
+  unsigned __user_cap_header_struct_sz =
+      sizeof(struct __user_cap_header_struct);
+  unsigned __user_cap_data_struct_sz = sizeof(struct __user_cap_data_struct);
+  unsigned struct_utimbuf_sz = sizeof(struct utimbuf);
+  unsigned struct_new_utsname_sz = sizeof(struct new_utsname);
+  unsigned struct_old_utsname_sz = sizeof(struct old_utsname);
+  unsigned struct_oldold_utsname_sz = sizeof(struct oldold_utsname);
+  unsigned struct_itimerspec_sz = sizeof(struct itimerspec);
+  unsigned struct_ustat_sz = sizeof(struct ustat);
 #endif // SANITIZER_LINUX
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
   unsigned struct_rlimit64_sz = sizeof(struct rlimit64);
   unsigned struct_statfs64_sz = sizeof(struct statfs64);
+  unsigned struct_timex_sz = sizeof(struct timex);
+  unsigned struct_msqid_ds_sz = sizeof(struct msqid_ds);
+  unsigned struct_shmid_ds_sz = sizeof(struct shmid_ds);
+  unsigned struct_mq_attr_sz = sizeof(struct mq_attr);
 #endif // SANITIZER_LINUX && !SANITIZER_ANDROID
 
   uptr sig_ign = (uptr)SIG_IGN;
   uptr sig_dfl = (uptr)SIG_DFL;
+  uptr sa_siginfo = (uptr)SA_SIGINFO;
 
 #if SANITIZER_LINUX
   int e_tabsz = (int)E_TABSZ;
 #endif
-
-  uptr __sanitizer_get_sigaction_sa_sigaction(void *act) {
-    struct sigaction *a = (struct sigaction *)act;
-    // Check that sa_sigaction and sa_handler are the same.
-    CHECK((void *)&(a->sa_sigaction) == (void *)&(a->sa_handler));
-    return (uptr) a->sa_sigaction;
-  }
-  void __sanitizer_set_sigaction_sa_sigaction(void *act, uptr cb) {
-    struct sigaction *a = (struct sigaction *)act;
-    a->sa_sigaction = (void (*)(int, siginfo_t *, void *))cb;
-  }
-  bool __sanitizer_get_sigaction_sa_siginfo(void *act) {
-    struct sigaction *a = (struct sigaction *)act;
-    return a->sa_flags & SA_SIGINFO;
-  }
 
   int af_inet = (int)AF_INET;
   int af_inet6 = (int)AF_INET6;
@@ -730,9 +746,15 @@ namespace __sanitizer {
   COMPILER_CHECK(offsetof(__sanitizer_##CLASS, MEMBER) ==          \
                  offsetof(CLASS, MEMBER))
 
+// For sigaction, which is a function and struct at the same time,
+// and thus requires explicit "struct" in sizeof() expression.
+#define CHECK_STRUCT_SIZE_AND_OFFSET(CLASS, MEMBER)                       \
+  COMPILER_CHECK(sizeof(((struct __sanitizer_##CLASS *) NULL)->MEMBER) == \
+                 sizeof(((struct CLASS *) NULL)->MEMBER));                \
+  COMPILER_CHECK(offsetof(struct __sanitizer_##CLASS, MEMBER) ==          \
+                 offsetof(struct CLASS, MEMBER))
+
 COMPILER_CHECK(sizeof(__sanitizer_pthread_attr_t) >= sizeof(pthread_attr_t));
-COMPILER_CHECK(sizeof(__sanitizer::struct_sigaction_max_sz) >=
-                   sizeof(__sanitizer::struct_sigaction_sz));
 
 COMPILER_CHECK(sizeof(socklen_t) == sizeof(unsigned));
 CHECK_TYPE_SIZE(pthread_key_t);
@@ -821,7 +843,56 @@ CHECK_TYPE_SIZE(pollfd);
 CHECK_SIZE_AND_OFFSET(pollfd, fd);
 CHECK_SIZE_AND_OFFSET(pollfd, events);
 CHECK_SIZE_AND_OFFSET(pollfd, revents);
+
 CHECK_TYPE_SIZE(nfds_t);
 
-#endif  // SANITIZER_LINUX || SANITIZER_MAC
+CHECK_TYPE_SIZE(sigset_t);
 
+COMPILER_CHECK(sizeof(__sanitizer_sigaction) == sizeof(struct sigaction));
+// Can't write checks for sa_handler and sa_sigaction due to them being
+// preprocessor macros.
+CHECK_STRUCT_SIZE_AND_OFFSET(sigaction, sa_mask);
+CHECK_STRUCT_SIZE_AND_OFFSET(sigaction, sa_flags);
+#if SANITIZER_LINUX
+CHECK_STRUCT_SIZE_AND_OFFSET(sigaction, sa_restorer);
+#endif
+
+#if SANITIZER_LINUX
+CHECK_TYPE_SIZE(__sysctl_args);
+CHECK_SIZE_AND_OFFSET(__sysctl_args, name);
+CHECK_SIZE_AND_OFFSET(__sysctl_args, nlen);
+CHECK_SIZE_AND_OFFSET(__sysctl_args, oldval);
+CHECK_SIZE_AND_OFFSET(__sysctl_args, oldlenp);
+CHECK_SIZE_AND_OFFSET(__sysctl_args, newval);
+CHECK_SIZE_AND_OFFSET(__sysctl_args, newlen);
+
+CHECK_TYPE_SIZE(__kernel_uid_t);
+CHECK_TYPE_SIZE(__kernel_gid_t);
+CHECK_TYPE_SIZE(__kernel_old_uid_t);
+CHECK_TYPE_SIZE(__kernel_old_gid_t);
+CHECK_TYPE_SIZE(__kernel_off_t);
+CHECK_TYPE_SIZE(__kernel_loff_t);
+CHECK_TYPE_SIZE(__kernel_fd_set);
+#endif
+
+#if !SANITIZER_ANDROID
+CHECK_TYPE_SIZE(wordexp_t);
+CHECK_SIZE_AND_OFFSET(wordexp_t, we_wordc);
+CHECK_SIZE_AND_OFFSET(wordexp_t, we_wordv);
+CHECK_SIZE_AND_OFFSET(wordexp_t, we_offs);
+#endif
+
+CHECK_TYPE_SIZE(tm);
+CHECK_SIZE_AND_OFFSET(tm, tm_sec);
+CHECK_SIZE_AND_OFFSET(tm, tm_min);
+CHECK_SIZE_AND_OFFSET(tm, tm_hour);
+CHECK_SIZE_AND_OFFSET(tm, tm_mday);
+CHECK_SIZE_AND_OFFSET(tm, tm_mon);
+CHECK_SIZE_AND_OFFSET(tm, tm_year);
+CHECK_SIZE_AND_OFFSET(tm, tm_wday);
+CHECK_SIZE_AND_OFFSET(tm, tm_yday);
+CHECK_SIZE_AND_OFFSET(tm, tm_isdst);
+CHECK_SIZE_AND_OFFSET(tm, tm_gmtoff);
+CHECK_SIZE_AND_OFFSET(tm, tm_zone);
+
+#endif  // SANITIZER_LINUX || SANITIZER_MAC

@@ -6,17 +6,16 @@ set(SANITIZER_SOURCES
   sanitizer_common.cc
   sanitizer_flags.cc
   sanitizer_libc.cc
+  sanitizer_libignore.cc
   sanitizer_linux.cc
   sanitizer_mac.cc
+  sanitizer_platform_limits_linux.cc
   sanitizer_platform_limits_posix.cc
   sanitizer_posix.cc
   sanitizer_printf.cc
   sanitizer_stackdepot.cc
   sanitizer_stacktrace.cc
   sanitizer_suppressions.cc
-  sanitizer_symbolizer_itanium.cc
-  sanitizer_symbolizer_linux.cc
-  sanitizer_symbolizer_mac.cc
   sanitizer_symbolizer_win.cc
   sanitizer_thread_registry.cc
   sanitizer_win.cc)
@@ -26,8 +25,6 @@ set(SANITIZER_LIBCDEP_SOURCES
   sanitizer_linux_libcdep.cc
   sanitizer_posix_libcdep.cc
   sanitizer_stoptheworld_linux_libcdep.cc
-  sanitizer_symbolizer_libcdep.cc
-  sanitizer_symbolizer_linux_libcdep.cc
   sanitizer_symbolizer_posix_libcdep.cc)
 
 # Explicitly list all sanitizer_common headers. Not all of these are
@@ -48,6 +45,7 @@ set(SANITIZER_HEADERS
   sanitizer_internal_defs.h
   sanitizer_lfstack.h
   sanitizer_libc.h
+  sanitizer_libignore.h
   sanitizer_linux.h
   sanitizer_list.h
   sanitizer_mutex.h
@@ -61,9 +59,19 @@ set(SANITIZER_HEADERS
   sanitizer_symbolizer.h
   sanitizer_thread_registry.h)
 
-set(SANITIZER_CFLAGS
-  ${SANITIZER_COMMON_CFLAGS}
-  -fno-rtti)
+if (NOT MSVC)
+  set(SANITIZER_CFLAGS
+    ${SANITIZER_COMMON_CFLAGS}
+    -fno-rtti)
+else()
+  set(SANITIZER_CFLAGS
+    ${SANITIZER_COMMON_CFLAGS}
+    /GR-)
+endif()
+
+if(SUPPORTS_GLOBAL_CONSTRUCTORS_FLAG)
+  list(APPEND SANITIZER_CFLAGS -Wglobal-constructors)
+endif()
 
 set(SANITIZER_RUNTIME_LIBRARIES)
 if(APPLE)
@@ -90,7 +98,8 @@ else()
       SOURCES $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
               $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>
       CFLAGS ${SANITIZER_CFLAGS})
-    list(APPEND SANITIZER_RUNTIME_LIBRARIES RTSanitizerCommon.${arch})
+    list(APPEND SANITIZER_RUNTIME_LIBRARIES RTSanitizerCommon.${arch}
+                                            RTSanitizerCommonLibc.${arch})
   endforeach()
 endif()
 

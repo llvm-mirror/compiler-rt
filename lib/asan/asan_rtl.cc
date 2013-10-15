@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 #include "asan_allocator.h"
 #include "asan_interceptors.h"
+#include "asan_interface_internal.h"
 #include "asan_internal.h"
 #include "asan_mapping.h"
 #include "asan_poisoning.h"
@@ -25,6 +26,8 @@
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 #include "lsan/lsan_common.h"
+
+int __asan_option_detect_stack_use_after_return;  // Global interface symbol.
 
 namespace __asan {
 
@@ -101,7 +104,9 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->replace_str, "replace_str");
   ParseFlag(str, &f->replace_intrin, "replace_intrin");
   ParseFlag(str, &f->mac_ignore_invalid_free, "mac_ignore_invalid_free");
-  ParseFlag(str, &f->use_fake_stack, "use_fake_stack");
+  ParseFlag(str, &f->detect_stack_use_after_return,
+            "detect_stack_use_after_return");
+  ParseFlag(str, &f->uar_stack_size_log, "uar_stack_size_log");
   ParseFlag(str, &f->max_malloc_fill_size, "max_malloc_fill_size");
   ParseFlag(str, &f->malloc_fill_byte, "malloc_fill_byte");
   ParseFlag(str, &f->exitcode, "exitcode");
@@ -149,7 +154,8 @@ void InitializeFlags(Flags *f, const char *env) {
   f->replace_str = true;
   f->replace_intrin = true;
   f->mac_ignore_invalid_free = false;
-  f->use_fake_stack = true;
+  f->detect_stack_use_after_return = false;  // Also needs the compiler flag.
+  f->uar_stack_size_log = 0;
   f->max_malloc_fill_size = 0x1000;  // By default, fill only the first 4K.
   f->malloc_fill_byte = 0xbe;
   f->exitcode = ASAN_DEFAULT_FAILURE_EXITCODE;
@@ -305,8 +311,6 @@ static NOINLINE void force_interface_symbols() {
     case 25: __asan_poison_memory_region(0, 0); break;
     case 26: __asan_unpoison_memory_region(0, 0); break;
     case 27: __asan_set_error_exit_code(0); break;
-    case 28: __asan_stack_free(0, 0, 0); break;
-    case 29: __asan_stack_malloc(0, 0); break;
     case 30: __asan_before_dynamic_init(0); break;
     case 31: __asan_after_dynamic_init(); break;
     case 32: __asan_poison_stack_memory(0, 0); break;
@@ -375,6 +379,7 @@ static void PrintAddressSpaceLayout() {
   }
   Printf("\n");
   Printf("red_zone=%zu\n", (uptr)flags()->redzone);
+  Printf("quarantine_size=%zuM\n", (uptr)flags()->quarantine_size >> 20);
   Printf("malloc_context_size=%zu\n",
          (uptr)common_flags()->malloc_context_size);
 
@@ -428,6 +433,8 @@ void NOINLINE __asan_handle_no_return() {
     return;
   }
   PoisonShadow(bottom, top - bottom, 0);
+  if (curr_thread->has_fake_stack())
+    curr_thread->fake_stack()->HandleNoReturn();
 }
 
 void NOINLINE __asan_set_death_callback(void (*callback)(void)) {
@@ -454,6 +461,8 @@ void __asan_init() {
   const char *options = GetEnv("ASAN_OPTIONS");
   InitializeFlags(flags(), options);
   __sanitizer_set_report_path(common_flags()->log_path);
+  __asan_option_detect_stack_use_after_return =
+      flags()->detect_stack_use_after_return;
 
   if (flags()->verbosity && options) {
     Report("Parsed ASAN_OPTIONS: %s\n", options);
@@ -526,16 +535,15 @@ void __asan_init() {
 
   InstallSignalHandlers();
 
-  AsanTSDInit(AsanThread::TSDDtor);
+  AsanTSDInit(PlatformTSDDtor);
   // Allocator should be initialized before starting external symbolizer, as
   // fork() on Mac locks the allocator.
   InitializeAllocator();
 
   // Start symbolizer process if necessary.
-  const char* external_symbolizer = common_flags()->external_symbolizer_path;
-  if (common_flags()->symbolize && external_symbolizer &&
-      external_symbolizer[0]) {
-    InitializeExternalSymbolizer(external_symbolizer);
+  if (common_flags()->symbolize && &getSymbolizer) {
+    getSymbolizer()
+        ->InitializeExternal(common_flags()->external_symbolizer_path);
   }
 
   // On Linux AsanThread::ThreadStart() calls malloc() that's why asan_inited

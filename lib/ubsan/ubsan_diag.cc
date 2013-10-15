@@ -28,7 +28,8 @@ Location __ubsan::getCallerLocation(uptr CallerLoc) {
   uptr Loc = StackTrace::GetPreviousInstructionPc(CallerLoc);
 
   AddressInfo Info;
-  if (!SymbolizeCode(Loc, &Info, 1) || !Info.module || !*Info.module)
+  if (!getSymbolizer()->SymbolizeCode(Loc, &Info, 1) ||
+      !Info.module || !*Info.module)
     return Location(Loc);
 
   if (!Info.file)
@@ -71,25 +72,23 @@ static void renderLocation(Location Loc) {
   case Location::LK_Source: {
     SourceLocation SLoc = Loc.getSourceLocation();
     if (SLoc.isInvalid())
-      Printf("<unknown>:");
-    else {
-      Printf("%s:%d:", SLoc.getFilename(), SLoc.getLine());
-      if (SLoc.getColumn())
-        Printf("%d:", SLoc.getColumn());
-    }
+      Printf("<unknown>");
+    else
+      PrintSourceLocation(SLoc.getFilename(), SLoc.getLine(), SLoc.getColumn());
     break;
   }
   case Location::LK_Module:
-    Printf("%s:0x%zx:", Loc.getModuleLocation().getModuleName(),
-           Loc.getModuleLocation().getOffset());
+    PrintModuleAndOffset(Loc.getModuleLocation().getModuleName(),
+                         Loc.getModuleLocation().getOffset());
     break;
   case Location::LK_Memory:
-    Printf("%p:", Loc.getMemoryLocation());
+    Printf("%p", Loc.getMemoryLocation());
     break;
   case Location::LK_Null:
-    Printf("<unknown>:");
+    Printf("<unknown>");
     break;
   }
+  Printf(":");
 }
 
 static void renderText(const char *Message, const Diag::Arg *Args) {
@@ -109,7 +108,7 @@ static void renderText(const char *Message, const Diag::Arg *Args) {
         Printf("%s", A.String);
         break;
       case Diag::AK_Mangled: {
-        Printf("'%s'", Demangle(A.String));
+        Printf("'%s'", getSymbolizer()->Demangle(A.String));
         break;
       }
       case Diag::AK_SInt:

@@ -107,6 +107,8 @@ void SetLowLevelAllocateCallback(LowLevelAllocateCallback callback);
 // IO
 void RawWrite(const char *buffer);
 bool PrintsToTty();
+// Caching version of PrintsToTty(). Not thread-safe.
+bool PrintsToTtyCached();
 void Printf(const char *format, ...);
 void Report(const char *format, ...);
 void SetPrintfAndReportCallback(void (*callback)(const char *));
@@ -114,6 +116,9 @@ void SetPrintfAndReportCallback(void (*callback)(const char *));
 extern StaticSpinMutex CommonSanitizerReportMutex;
 void MaybeOpenReportFile();
 extern fd_t report_fd;
+extern bool log_to_file;
+extern char report_path_prefix[4096];
+extern uptr report_fd_pid;
 
 uptr OpenFile(const char *filename, bool write);
 // Opens the file 'file_name" and reads up to 'max_len' bytes.
@@ -127,6 +132,13 @@ uptr ReadFileToBuffer(const char *file_name, char **buff,
 // in '*buff_size'.
 void *MapFileToMemory(const char *file_name, uptr *buff_size);
 
+// Error report formatting.
+const char *StripPathPrefix(const char *filepath,
+                            const char *strip_file_prefix);
+void PrintSourceLocation(const char *file, int line, int column);
+void PrintModuleAndOffset(const char *module, uptr offset);
+
+
 // OS
 void DisableCoreDumper();
 void DumpProcessMap();
@@ -134,6 +146,7 @@ bool FileExists(const char *filename);
 const char *GetEnv(const char *name);
 bool SetEnv(const char *name, const char *value);
 const char *GetPwd();
+char *FindPathToBinary(const char *name);
 u32 GetUid();
 void ReExec();
 bool StackSizeIsUnlimited();
@@ -165,7 +178,9 @@ bool SanitizerGetThreadName(char *name, int max_len);
 
 // Specific tools may override behavior of "Die" and "CheckFailed" functions
 // to do tool-specific job.
-void SetDieCallback(void (*callback)(void));
+typedef void (*DieCallbackType)(void);
+void SetDieCallback(DieCallbackType);
+DieCallbackType GetDieCallback();
 typedef void (*CheckFailedCallbackType)(const char *, int, const char *,
                                        u64, u64);
 void SetCheckFailedCallback(CheckFailedCallbackType callback);
@@ -378,6 +393,62 @@ void InternalSort(Container *v, uptr size, Compare comp) {
   }
 }
 
+template<class Container, class Value, class Compare>
+uptr InternalBinarySearch(const Container &v, uptr first, uptr last,
+                          const Value &val, Compare comp) {
+  uptr not_found = last + 1;
+  while (last >= first) {
+    uptr mid = (first + last) / 2;
+    if (comp(v[mid], val))
+      first = mid + 1;
+    else if (comp(val, v[mid]))
+      last = mid - 1;
+    else
+      return mid;
+  }
+  return not_found;
+}
+
+// Represents a binary loaded into virtual memory (e.g. this can be an
+// executable or a shared object).
+class LoadedModule {
+ public:
+  LoadedModule(const char *module_name, uptr base_address);
+  void addAddressRange(uptr beg, uptr end);
+  bool containsAddress(uptr address) const;
+
+  const char *full_name() const { return full_name_; }
+  uptr base_address() const { return base_address_; }
+
+ private:
+  struct AddressRange {
+    uptr beg;
+    uptr end;
+  };
+  char *full_name_;
+  uptr base_address_;
+  static const uptr kMaxNumberOfAddressRanges = 6;
+  AddressRange ranges_[kMaxNumberOfAddressRanges];
+  uptr n_ranges_;
+};
+
+// OS-dependent function that fills array with descriptions of at most
+// "max_modules" currently loaded modules. Returns the number of
+// initialized modules. If filter is nonzero, ignores modules for which
+// filter(full_name) is false.
+typedef bool (*string_predicate_t)(const char *);
+uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
+                      string_predicate_t filter);
+
+#if SANITIZER_POSIX
+const uptr kPthreadDestructorIterations = 4;
+#else
+// Unused on Windows.
+const uptr kPthreadDestructorIterations = 0;
+#endif
+
+// Callback type for iterating over a set of memory ranges.
+typedef void (*RangeIteratorCallback)(uptr begin, uptr end, void *arg);
 }  // namespace __sanitizer
 
 #endif  // SANITIZER_COMMON_H

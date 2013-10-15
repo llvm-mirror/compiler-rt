@@ -12,21 +12,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_common.h"
+#include "sanitizer_flags.h"
 #include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
 #include "sanitizer_symbolizer.h"
 
 namespace __sanitizer {
-const char *StripPathPrefix(const char *filepath,
-                            const char *strip_file_prefix) {
-  if (filepath == 0) return 0;
-  const char *prefix_beg = internal_strstr(filepath, strip_file_prefix);
-  if (prefix_beg)
-    return prefix_beg + internal_strlen(strip_file_prefix);
-  return filepath;
-}
 
-// ----------------------- StackTrace ----------------------------- {{{1
 uptr StackTrace::GetPreviousInstructionPc(uptr pc) {
 #ifdef __arm__
   // Cancel Thumb bit.
@@ -46,25 +38,8 @@ static void PrintStackFramePrefix(uptr frame_num, uptr pc) {
   Printf("    #%zu 0x%zx", frame_num, pc);
 }
 
-static void PrintSourceLocation(const char *file, int line, int column,
-                                const char *strip_file_prefix) {
-  CHECK(file);
-  Printf(" %s", StripPathPrefix(file, strip_file_prefix));
-  if (line > 0) {
-    Printf(":%d", line);
-    if (column > 0)
-      Printf(":%d", column);
-  }
-}
-
-static void PrintModuleAndOffset(const char *module, uptr offset,
-                                 const char *strip_file_prefix) {
-  Printf(" (%s+0x%zx)", StripPathPrefix(module, strip_file_prefix), offset);
-}
-
-void StackTrace::PrintStack(const uptr *addr, uptr size,
-                            bool symbolize, const char *strip_file_prefix,
-                            SymbolizeCallback symbolize_callback ) {
+void StackTrace::PrintStack(const uptr *addr, uptr size, bool symbolize,
+                            SymbolizeCallback symbolize_callback) {
   MemoryMappingLayout proc_maps(/*cache_enabled*/true);
   InternalScopedBuffer<char> buff(GetPageSizeCached() * 2);
   InternalScopedBuffer<AddressInfo> addr_frames(64);
@@ -82,14 +57,15 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
         // We can't know anything about the string returned by external
         // symbolizer, but if it starts with filename, try to strip path prefix
         // from it.
-        Printf(" %s\n", StripPathPrefix(buff.data(), strip_file_prefix));
+        Printf(" %s\n",
+               StripPathPrefix(buff.data(), common_flags()->strip_path_prefix));
         frame_num++;
       }
     }
-    if (symbolize && addr_frames_num == 0 && &SymbolizeCode) {
+    if (symbolize && addr_frames_num == 0 && &getSymbolizer) {
       // Use our own (online) symbolizer, if necessary.
-      addr_frames_num = SymbolizeCode(pc, addr_frames.data(),
-                                      addr_frames.size());
+      addr_frames_num = getSymbolizer()->SymbolizeCode(
+          pc, addr_frames.data(), addr_frames.size());
       for (uptr j = 0; j < addr_frames_num; j++) {
         AddressInfo &info = addr_frames[j];
         PrintStackFramePrefix(frame_num, pc);
@@ -97,11 +73,11 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
           Printf(" in %s", info.function);
         }
         if (info.file) {
-          PrintSourceLocation(info.file, info.line, info.column,
-                              strip_file_prefix);
+          Printf(" ");
+          PrintSourceLocation(info.file, info.line, info.column);
         } else if (info.module) {
-          PrintModuleAndOffset(info.module, info.module_offset,
-                               strip_file_prefix);
+          Printf(" ");
+          PrintModuleAndOffset(info.module, info.module_offset);
         }
         Printf("\n");
         info.Clear();
@@ -116,7 +92,8 @@ void StackTrace::PrintStack(const uptr *addr, uptr size,
       if (proc_maps.GetObjectNameAndOffset(pc, &offset,
                                            buff.data(), buff.size(),
                                            /* protection */0)) {
-        PrintModuleAndOffset(buff.data(), offset, strip_file_prefix);
+        Printf(" ");
+        PrintModuleAndOffset(buff.data(), offset);
       }
       Printf("\n");
       frame_num++;
@@ -129,8 +106,13 @@ uptr StackTrace::GetCurrentPc() {
 }
 
 void StackTrace::FastUnwindStack(uptr pc, uptr bp,
-                                 uptr stack_top, uptr stack_bottom) {
-  CHECK(size == 0 && trace[0] == pc);
+                                 uptr stack_top, uptr stack_bottom,
+                                 uptr max_depth) {
+  if (max_depth == 0) {
+    size = 0;
+    return;
+  }
+  trace[0] = pc;
   size = 1;
   uhwptr *frame = (uhwptr *)bp;
   uhwptr *prev_frame = frame - 1;
@@ -140,7 +122,7 @@ void StackTrace::FastUnwindStack(uptr pc, uptr bp,
          frame < (uhwptr *)stack_top - 2 &&
          frame > (uhwptr *)stack_bottom &&
          IsAligned((uptr)frame, sizeof(*frame)) &&
-         size < max_size) {
+         size < max_depth) {
     uhwptr pc1 = frame[1];
     if (pc1 != pc) {
       trace[size++] = (uptr) pc1;
@@ -161,7 +143,6 @@ void StackTrace::PopStackFrames(uptr count) {
 // On 32-bits we don't compress stack traces.
 // On 64-bits we compress stack traces: if a given pc differes slightly from
 // the previous one, we record a 31-bit offset instead of the full pc.
-SANITIZER_INTERFACE_ATTRIBUTE
 uptr StackTrace::CompressStack(StackTrace *stack, u32 *compressed, uptr size) {
 #if SANITIZER_WORDSIZE == 32
   // Don't compress, just copy.
@@ -224,7 +205,6 @@ uptr StackTrace::CompressStack(StackTrace *stack, u32 *compressed, uptr size) {
   return res;
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
 void StackTrace::UncompressStack(StackTrace *stack,
                                  u32 *compressed, uptr size) {
 #if SANITIZER_WORDSIZE == 32

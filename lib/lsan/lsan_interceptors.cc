@@ -44,9 +44,9 @@ int pthread_setspecific(unsigned key, const void *v);
       stack_top = t->stack_end();                                            \
       stack_bottom = t->stack_begin();                                       \
     }                                                                        \
-    GetStackTrace(&stack, __sanitizer::common_flags()->malloc_context_size,  \
-                  StackTrace::GetCurrentPc(),                                \
-                  GET_CURRENT_FRAME(), stack_top, stack_bottom, fast);       \
+    stack.Unwind(__sanitizer::common_flags()->malloc_context_size,           \
+                 StackTrace::GetCurrentPc(),                                 \
+                 GET_CURRENT_FRAME(), stack_top, stack_bottom, fast);        \
   }
 
 ///// Malloc/free interceptors. /////
@@ -191,9 +191,6 @@ struct ThreadParam {
   void *param;
   atomic_uintptr_t tid;
 };
-
-// PTHREAD_DESTRUCTOR_ITERATIONS from glibc.
-const uptr kPthreadDestructorIterations = 4;
 
 extern "C" void *__lsan_thread_start_func(void *arg) {
   ThreadParam *p = (ThreadParam*)arg;

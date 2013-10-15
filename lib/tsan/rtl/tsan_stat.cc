@@ -138,9 +138,11 @@ void StatOutput(u64 *stat) {
   name[StatInt_strcpy]                   = "  strcpy                          ";
   name[StatInt_strncpy]                  = "  strncpy                         ";
   name[StatInt_strstr]                   = "  strstr                          ";
+  name[StatInt_strdup]                   = "  strdup                          ";
   name[StatInt_strcasecmp]               = "  strcasecmp                      ";
   name[StatInt_strncasecmp]              = "  strncasecmp                     ";
   name[StatInt_atexit]                   = "  atexit                          ";
+  name[StatInt__exit]                    = "  _exit                           ";
   name[StatInt___cxa_guard_acquire]      = "  __cxa_guard_acquire             ";
   name[StatInt___cxa_guard_release]      = "  __cxa_guard_release             ";
   name[StatInt___cxa_guard_abort]        = "  __cxa_guard_abort               ";
@@ -360,6 +362,18 @@ void StatOutput(u64 *stat) {
   name[StatInt_scandir]                  = "  scandir                         ";
   name[StatInt_scandir64]                = "  scandir64                       ";
   name[StatInt_getgroups]                = "  getgroups                       ";
+  name[StatInt_wordexp]                  = "  wordexp                         ";
+  name[StatInt_sigwait]                  = "  sigwait                         ";
+  name[StatInt_sigwaitinfo]              = "  sigwaitinfo                     ";
+  name[StatInt_sigtimedwait]             = "  sigtimedwait                    ";
+  name[StatInt_sigemptyset]              = "  sigemptyset                     ";
+  name[StatInt_sigfillset]               = "  sigfillset                      ";
+  name[StatInt_sigpending]               = "  sigpending                      ";
+  name[StatInt_sigprocmask]              = "  sigprocmask                     ";
+  name[StatInt_backtrace]                = "  backtrace                       ";
+  name[StatInt_backtrace_symbols]        = "  backtrace_symbols               ";
+  name[StatInt_dlopen]                   = "  dlopen                          ";
+  name[StatInt_dlclose]                  = "  dlclose                         ";
 
   name[StatAnnotation]                   = "Dynamic annotations               ";
   name[StatAnnotateHappensBefore]        = "  HappensBefore                   ";
@@ -391,6 +405,8 @@ void StatOutput(u64 *stat) {
   name[StatAnnotateIgnoreReadsEnd]       = "  IgnoreReadsEnd                  ";
   name[StatAnnotateIgnoreWritesBegin]    = "  IgnoreWritesBegin               ";
   name[StatAnnotateIgnoreWritesEnd]      = "  IgnoreWritesEnd                 ";
+  name[StatAnnotateIgnoreSyncBegin]      = "  IgnoreSyncBegin                 ";
+  name[StatAnnotateIgnoreSyncEnd]        = "  IgnoreSyncEnd                   ";
   name[StatAnnotatePublishMemoryRange]   = "  PublishMemoryRange              ";
   name[StatAnnotateUnpublishMemoryRange] = "  UnpublishMemoryRange            ";
   name[StatAnnotateThreadName]           = "  ThreadName                      ";
