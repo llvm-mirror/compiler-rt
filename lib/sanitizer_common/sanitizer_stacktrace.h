@@ -19,47 +19,60 @@ namespace __sanitizer {
 
 static const uptr kStackTraceMax = 256;
 
-#if SANITIZER_LINUX && (defined(__arm__) || \
-    defined(__powerpc__) || defined(__powerpc64__) || \
-    defined(__sparc__) || \
-    defined(__mips__))
-#define SANITIZER_CAN_FAST_UNWIND 0
+#if SANITIZER_LINUX && (defined(__aarch64__) || defined(__powerpc__) || \
+                        defined(__powerpc64__) || defined(__sparc__) || \
+                        defined(__mips__))
+# define SANITIZER_CAN_FAST_UNWIND 0
+#elif SANITIZER_WINDOWS
+# define SANITIZER_CAN_FAST_UNWIND 0
 #else
-#define SANITIZER_CAN_FAST_UNWIND 1
+# define SANITIZER_CAN_FAST_UNWIND 1
 #endif
 
 struct StackTrace {
   typedef bool (*SymbolizeCallback)(const void *pc, char *out_buffer,
                                      int out_size);
+  uptr top_frame_bp;
   uptr size;
   uptr trace[kStackTraceMax];
 
-  static void PrintStack(const uptr *addr, uptr size, bool symbolize,
-                         SymbolizeCallback symbolize_callback);
+  // Prints a symbolized stacktrace, followed by an empty line.
+  static void PrintStack(const uptr *addr, uptr size);
+  void Print() const {
+    PrintStack(trace, size);
+  }
 
   void CopyFrom(const uptr *src, uptr src_size) {
+    top_frame_bp = 0;
     size = src_size;
     if (size > kStackTraceMax) size = kStackTraceMax;
     for (uptr i = 0; i < size; i++)
       trace[i] = src[i];
   }
 
-  void Unwind(uptr max_depth, uptr pc, uptr bp, uptr stack_top,
-              uptr stack_bottom, bool fast);
-  // FIXME: Make FastUnwindStack and SlowUnwindStack private methods.
-  void FastUnwindStack(uptr pc, uptr bp, uptr stack_top, uptr stack_bottom,
-                       uptr max_depth);
-  void SlowUnwindStack(uptr pc, uptr max_depth);
+  static bool WillUseFastUnwind(bool request_fast_unwind) {
+    // Check if fast unwind is available. Fast unwind is the only option on Mac.
+    if (!SANITIZER_CAN_FAST_UNWIND)
+      return false;
+    else if (SANITIZER_MAC)
+      return true;
+    return request_fast_unwind;
+  }
 
-  void PopStackFrames(uptr count);
+  void Unwind(uptr max_depth, uptr pc, uptr bp, void *context, uptr stack_top,
+              uptr stack_bottom, bool request_fast_unwind);
 
   static uptr GetCurrentPc();
   static uptr GetPreviousInstructionPc(uptr pc);
 
-  static uptr CompressStack(StackTrace *stack,
-                            u32 *compressed, uptr size);
-  static void UncompressStack(StackTrace *stack,
-                              u32 *compressed, uptr size);
+ private:
+  void FastUnwindStack(uptr pc, uptr bp, uptr stack_top, uptr stack_bottom,
+                       uptr max_depth);
+  void SlowUnwindStack(uptr pc, uptr max_depth);
+  void SlowUnwindStackWithContext(uptr pc, void *context,
+                                  uptr max_depth);
+  void PopStackFrames(uptr count);
+  uptr LocatePcInTrace(uptr pc);
 };
 
 }  // namespace __sanitizer

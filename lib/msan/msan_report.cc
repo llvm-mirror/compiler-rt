@@ -34,52 +34,54 @@ class Decorator: private __sanitizer::AnsiColorDecorator {
   const char *End()    { return Default(); }
 };
 
-static void PrintStack(const uptr *trace, uptr size) {
-  SymbolizerScope sym_scope;
-  StackTrace::PrintStack(trace, size, true, 0);
+static void DescribeStackOrigin(const char *so, uptr pc) {
+  Decorator d;
+  char *s = internal_strdup(so);
+  char *sep = internal_strchr(s, '@');
+  CHECK(sep);
+  *sep = '\0';
+  Printf("%s", d.Origin());
+  Printf(
+      "  %sUninitialized value was created by an allocation of '%s%s%s'"
+      " in the stack frame of function '%s%s%s'%s\n",
+      d.Origin(), d.Name(), s, d.Origin(), d.Name(),
+      Symbolizer::Get()->Demangle(sep + 1), d.Origin(), d.End());
+  InternalFree(s);
+
+  if (pc) {
+    // For some reason function address in LLVM IR is 1 less then the address
+    // of the first instruction.
+    pc += 1;
+    StackTrace::PrintStack(&pc, 1);
+  }
 }
 
 static void DescribeOrigin(u32 origin) {
-  Decorator d;
-  if (flags()->verbosity)
-    Printf("  raw origin id: %d\n", origin);
+  VPrintf(1, "  raw origin id: %d\n", origin);
   uptr pc;
-  if (const char *so = GetOriginDescrIfStack(origin, &pc)) {
-    char* s = internal_strdup(so);
-    char* sep = internal_strchr(s, '@');
-    CHECK(sep);
-    *sep = '\0';
-    Printf("%s", d.Origin());
-    Printf("  %sUninitialized value was created by an allocation of '%s%s%s'"
-           " in the stack frame of function '%s%s%s'%s\n",
-           d.Origin(), d.Name(), s, d.Origin(), d.Name(),
-           getSymbolizer()->Demangle(sep + 1), d.Origin(), d.End());
-    InternalFree(s);
-
-    if (pc) {
-      // For some reason function address in LLVM IR is 1 less then the address
-      // of the first instruction.
-      pc += 1;
-      PrintStack(&pc, 1);
+  while (true) {
+    if (const char *so = GetOriginDescrIfStack(origin, &pc)) {
+      DescribeStackOrigin(so, pc);
+      break;
     }
-  } else {
+    Decorator d;
     uptr size = 0;
     const uptr *trace = StackDepotGet(origin, &size);
-    Printf("  %sUninitialized value was created by a heap allocation%s\n",
-           d.Origin(), d.End());
-    PrintStack(trace, size);
+    CHECK_GT(size, 0);
+    if (TRACE_IS_CHAINED(trace[size - 1])) {
+      // Linked origin.
+      // FIXME: copied? modified? passed through? observed?
+      Printf("  %sUninitialized value was stored to memory at%s\n", d.Origin(),
+             d.End());
+      StackTrace::PrintStack(trace, size - 1);
+      origin = TRACE_TO_CHAINED_ID(trace[size - 1]);
+    } else {
+      Printf("  %sUninitialized value was created by a heap allocation%s\n",
+             d.Origin(), d.End());
+      StackTrace::PrintStack(trace, size);
+      break;
+    }
   }
-}
-
-static void ReportSummary(const char *error_type, StackTrace *stack) {
-  if (!stack->size || !getSymbolizer()->IsAvailable()) return;
-  AddressInfo ai;
-  uptr pc = StackTrace::GetPreviousInstructionPc(stack->trace[0]);
-  {
-    SymbolizerScope sym_scope;
-    getSymbolizer()->SymbolizeCode(pc, &ai, 1);
-  }
-  ReportErrorSummary(error_type, ai.file, ai.line, ai.function);
 }
 
 void ReportUMR(StackTrace *stack, u32 origin) {
@@ -91,27 +93,35 @@ void ReportUMR(StackTrace *stack, u32 origin) {
   Printf("%s", d.Warning());
   Report(" WARNING: MemorySanitizer: use-of-uninitialized-value\n");
   Printf("%s", d.End());
-  PrintStack(stack->trace, stack->size);
+  stack->Print();
   if (origin) {
     DescribeOrigin(origin);
   }
-  ReportSummary("use-of-uninitialized-value", stack);
+  ReportErrorSummary("use-of-uninitialized-value", stack);
 }
 
 void ReportExpectedUMRNotFound(StackTrace *stack) {
   SpinMutexLock l(&CommonSanitizerReportMutex);
 
   Printf(" WARNING: Expected use of uninitialized value not found\n");
-  PrintStack(stack->trace, stack->size);
+  stack->Print();
 }
 
 void ReportAtExitStatistics() {
   SpinMutexLock l(&CommonSanitizerReportMutex);
 
-  Decorator d;
-  Printf("%s", d.Warning());
-  Printf("MemorySanitizer: %d warnings reported.\n", msan_report_count);
-  Printf("%s", d.End());
+  if (msan_report_count > 0) {
+    Decorator d;
+    Printf("%s", d.Warning());
+    Printf("MemorySanitizer: %d warnings reported.\n", msan_report_count);
+    Printf("%s", d.End());
+  }
+
+  StackDepotStats *stack_depot_stats = StackDepotGetStats();
+  // FIXME: we want this at normal exit, too!
+  // FIXME: but only with verbosity=1 or something
+  Printf("Unique heap origins: %zu\n", stack_depot_stats->n_uniq_ids);
+  Printf("Stack depot mapped bytes: %zu\n", stack_depot_stats->mapped);
 }
 
 }  // namespace __msan

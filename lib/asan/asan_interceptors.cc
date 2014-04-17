@@ -14,14 +14,12 @@
 #include "asan_interceptors.h"
 
 #include "asan_allocator.h"
-#include "asan_intercepted_functions.h"
 #include "asan_internal.h"
 #include "asan_mapping.h"
 #include "asan_poisoning.h"
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_stats.h"
-#include "interception/interception.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
 namespace __asan {
@@ -72,13 +70,6 @@ static inline bool RangesOverlap(const char *offset1, uptr length1,
   } \
 } while (0)
 
-#define ENSURE_ASAN_INITED() do { \
-  CHECK(!asan_init_is_running); \
-  if (!asan_inited) { \
-    __asan_init(); \
-  } \
-} while (0)
-
 static inline uptr MaybeRealStrnlen(const char *s, uptr maxlen) {
 #if ASAN_INTERCEPT_STRNLEN
   if (REAL(strnlen) != 0) {
@@ -107,18 +98,28 @@ using namespace __asan;  // NOLINT
 DECLARE_REAL_AND_INTERCEPTOR(void *, malloc, uptr)
 DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
 
-#define COMMON_INTERCEPTOR_UNPOISON_PARAM(ctx, count) \
-  do {                                                \
-  } while (false)
+#if !SANITIZER_MAC
+#define ASAN_INTERCEPT_FUNC(name)                                        \
+  do {                                                                   \
+    if ((!INTERCEPT_FUNCTION(name) || !REAL(name)))                      \
+      VReport(1, "AddressSanitizer: failed to intercept '" #name "'\n"); \
+  } while (0)
+#else
+// OS X interceptors don't need to be initialized with INTERCEPT_FUNCTION.
+#define ASAN_INTERCEPT_FUNC(name)
+#endif  // SANITIZER_MAC
+
+#define COMMON_INTERCEPT_FUNCTION(name) ASAN_INTERCEPT_FUNC(name)
 #define COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, size) \
   ASAN_WRITE_RANGE(ptr, size)
 #define COMMON_INTERCEPTOR_READ_RANGE(ctx, ptr, size) ASAN_READ_RANGE(ptr, size)
-#define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)              \
-  do {                                                        \
-    if (asan_init_is_running) return REAL(func)(__VA_ARGS__); \
-    ctx = 0;                                                  \
-    (void) ctx;                                               \
-    ENSURE_ASAN_INITED();                                     \
+#define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)                       \
+  do {                                                                 \
+    if (asan_init_is_running) return REAL(func)(__VA_ARGS__);          \
+    ctx = 0;                                                           \
+    (void) ctx;                                                        \
+    if (SANITIZER_MAC && !asan_inited) return REAL(func)(__VA_ARGS__); \
+    ENSURE_ASAN_INITED();                                              \
   } while (false)
 #define COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd) \
   do {                                         \
@@ -130,6 +131,13 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
   do {                                                      \
   } while (false)
 #define COMMON_INTERCEPTOR_SET_THREAD_NAME(ctx, name) SetThreadName(name)
+// Should be asanThreadRegistry().SetThreadNameByUserId(thread, name)
+// But asan does not remember UserId's for threads (pthread_t);
+// and remembers all ever existed threads, so the linear search by UserId
+// can be slow.
+#define COMMON_INTERCEPTOR_SET_PTHREAD_NAME(ctx, thread, name) \
+  do {                                                         \
+  } while (false)
 #define COMMON_INTERCEPTOR_BLOCK_REAL(name) REAL(name)
 #define COMMON_INTERCEPTOR_ON_EXIT(ctx) OnExit()
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
@@ -138,9 +146,13 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
 #define COMMON_SYSCALL_PRE_WRITE_RANGE(p, s) ASAN_WRITE_RANGE(p, s)
 #define COMMON_SYSCALL_POST_READ_RANGE(p, s) \
   do {                                       \
+    (void)(p);                               \
+    (void)(s);                               \
   } while (false)
 #define COMMON_SYSCALL_POST_WRITE_RANGE(p, s) \
   do {                                        \
+    (void)(p);                                \
+    (void)(s);                                \
   } while (false)
 #include "sanitizer_common/sanitizer_common_syscalls.inc"
 
@@ -151,8 +163,6 @@ static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
 }
 
 #if ASAN_INTERCEPT_PTHREAD_CREATE
-extern "C" int pthread_attr_getdetachstate(void *attr, int *v);
-
 INTERCEPTOR(int, pthread_create, void *thread,
     void *attr, void *(*start_routine)(void*), void *arg) {
   EnsureMainThreadIDIsCorrect();
@@ -162,7 +172,7 @@ INTERCEPTOR(int, pthread_create, void *thread,
   GET_STACK_TRACE_THREAD;
   int detached = 0;
   if (attr != 0)
-    pthread_attr_getdetachstate(attr, &detached);
+    REAL(pthread_attr_getdetachstate)(attr, &detached);
 
   u32 current_tid = GetCurrentTidOrInvalid();
   AsanThread *t = AsanThread::Create(start_routine, arg);
@@ -173,20 +183,41 @@ INTERCEPTOR(int, pthread_create, void *thread,
 #endif  // ASAN_INTERCEPT_PTHREAD_CREATE
 
 #if ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
+
+#if SANITIZER_ANDROID
+INTERCEPTOR(void*, bsd_signal, int signum, void *handler) {
+  if (!AsanInterceptsSignal(signum) ||
+      common_flags()->allow_user_segv_handler) {
+    return REAL(bsd_signal)(signum, handler);
+  }
+  return 0;
+}
+#else
 INTERCEPTOR(void*, signal, int signum, void *handler) {
-  if (!AsanInterceptsSignal(signum) || flags()->allow_user_segv_handler) {
+  if (!AsanInterceptsSignal(signum) ||
+      common_flags()->allow_user_segv_handler) {
     return REAL(signal)(signum, handler);
   }
   return 0;
 }
+#endif
 
 INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
                             struct sigaction *oldact) {
-  if (!AsanInterceptsSignal(signum) || flags()->allow_user_segv_handler) {
+  if (!AsanInterceptsSignal(signum) ||
+      common_flags()->allow_user_segv_handler) {
     return REAL(sigaction)(signum, act, oldact);
   }
   return 0;
 }
+
+namespace __sanitizer {
+int real_sigaction(int signum, const void *act, void *oldact) {
+  return REAL(sigaction)(signum,
+                         (struct sigaction *)act, (struct sigaction *)oldact);
+}
+}  // namespace __sanitizer
+
 #elif SANITIZER_POSIX
 // We need to have defined REAL(sigaction) on posix systems.
 DEFINE_REAL(int, sigaction, int signum, const struct sigaction *act,
@@ -263,10 +294,9 @@ static void MlockIsUnsupported() {
   static bool printed = false;
   if (printed) return;
   printed = true;
-  if (flags()->verbosity > 0) {
-    Printf("INFO: AddressSanitizer ignores "
-           "mlock/mlockall/munlock/munlockall\n");
-  }
+  VPrintf(1,
+          "INFO: AddressSanitizer ignores "
+          "mlock/mlockall/munlock/munlockall\n");
 }
 
 INTERCEPTOR(int, mlock, const void *addr, uptr len) {
@@ -354,10 +384,7 @@ INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
     ASAN_READ_RANGE(from, size);
     ASAN_WRITE_RANGE(to, size);
   }
-  // Interposing of resolver functions is broken on Mac OS 10.7 and 10.8, so
-  // calling REAL(memcpy) here leads to infinite recursion.
-  // See also http://code.google.com/p/address-sanitizer/issues/detail?id=116.
-  return internal_memcpy(to, from, size);
+  return REAL(memcpy)(to, from, size);
 #else
   // At least on 10.7 and 10.8 both memcpy() and memmove() are being replaced
   // with WRAP(memcpy). As a result, false positives are reported for memmove()
@@ -642,22 +669,15 @@ static void AtCxaAtexit(void *unused) {
 #if ASAN_INTERCEPT___CXA_ATEXIT
 INTERCEPTOR(int, __cxa_atexit, void (*func)(void *), void *arg,
             void *dso_handle) {
+#if SANITIZER_MAC
+  if (!asan_inited) return REAL(__cxa_atexit)(func, arg, dso_handle);
+#endif
   ENSURE_ASAN_INITED();
   int res = REAL(__cxa_atexit)(func, arg, dso_handle);
   REAL(__cxa_atexit)(AtCxaAtexit, 0, 0);
   return res;
 }
 #endif  // ASAN_INTERCEPT___CXA_ATEXIT
-
-#if !SANITIZER_MAC
-#define ASAN_INTERCEPT_FUNC(name) do { \
-      if (!INTERCEPT_FUNCTION(name) && flags()->verbosity > 0) \
-        Report("AddressSanitizer: failed to intercept '" #name "'\n"); \
-    } while (0)
-#else
-// OS X interceptors don't need to be initialized with INTERCEPT_FUNCTION.
-#define ASAN_INTERCEPT_FUNC(name)
-#endif  // SANITIZER_MAC
 
 #if SANITIZER_WINDOWS
 INTERCEPTOR_WINAPI(DWORD, CreateThread,
@@ -739,7 +759,11 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(longjmp);
 #if ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
   ASAN_INTERCEPT_FUNC(sigaction);
+#if SANITIZER_ANDROID
+  ASAN_INTERCEPT_FUNC(bsd_signal);
+#else
   ASAN_INTERCEPT_FUNC(signal);
+#endif
 #endif
 #if ASAN_INTERCEPT_SWAPCONTEXT
   ASAN_INTERCEPT_FUNC(swapcontext);
@@ -771,9 +795,7 @@ void InitializeAsanInterceptors() {
   InitializeWindowsInterceptors();
 #endif
 
-  if (flags()->verbosity > 0) {
-    Report("AddressSanitizer: libc interceptors initialized\n");
-  }
+  VReport(1, "AddressSanitizer: libc interceptors initialized\n");
 }
 
 }  // namespace __asan

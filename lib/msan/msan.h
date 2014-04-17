@@ -25,11 +25,18 @@
 # define MSAN_REPLACE_OPERATORS_NEW_AND_DELETE 1
 #endif
 
-#define MEM_TO_SHADOW(mem) (((uptr)mem)       & ~0x400000000000ULL)
-#define MEM_TO_ORIGIN(mem) (MEM_TO_SHADOW(mem) + 0x200000000000ULL)
-#define MEM_IS_APP(mem)    ((uptr)mem >=         0x600000000000ULL)
-#define MEM_IS_SHADOW(mem) ((uptr)mem >=         0x200000000000ULL && \
-                            (uptr)mem <=         0x400000000000ULL)
+#define MEM_TO_SHADOW(mem)       (((uptr)mem) & ~0x400000000000ULL)
+#define SHADOW_TO_ORIGIN(shadow) (((uptr)shadow) + 0x200000000000ULL)
+#define MEM_TO_ORIGIN(mem)       (SHADOW_TO_ORIGIN(MEM_TO_SHADOW(mem)))
+#define MEM_IS_APP(mem)          ((uptr)mem >= 0x600000000000ULL)
+#define MEM_IS_SHADOW(mem) \
+  ((uptr)mem >= 0x200000000000ULL && (uptr)mem <= 0x400000000000ULL)
+
+// Chained stack trace format.
+#define TRACE_MAGIC_MASK 0xFFFFFFFF00000000LLU
+#define TRACE_MAKE_CHAINED(id) ((uptr)id | TRACE_MAGIC_MASK)
+#define TRACE_TO_CHAINED_ID(u) ((uptr)u & (~TRACE_MAGIC_MASK))
+#define TRACE_IS_CHAINED(u) ((((uptr)u) & TRACE_MAGIC_MASK) == TRACE_MAGIC_MASK)
 
 const int kMsanParamTlsSizeInWords = 100;
 const int kMsanRetvalTlsSizeInWords = 100;
@@ -44,6 +51,7 @@ bool InitShadow(bool prot1, bool prot2, bool map_shadow, bool init_origins);
 char *GetProcSelfMaps();
 void InitializeInterceptors();
 
+void MsanAllocatorThreadFinish();
 void *MsanReallocate(StackTrace *stack, void *oldp, uptr size,
                      uptr alignment, bool zeroise);
 void MsanDeallocate(StackTrace *stack, void *ptr);
@@ -70,7 +78,7 @@ void PrintWarning(uptr pc, uptr bp);
 void PrintWarningWithOrigin(uptr pc, uptr bp, u32 origin);
 
 void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp,
-                   bool fast);
+                   bool request_fast_unwind);
 
 void ReportUMR(StackTrace *stack, u32 origin);
 void ReportExpectedUMRNotFound(StackTrace *stack);
@@ -80,6 +88,16 @@ void ReportAtExitStatistics();
 void UnpoisonParam(uptr n);
 void UnpoisonThreadLocalState();
 
+u32 GetOriginIfPoisoned(uptr a, uptr size);
+void SetOriginIfPoisoned(uptr addr, uptr src_shadow, uptr size, u32 src_origin);
+void CopyOrigin(void *dst, const void *src, uptr size, StackTrace *stack);
+void MovePoison(void *dst, const void *src, uptr size, StackTrace *stack);
+void CopyPoison(void *dst, const void *src, uptr size, StackTrace *stack);
+
+// Returns a "chained" origin id, pointing to the given stack trace followed by
+// the previous origin id.
+u32 ChainOrigin(u32 id, StackTrace *stack);
+
 #define GET_MALLOC_STACK_TRACE                                     \
   StackTrace stack;                                                \
   stack.size = 0;                                                  \
@@ -87,6 +105,16 @@ void UnpoisonThreadLocalState();
     GetStackTrace(&stack, common_flags()->malloc_context_size,     \
         StackTrace::GetCurrentPc(), GET_CURRENT_FRAME(),           \
         common_flags()->fast_unwind_on_malloc)
+
+#define GET_STORE_STACK_TRACE_PC_BP(pc, bp)                            \
+  StackTrace stack;                                                    \
+  stack.size = 0;                                                      \
+  if (__msan_get_track_origins() > 1 && msan_inited)                   \
+    GetStackTrace(&stack, common_flags()->malloc_context_size, pc, bp, \
+                  common_flags()->fast_unwind_on_malloc)
+
+#define GET_STORE_STACK_TRACE \
+  GET_STORE_STACK_TRACE_PC_BP(StackTrace::GetCurrentPc(), GET_CURRENT_FRAME())
 
 class ScopedThreadLocalStateBackup {
  public:
@@ -97,6 +125,14 @@ class ScopedThreadLocalStateBackup {
  private:
   u64 va_arg_overflow_size_tls;
 };
+
+extern void (*death_callback)(void);
+
+void MsanTSDInit(void (*destructor)(void *tsd));
+void *MsanTSDGet();
+void MsanTSDSet(void *tsd);
+void MsanTSDDtor(void *tsd);
+
 }  // namespace __msan
 
 #define MSAN_MALLOC_HOOK(ptr, size) \

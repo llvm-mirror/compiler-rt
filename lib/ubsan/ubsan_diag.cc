@@ -13,6 +13,7 @@
 
 #include "ubsan_diag.h"
 #include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
@@ -21,16 +22,43 @@
 
 using namespace __ubsan;
 
+static void InitializeSanitizerCommon() {
+  static StaticSpinMutex init_mu;
+  SpinMutexLock l(&init_mu);
+  static bool initialized;
+  if (initialized)
+   return;
+  if (0 == internal_strcmp(SanitizerToolName, "SanitizerTool")) {
+    // UBSan is run in a standalone mode. Initialize it now.
+    SanitizerToolName = "UndefinedBehaviorSanitizer";
+    CommonFlags *cf = common_flags();
+    SetCommonFlagsDefaults(cf);
+    cf->print_summary = false;
+  }
+  initialized = true;
+}
+
 Location __ubsan::getCallerLocation(uptr CallerLoc) {
   if (!CallerLoc)
     return Location();
 
   uptr Loc = StackTrace::GetPreviousInstructionPc(CallerLoc);
+  return getFunctionLocation(Loc, 0);
+}
+
+Location __ubsan::getFunctionLocation(uptr Loc, const char **FName) {
+  if (!Loc)
+    return Location();
+  // FIXME: We may need to run initialization earlier.
+  InitializeSanitizerCommon();
 
   AddressInfo Info;
-  if (!getSymbolizer()->SymbolizeCode(Loc, &Info, 1) ||
+  if (!Symbolizer::GetOrInit()->SymbolizePC(Loc, &Info, 1) ||
       !Info.module || !*Info.module)
     return Location(Loc);
+
+  if (FName && Info.function)
+    *FName = Info.function;
 
   if (!Info.file)
     return ModuleLocation(Info.module, Info.module_offset);
@@ -68,27 +96,29 @@ static void PrintHex(UIntMax Val) {
 }
 
 static void renderLocation(Location Loc) {
+  InternalScopedString LocBuffer(1024);
   switch (Loc.getKind()) {
   case Location::LK_Source: {
     SourceLocation SLoc = Loc.getSourceLocation();
     if (SLoc.isInvalid())
-      Printf("<unknown>");
+      LocBuffer.append("<unknown>");
     else
-      PrintSourceLocation(SLoc.getFilename(), SLoc.getLine(), SLoc.getColumn());
+      PrintSourceLocation(&LocBuffer, SLoc.getFilename(), SLoc.getLine(),
+                          SLoc.getColumn());
     break;
   }
   case Location::LK_Module:
-    PrintModuleAndOffset(Loc.getModuleLocation().getModuleName(),
+    PrintModuleAndOffset(&LocBuffer, Loc.getModuleLocation().getModuleName(),
                          Loc.getModuleLocation().getOffset());
     break;
   case Location::LK_Memory:
-    Printf("%p", Loc.getMemoryLocation());
+    LocBuffer.append("%p", Loc.getMemoryLocation());
     break;
   case Location::LK_Null:
-    Printf("<unknown>");
+    LocBuffer.append("<unknown>");
     break;
   }
-  Printf(":");
+  Printf("%s:", LocBuffer.data());
 }
 
 static void renderText(const char *Message, const Diag::Arg *Args) {
@@ -108,7 +138,7 @@ static void renderText(const char *Message, const Diag::Arg *Args) {
         Printf("%s", A.String);
         break;
       case Diag::AK_Mangled: {
-        Printf("'%s'", getSymbolizer()->Demangle(A.String));
+        Printf("'%s'", Symbolizer::GetOrInit()->Demangle(A.String));
         break;
       }
       case Diag::AK_SInt:

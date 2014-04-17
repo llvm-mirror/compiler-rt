@@ -132,6 +132,8 @@ extern "C" {
   }
 }
 
+WRAP_V_V(__asan_handle_no_return)
+
 WRAP_V_W(__asan_report_store1)
 WRAP_V_W(__asan_report_store2)
 WRAP_V_W(__asan_report_store4)
@@ -148,6 +150,15 @@ WRAP_V_WW(__asan_report_load_n)
 
 WRAP_V_WW(__asan_register_globals)
 WRAP_V_WW(__asan_unregister_globals)
+
+WRAP_V_W(__asan_before_dynamic_init)
+WRAP_V_V(__asan_after_dynamic_init)
+
+WRAP_V_WW(__asan_poison_stack_memory)
+WRAP_V_WW(__asan_unpoison_stack_memory)
+
+WRAP_V_WW(__asan_poison_memory_region)
+WRAP_V_WW(__asan_unpoison_memory_region)
 
 WRAP_W_WW(__asan_stack_malloc_0)
 WRAP_W_WW(__asan_stack_malloc_1)
@@ -190,6 +201,11 @@ WRAP_W_WWW(_realloc_dbg)
 WRAP_W_WWW(_recalloc)
 
 WRAP_W_W(_msize)
+WRAP_W_W(_expand)
+WRAP_W_W(_expand_dbg)
+
+// TODO(timurrrr): Might want to add support for _aligned_* allocation
+// functions to detect a bit more bugs.  Those functions seem to wrap malloc().
 
 // TODO(timurrrr): Do we need to add _Crt* stuff here? (see asan_malloc_win.cc).
 

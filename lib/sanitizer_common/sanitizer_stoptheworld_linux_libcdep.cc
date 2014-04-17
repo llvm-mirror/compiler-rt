@@ -18,6 +18,8 @@
 
 #include "sanitizer_stoptheworld.h"
 
+#include "sanitizer_platform_limits_posix.h"
+
 #include <errno.h>
 #include <sched.h> // for CLONE_* definitions
 #include <stddef.h>
@@ -31,7 +33,16 @@
 #endif
 #include <sys/wait.h> // for signal-related stuff
 
+#ifdef sa_handler
+# undef sa_handler
+#endif
+
+#ifdef sa_sigaction
+# undef sa_sigaction
+#endif
+
 #include "sanitizer_common.h"
+#include "sanitizer_flags.h"
 #include "sanitizer_libc.h"
 #include "sanitizer_linux.h"
 #include "sanitizer_mutex.h"
@@ -47,30 +58,14 @@
 // clone() interface (we want to share the address space with the caller
 // process, so we prefer clone() over fork()).
 //
-// We avoid the use of libc for two reasons:
+// We don't use any libc functions, relying instead on direct syscalls. There
+// are two reasons for this:
 // 1. calling a library function while threads are suspended could cause a
 // deadlock, if one of the treads happens to be holding a libc lock;
 // 2. it's generally not safe to call libc functions from the tracer task,
 // because clone() does not set up a thread-local storage for it. Any
 // thread-local variables used by libc will be shared between the tracer task
 // and the thread which spawned it.
-//
-// We deal with this by replacing libc calls with calls to our own
-// implementations defined in sanitizer_libc.h and sanitizer_linux.h. However,
-// there are still some libc functions which are used here:
-//
-// * All of the system calls ultimately go through the libc syscall() function.
-// We're operating under the assumption that syscall()'s implementation does
-// not acquire any locks or use any thread-local data (except for the errno
-// variable, which we handle separately).
-//
-// * We lack custom implementations of sigfillset() and sigaction(), so we use
-// the libc versions instead. The same assumptions as above apply.
-//
-// * It is safe to call libc functions before the cloned thread is spawned or
-// after it has exited. The following functions are used in this manner:
-// sigdelset()
-// sigprocmask()
 
 COMPILER_CHECK(sizeof(SuspendedThreadID) == sizeof(pid_t));
 
@@ -105,11 +100,11 @@ bool ThreadSuspender::SuspendThread(SuspendedThreadID thread_id) {
                        &pterrno)) {
     // Either the thread is dead, or something prevented us from attaching.
     // Log this event and move on.
-    Report("Could not attach to thread %d (errno %d).\n", thread_id, pterrno);
+    VReport(1, "Could not attach to thread %d (errno %d).\n", thread_id,
+            pterrno);
     return false;
   } else {
-    if (SanitizerVerbosity > 0)
-      Report("Attached to thread %d.\n", thread_id);
+    VReport(1, "Attached to thread %d.\n", thread_id);
     // The thread is not guaranteed to stop before ptrace returns, so we must
     // wait on it.
     uptr waitpid_status;
@@ -118,8 +113,8 @@ bool ThreadSuspender::SuspendThread(SuspendedThreadID thread_id) {
     if (internal_iserror(waitpid_status, &wperrno)) {
       // Got a ECHILD error. I don't think this situation is possible, but it
       // doesn't hurt to report it.
-      Report("Waiting on thread %d failed, detaching (errno %d).\n", thread_id,
-             wperrno);
+      VReport(1, "Waiting on thread %d failed, detaching (errno %d).\n",
+              thread_id, wperrno);
       internal_ptrace(PTRACE_DETACH, thread_id, NULL, NULL);
       return false;
     }
@@ -134,13 +129,12 @@ void ThreadSuspender::ResumeAllThreads() {
     int pterrno;
     if (!internal_iserror(internal_ptrace(PTRACE_DETACH, tid, NULL, NULL),
                           &pterrno)) {
-      if (SanitizerVerbosity > 0)
-        Report("Detached from thread %d.\n", tid);
+      VReport(1, "Detached from thread %d.\n", tid);
     } else {
       // Either the thread is dead, or we are already detached.
       // The latter case is possible, for instance, if this function was called
       // from a signal handler.
-      Report("Could not detach from thread %d (errno %d).\n", tid, pterrno);
+      VReport(1, "Could not detach from thread %d (errno %d).\n", tid, pterrno);
     }
   }
 }
@@ -194,7 +188,7 @@ struct TracerThreadArgument {
 static DieCallbackType old_die_callback;
 
 // Signal handler to wake up suspended threads when the tracer thread dies.
-void TracerThreadSignalHandler(int signum, siginfo_t *siginfo, void *) {
+void TracerThreadSignalHandler(int signum, void *siginfo, void *) {
   if (thread_suspender_instance != NULL) {
     if (signum == SIGABRT)
       thread_suspender_instance->KillAllThreads();
@@ -252,17 +246,18 @@ static int TracerThread(void* argument) {
   // the mask we inherited from the caller thread.
   for (uptr signal_index = 0; signal_index < ARRAY_SIZE(kUnblockedSignals);
        signal_index++) {
-    struct sigaction new_sigaction;
+    __sanitizer_sigaction new_sigaction;
     internal_memset(&new_sigaction, 0, sizeof(new_sigaction));
-    new_sigaction.sa_sigaction = TracerThreadSignalHandler;
+    new_sigaction.sigaction = TracerThreadSignalHandler;
     new_sigaction.sa_flags = SA_ONSTACK | SA_SIGINFO;
-    sigfillset(&new_sigaction.sa_mask);
-    sigaction(kUnblockedSignals[signal_index], &new_sigaction, NULL);
+    internal_sigfillset(&new_sigaction.sa_mask);
+    internal_sigaction_norestorer(kUnblockedSignals[signal_index],
+                                  &new_sigaction, NULL);
   }
 
   int exit_code = 0;
   if (!thread_suspender.SuspendAllThreads()) {
-    Report("Failed suspending threads.\n");
+    VReport(1, "Failed suspending threads.\n");
     exit_code = 3;
   } else {
     tracer_thread_argument->callback(thread_suspender.suspended_threads_list(),
@@ -300,44 +295,36 @@ class ScopedStackSpaceWithGuard {
   uptr guard_start_;
 };
 
-NOINLINE static void WipeStack() {
-  char arr[256];
-  internal_memset(arr, 0, sizeof(arr));
-}
-
 // We have a limitation on the stack frame size, so some stuff had to be moved
 // into globals.
-static sigset_t blocked_sigset;
-static sigset_t old_sigset;
-static struct sigaction old_sigactions[ARRAY_SIZE(kUnblockedSignals)];
+static __sanitizer_sigset_t blocked_sigset;
+static __sanitizer_sigset_t old_sigset;
+static __sanitizer_sigaction old_sigactions
+    [ARRAY_SIZE(kUnblockedSignals)];
 
 class StopTheWorldScope {
  public:
   StopTheWorldScope() {
-    // Glibc's sigaction() has a side-effect where it copies garbage stack
-    // values into oldact, which can cause false negatives in LSan. As a quick
-    // workaround we zero some stack space here.
-    WipeStack();
     // Block all signals that can be blocked safely, and install
     // default handlers for the remaining signals.
     // We cannot allow user-defined handlers to run while the ThreadSuspender
     // thread is active, because they could conceivably call some libc functions
     // which modify errno (which is shared between the two threads).
-    sigfillset(&blocked_sigset);
+    internal_sigfillset(&blocked_sigset);
     for (uptr signal_index = 0; signal_index < ARRAY_SIZE(kUnblockedSignals);
          signal_index++) {
       // Remove the signal from the set of blocked signals.
-      sigdelset(&blocked_sigset, kUnblockedSignals[signal_index]);
+      internal_sigdelset(&blocked_sigset, kUnblockedSignals[signal_index]);
       // Install the default handler.
-      struct sigaction new_sigaction;
+      __sanitizer_sigaction new_sigaction;
       internal_memset(&new_sigaction, 0, sizeof(new_sigaction));
-      new_sigaction.sa_handler = SIG_DFL;
-      sigfillset(&new_sigaction.sa_mask);
-      sigaction(kUnblockedSignals[signal_index], &new_sigaction,
-                      &old_sigactions[signal_index]);
+      new_sigaction.handler = SIG_DFL;
+      internal_sigfillset(&new_sigaction.sa_mask);
+      internal_sigaction_norestorer(kUnblockedSignals[signal_index],
+          &new_sigaction, &old_sigactions[signal_index]);
     }
     int sigprocmask_status =
-        sigprocmask(SIG_BLOCK, &blocked_sigset, &old_sigset);
+        internal_sigprocmask(SIG_BLOCK, &blocked_sigset, &old_sigset);
     CHECK_EQ(sigprocmask_status, 0); // sigprocmask should never fail
     // Make this process dumpable. Processes that are not dumpable cannot be
     // attached to.
@@ -355,14 +342,28 @@ class StopTheWorldScope {
     // Restore the signal handlers.
     for (uptr signal_index = 0; signal_index < ARRAY_SIZE(kUnblockedSignals);
          signal_index++) {
-      sigaction(kUnblockedSignals[signal_index],
-                &old_sigactions[signal_index], NULL);
+      internal_sigaction_norestorer(kUnblockedSignals[signal_index],
+                                    &old_sigactions[signal_index], NULL);
     }
-    sigprocmask(SIG_SETMASK, &old_sigset, &old_sigset);
+    internal_sigprocmask(SIG_SETMASK, &old_sigset, &old_sigset);
   }
 
  private:
   int process_was_dumpable_;
+};
+
+// When sanitizer output is being redirected to file (i.e. by using log_path),
+// the tracer should write to the parent's log instead of trying to open a new
+// file. Alert the logging code to the fact that we have a tracer.
+struct ScopedSetTracerPID {
+  explicit ScopedSetTracerPID(uptr tracer_pid) {
+    stoptheworld_tracer_pid = tracer_pid;
+    stoptheworld_tracer_ppid = internal_getpid();
+  }
+  ~ScopedSetTracerPID() {
+    stoptheworld_tracer_pid = 0;
+    stoptheworld_tracer_ppid = 0;
+  }
 };
 
 void StopTheWorld(StopTheWorldCallback callback, void *argument) {
@@ -384,9 +385,10 @@ void StopTheWorld(StopTheWorldCallback callback, void *argument) {
       /* child_tidptr */);
   int local_errno = 0;
   if (internal_iserror(tracer_pid, &local_errno)) {
-    Report("Failed spawning a tracer thread (errno %d).\n", local_errno);
+    VReport(1, "Failed spawning a tracer thread (errno %d).\n", local_errno);
     tracer_thread_argument.mutex.Unlock();
   } else {
+    ScopedSetTracerPID scoped_set_tracer_pid(tracer_pid);
     // On some systems we have to explicitly declare that we want to be traced
     // by the tracer thread.
 #ifdef PR_SET_PTRACER
@@ -400,7 +402,8 @@ void StopTheWorld(StopTheWorldCallback callback, void *argument) {
     // should never return (and set errno) while the tracer thread is alive.
     uptr waitpid_status = internal_waitpid(tracer_pid, NULL, __WALL);
     if (internal_iserror(waitpid_status, &local_errno))
-      Report("Waiting on the tracer thread failed (errno %d).\n", local_errno);
+      VReport(1, "Waiting on the tracer thread failed (errno %d).\n",
+              local_errno);
   }
 }
 
@@ -441,8 +444,8 @@ int SuspendedThreadsList::GetRegistersAndSP(uptr index,
   int pterrno;
   if (internal_iserror(internal_ptrace(PTRACE_GETREGS, tid, NULL, &regs),
                        &pterrno)) {
-    Report("Could not get registers from thread %d (errno %d).\n",
-           tid, pterrno);
+    VReport(1, "Could not get registers from thread %d (errno %d).\n", tid,
+            pterrno);
     return -1;
   }
 

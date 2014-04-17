@@ -34,6 +34,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/resource.h>
@@ -46,32 +47,19 @@
 #include <resolv.h>
 #include <malloc.h>
 
+#ifdef sa_handler
+# undef sa_handler
+#endif
+
+#ifdef sa_sigaction
+# undef sa_sigaction
+#endif
+
 extern "C" struct mallinfo __libc_mallinfo();
 
 namespace __tsan {
 
 const uptr kPageSize = 4096;
-
-#ifndef TSAN_GO
-ScopedInRtl::ScopedInRtl()
-    : thr_(cur_thread()) {
-  in_rtl_ = thr_->in_rtl;
-  thr_->in_rtl++;
-  errno_ = errno;
-}
-
-ScopedInRtl::~ScopedInRtl() {
-  thr_->in_rtl--;
-  errno = errno_;
-  CHECK_EQ(in_rtl_, thr_->in_rtl);
-}
-#else
-ScopedInRtl::ScopedInRtl() {
-}
-
-ScopedInRtl::~ScopedInRtl() {
-}
-#endif
 
 void FillProfileCallback(uptr start, uptr rss, bool file,
                          uptr *mem, uptr stats_size) {
@@ -126,7 +114,6 @@ void FlushShadowMemory() {
 
 #ifndef TSAN_GO
 static void ProtectRange(uptr beg, uptr end) {
-  ScopedInRtl in_rtl;
   CHECK_LE(beg, end);
   if (beg == end)
     return;
@@ -152,17 +139,19 @@ static void MapRodata() {
 #endif
   if (tmpdir == 0)
     return;
-  char filename[256];
-  internal_snprintf(filename, sizeof(filename), "%s/tsan.rodata.%d",
+  char name[256];
+  internal_snprintf(name, sizeof(name), "%s/tsan.rodata.%d",
                     tmpdir, (int)internal_getpid());
-  uptr openrv = internal_open(filename, O_RDWR | O_CREAT | O_EXCL, 0600);
+  uptr openrv = internal_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
   if (internal_iserror(openrv))
     return;
+  internal_unlink(name);  // Unlink it now, so that we can reuse the buffer.
   fd_t fd = openrv;
   // Fill the file with kShadowRodata.
   const uptr kMarkerSize = 512 * 1024 / sizeof(u64);
   InternalScopedBuffer<u64> marker(kMarkerSize);
-  for (u64 *p = marker.data(); p < marker.data() + kMarkerSize; p++)
+  // volatile to prevent insertion of memset
+  for (volatile u64 *p = marker.data(); p < marker.data() + kMarkerSize; p++)
     *p = kShadowRodata;
   internal_write(fd, marker.data(), marker.size());
   // Map the file into memory.
@@ -170,13 +159,12 @@ static void MapRodata() {
                             MAP_PRIVATE | MAP_ANONYMOUS, fd, 0);
   if (internal_iserror(page)) {
     internal_close(fd);
-    internal_unlink(filename);
     return;
   }
   // Map the file into shadow of .rodata sections.
   MemoryMappingLayout proc_maps(/*cache_enabled*/true);
   uptr start, end, offset, prot;
-  char name[128];
+  // Reusing the buffer 'name'.
   while (proc_maps.Next(&start, &end, &offset, name, ARRAY_SIZE(name), &prot)) {
     if (name[0] != 0 && name[0] != '['
         && (prot & MemoryMappingLayout::kProtectionRead)
@@ -193,7 +181,6 @@ static void MapRodata() {
     }
   }
   internal_close(fd);
-  internal_unlink(filename);
 }
 
 void InitializeShadowMemory() {
@@ -307,10 +294,10 @@ const char *InitializePlatform() {
     // we re-exec the program with limited stack size as a best effort.
     if (getlim(RLIMIT_STACK) == (rlim_t)-1) {
       const uptr kMaxStackSize = 32 * 1024 * 1024;
-      Report("WARNING: Program is run with unlimited stack size, which "
-             "wouldn't work with ThreadSanitizer.\n");
-      Report("Re-execing with stack size limited to %zd bytes.\n",
-             kMaxStackSize);
+      VReport(1, "Program is run with unlimited stack size, which wouldn't "
+                 "work with ThreadSanitizer.\n"
+                 "Re-execing with stack size limited to %zd bytes.\n",
+              kMaxStackSize);
       SetStackSizeLimitInBytes(kMaxStackSize);
       reexec = true;
     }
@@ -339,6 +326,9 @@ bool IsGlobalVar(uptr addr) {
 }
 
 #ifndef TSAN_GO
+// Extract file descriptors passed to glibc internal __res_iclose function.
+// This is required to properly "close" the fds, because we do not see internal
+// closes within glibc. The code is a pure hack.
 int ExtractResolvFDs(void *state, int *fds, int nfd) {
   int cnt = 0;
   __res_state *statp = (__res_state*)state;
@@ -347,6 +337,26 @@ int ExtractResolvFDs(void *state, int *fds, int nfd) {
       fds[cnt++] = statp->_u._ext.nssocks[i];
   }
   return cnt;
+}
+
+// Extract file descriptors passed via UNIX domain sockets.
+// This is requried to properly handle "open" of these fds.
+// see 'man recvmsg' and 'man 3 cmsg'.
+int ExtractRecvmsgFDs(void *msgp, int *fds, int nfd) {
+  int res = 0;
+  msghdr *msg = (msghdr*)msgp;
+  struct cmsghdr *cmsg = CMSG_FIRSTHDR(msg);
+  for (; cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+    if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
+      continue;
+    int n = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(fds[0]);
+    for (int i = 0; i < n; i++) {
+      fds[res++] = ((int*)CMSG_DATA(cmsg))[i];
+      if (res == nfd)
+        return res;
+    }
+  }
+  return res;
 }
 #endif
 

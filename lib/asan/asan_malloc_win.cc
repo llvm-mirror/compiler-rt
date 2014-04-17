@@ -19,7 +19,7 @@
 #include "asan_interceptors.h"
 #include "asan_internal.h"
 #include "asan_stack.h"
-#include "interception/interception.h"
+#include "sanitizer_common/sanitizer_interception.h"
 
 #include <stddef.h>
 
@@ -98,9 +98,25 @@ void* _recalloc(void* p, size_t n, size_t elem_size) {
 
 SANITIZER_INTERFACE_ATTRIBUTE
 size_t _msize(void *ptr) {
-  GET_STACK_TRACE_MALLOC;
-  return asan_malloc_usable_size(ptr, &stack);
+  GET_CURRENT_PC_BP_SP;
+  (void)sp;
+  return asan_malloc_usable_size(ptr, pc, bp);
 }
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void *_expand(void *memblock, size_t size) {
+  // _expand is used in realloc-like functions to resize the buffer if possible.
+  // We don't want memory to stand still while resizing buffers, so return 0.
+  return 0;
+}
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void *_expand_dbg(void *memblock, size_t size) {
+  return 0;
+}
+
+// TODO(timurrrr): Might want to add support for _aligned_* allocation
+// functions to detect a bit more bugs.  Those functions seem to wrap malloc().
 
 int _CrtDbgReport(int, const char*, int,
                   const char*, const char*, ...) {

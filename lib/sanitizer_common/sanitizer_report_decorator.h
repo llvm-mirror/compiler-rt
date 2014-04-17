@@ -17,6 +17,8 @@
 #ifndef SANITIZER_REPORT_DECORATOR_H
 #define SANITIZER_REPORT_DECORATOR_H
 
+#include "sanitizer_common.h"
+
 namespace __sanitizer {
 class AnsiColorDecorator {
   // FIXME: This is not portable. It assumes the special strings are printed to
@@ -36,6 +38,15 @@ class AnsiColorDecorator {
  private:
   bool ansi_;
 };
+
+class SanitizerCommonDecorator: protected AnsiColorDecorator {
+ public:
+  SanitizerCommonDecorator()
+      : __sanitizer::AnsiColorDecorator(ColorizeReports()) { }
+  const char *Warning()    { return Red(); }
+  const char *EndWarning() { return Default(); }
+};
+
 }  // namespace __sanitizer
 
 #endif  // SANITIZER_REPORT_DECORATOR_H

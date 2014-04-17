@@ -15,8 +15,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_common/sanitizer_platform.h"
-#if SANITIZER_LINUX
+#if SANITIZER_FREEBSD || SANITIZER_LINUX
 
+#include "sanitizer_common/sanitizer_tls_get_addr.h"
 #include "asan_allocator.h"
 #include "asan_interceptors.h"
 #include "asan_internal.h"
@@ -101,12 +102,17 @@ INTERCEPTOR(void*, memalign, uptr boundary, uptr size) {
   return asan_memalign(boundary, size, &stack, FROM_MALLOC);
 }
 
-INTERCEPTOR(void*, __libc_memalign, uptr align, uptr s)
-  ALIAS("memalign");
+INTERCEPTOR(void*, __libc_memalign, uptr boundary, uptr size) {
+  GET_STACK_TRACE_MALLOC;
+  void *res = asan_memalign(boundary, size, &stack, FROM_MALLOC);
+  DTLS_on_libc_memalign(res, size * boundary);
+  return res;
+}
 
 INTERCEPTOR(uptr, malloc_usable_size, void *ptr) {
-  GET_STACK_TRACE_MALLOC;
-  return asan_malloc_usable_size(ptr, &stack);
+  GET_CURRENT_PC_BP_SP;
+  (void)sp;
+  return asan_malloc_usable_size(ptr, pc, bp);
 }
 
 // We avoid including malloc.h for portability reasons.
@@ -147,4 +153,4 @@ INTERCEPTOR(void, malloc_stats, void) {
   __asan_print_accumulated_stats();
 }
 
-#endif  // SANITIZER_LINUX
+#endif  // SANITIZER_FREEBSD || SANITIZER_LINUX

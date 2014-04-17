@@ -2,19 +2,15 @@
 
 include_directories(..)
 
+set(TSAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 # SANITIZER_COMMON_CFLAGS contains -fPIC, but it's performance-critical for
 # TSan runtime to be built with -fPIE to reduce the number of register spills.
-set(TSAN_CFLAGS
-  ${SANITIZER_COMMON_CFLAGS}
-  -fPIE
-  -fno-rtti)
+append_if(COMPILER_RT_HAS_FPIE_FLAG -fPIE TSAN_CFLAGS)
+append_no_rtti_flag(TSAN_CFLAGS)
 
-set(TSAN_RTL_CFLAGS
-  ${TSAN_CFLAGS}
-  -Wframe-larger-than=512)
-if(SUPPORTS_GLOBAL_CONSTRUCTORS_FLAG)
-  list(APPEND TSAN_RTL_CFLAGS -Wglobal-constructors)
-endif()
+set(TSAN_RTL_CFLAGS ${TSAN_CFLAGS})
+append_if(COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG -Wframe-larger-than=512 TSAN_RTL_CFLAGS)
+append_if(COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG -Wglobal-constructors TSAN_RTL_CFLAGS)
 # FIXME: Add support for --sysroot=. compile flag:
 
 if("${CMAKE_BUILD_TYPE}" EQUAL "Release")
@@ -27,6 +23,7 @@ set(TSAN_SOURCES
   rtl/tsan_clock.cc
   rtl/tsan_flags.cc
   rtl/tsan_fd.cc
+  rtl/tsan_ignoreset.cc
   rtl/tsan_interceptors.cc
   rtl/tsan_interface_ann.cc
   rtl/tsan_interface_atomic.cc
@@ -51,11 +48,34 @@ if(APPLE)
 elseif(UNIX)
   # Assume Linux
   list(APPEND TSAN_SOURCES
-    rtl/tsan_platform_linux.cc
-    rtl/tsan_symbolize_addr2line_linux.cc)
+    rtl/tsan_platform_linux.cc)
 endif()
 
-set(TSAN_RUNTIME_LIBRARIES)
+set(TSAN_HEADERS
+  rtl/tsan_clock.h
+  rtl/tsan_defs.h
+  rtl/tsan_fd.h
+  rtl/tsan_flags.h
+  rtl/tsan_ignoreset.h
+  rtl/tsan_interface_ann.h
+  rtl/tsan_interface.h
+  rtl/tsan_interface_inl.h
+  rtl/tsan_interface_java.h
+  rtl/tsan_mman.h
+  rtl/tsan_mutex.h
+  rtl/tsan_mutexset.h
+  rtl/tsan_platform.h
+  rtl/tsan_report.h
+  rtl/tsan_rtl.h
+  rtl/tsan_stat.h
+  rtl/tsan_suppressions.h
+  rtl/tsan_symbolize.h
+  rtl/tsan_sync.h
+  rtl/tsan_trace.h
+  rtl/tsan_update_shadow_word_inl.h
+  rtl/tsan_vector.h)
+
+add_custom_target(tsan)
 # TSan is currently supported on 64-bit Linux only.
 if(CAN_TARGET_x86_64 AND UNIX AND NOT APPLE)
   set(TSAN_ASM_SOURCES rtl/tsan_rtl_amd64.S)
@@ -63,7 +83,7 @@ if(CAN_TARGET_x86_64 AND UNIX AND NOT APPLE)
   set_source_files_properties(${TSAN_ASM_SOURCES} PROPERTIES
     LANGUAGE C)
   set(arch "x86_64")
-  add_compiler_rt_static_runtime(clang_rt.tsan-${arch} ${arch}
+  add_compiler_rt_runtime(clang_rt.tsan-${arch} ${arch} STATIC
     SOURCES ${TSAN_SOURCES} ${TSAN_ASM_SOURCES}
             $<TARGET_OBJECTS:RTInterception.${arch}>
             $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
@@ -71,11 +91,12 @@ if(CAN_TARGET_x86_64 AND UNIX AND NOT APPLE)
     CFLAGS ${TSAN_RTL_CFLAGS}
     DEFS ${TSAN_COMMON_DEFINITIONS})
   add_sanitizer_rt_symbols(clang_rt.tsan-${arch} rtl/tsan.syms.extra)
-  list(APPEND TSAN_RUNTIME_LIBRARIES clang_rt.tsan-${arch}
+  add_dependencies(tsan clang_rt.tsan-${arch}
     clang_rt.tsan-${arch}-symbols)
 endif()
 
-if(LLVM_INCLUDE_TESTS)
+add_dependencies(compiler-rt tsan)
+
+if(COMPILER_RT_INCLUDE_TESTS)
   add_subdirectory(tests)
 endif()
-add_subdirectory(lit_tests)

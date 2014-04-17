@@ -32,10 +32,13 @@ void DescribeAddress(uptr addr, uptr access_size);
 void DescribeThread(AsanThreadContext *context);
 
 // Different kinds of error reports.
-void NORETURN ReportSIGSEGV(uptr pc, uptr sp, uptr bp, uptr addr);
-void NORETURN ReportDoubleFree(uptr addr, StackTrace *stack);
-void NORETURN ReportFreeNotMalloced(uptr addr, StackTrace *stack);
-void NORETURN ReportAllocTypeMismatch(uptr addr, StackTrace *stack,
+void NORETURN
+    ReportStackOverflow(uptr pc, uptr sp, uptr bp, void *context, uptr addr);
+void NORETURN
+    ReportSIGSEGV(uptr pc, uptr sp, uptr bp, void *context, uptr addr);
+void NORETURN ReportDoubleFree(uptr addr, StackTrace *free_stack);
+void NORETURN ReportFreeNotMalloced(uptr addr, StackTrace *free_stack);
+void NORETURN ReportAllocTypeMismatch(uptr addr, StackTrace *free_stack,
                                       AllocType alloc_type,
                                       AllocType dealloc_type);
 void NORETURN ReportMallocUsableSizeNotOwned(uptr addr,
@@ -45,6 +48,9 @@ void NORETURN ReportAsanGetAllocatedSizeNotOwned(uptr addr,
 void NORETURN ReportStringFunctionMemoryRangesOverlap(
     const char *function, const char *offset1, uptr length1,
     const char *offset2, uptr length2, StackTrace *stack);
+void NORETURN
+ReportBadParamsToAnnotateContiguousContainer(uptr beg, uptr end, uptr old_mid,
+                                             uptr new_mid, StackTrace *stack);
 
 // Mac-specific errors and warnings.
 void WarnMacFreeUnallocated(

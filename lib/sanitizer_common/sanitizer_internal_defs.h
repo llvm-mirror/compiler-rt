@@ -34,6 +34,11 @@
 # define SANITIZER_SUPPORTS_WEAK_HOOKS 0
 #endif
 
+// If set, the tool will install its own SEGV signal handler.
+#ifndef SANITIZER_NEEDS_SEGV
+# define SANITIZER_NEEDS_SEGV 1
+#endif
+
 // GCC does not understand __has_feature
 #if !defined(__has_feature)
 # define __has_feature(x) 0
@@ -52,13 +57,6 @@ typedef signed   long long sptr;  // NOLINT
 typedef unsigned long uptr;  // NOLINT
 typedef signed   long sptr;  // NOLINT
 #endif  // defined(_WIN64)
-#if defined(__x86_64__)
-// Since x32 uses ILP32 data model in 64-bit hardware mode,  we must use
-// 64-bit pointer to unwind stack frame.
-typedef unsigned long long uhwptr;  // NOLINT
-#else
-typedef uptr uhwptr;   // NOLINT
-#endif
 typedef unsigned char u8;
 typedef unsigned short u16;  // NOLINT
 typedef unsigned int u32;
@@ -79,17 +77,19 @@ typedef u64 OFF_T;
 typedef uptr OFF_T;
 #endif
 typedef u64  OFF64_T;
+
+#if (SANITIZER_WORDSIZE == 64) || SANITIZER_MAC
+typedef uptr operator_new_size_type;
+#else
+typedef u32 operator_new_size_type;
+#endif
 }  // namespace __sanitizer
 
 extern "C" {
   // Tell the tools to write their reports to "path.<pid>" instead of stderr.
+  // The special values are "stdout" and "stderr".
   SANITIZER_INTERFACE_ATTRIBUTE
   void __sanitizer_set_report_path(const char *path);
-
-  // Tell the tools to write their reports to given file descriptor instead of
-  // stderr.
-  SANITIZER_INTERFACE_ATTRIBUTE
-  void __sanitizer_set_report_fd(int fd);
 
   // Notify the tools that the sandbox is going to be turned on. The reserved
   // parameter will be used in the future to hold a structure with functions
@@ -102,6 +102,14 @@ extern "C" {
   // the error message. This function can be overridden by the client.
   SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
   void __sanitizer_report_error_summary(const char *error_summary);
+
+  SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov_dump();
+  SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov();
+  SANITIZER_INTERFACE_ATTRIBUTE
+  void __sanitizer_annotate_contiguous_container(const void *beg,
+                                                 const void *end,
+                                                 const void *old_mid,
+                                                 const void *new_mid);
 }  // extern "C"
 
 
@@ -170,12 +178,6 @@ typedef void* thread_return_t;
 # define THREAD_CALLING_CONV
 #endif  // _WIN32
 typedef thread_return_t (THREAD_CALLING_CONV *thread_callback_t)(void* arg);
-
-#if __LP64__ || defined(_WIN64)
-#  define SANITIZER_WORDSIZE 64
-#else
-#  define SANITIZER_WORDSIZE 32
-#endif
 
 // NOTE: Functions below must be defined in each run-time.
 namespace __sanitizer {

@@ -25,8 +25,16 @@
 //   COMMON_SYSCALL_POST_WRITE_RANGE
 //          Called in posthook for regions that were written to by the kernel
 //          and are now initialized.
+//   COMMON_SYSCALL_ACQUIRE(addr)
+//          Acquire memory visibility from addr.
+//   COMMON_SYSCALL_RELEASE(addr)
+//          Release memory visibility to addr.
 //   COMMON_SYSCALL_FD_CLOSE(fd)
 //          Called before closing file descriptor fd.
+//   COMMON_SYSCALL_FD_ACQUIRE(fd)
+//          Acquire memory visibility from fd.
+//   COMMON_SYSCALL_FD_RELEASE(fd)
+//          Release memory visibility to fd.
 //   COMMON_SYSCALL_PRE_FORK()
 //          Called before fork syscall.
 //   COMMON_SYSCALL_POST_FORK(long res)
@@ -48,16 +56,32 @@
 #define POST_READ(p, s) COMMON_SYSCALL_POST_READ_RANGE(p, s)
 #define POST_WRITE(p, s) COMMON_SYSCALL_POST_WRITE_RANGE(p, s)
 
+#ifndef COMMON_SYSCALL_ACQUIRE
+# define COMMON_SYSCALL_ACQUIRE(addr) ((void)(addr))
+#endif
+
+#ifndef COMMON_SYSCALL_RELEASE
+# define COMMON_SYSCALL_RELEASE(addr) ((void)(addr))
+#endif
+
 #ifndef COMMON_SYSCALL_FD_CLOSE
-# define COMMON_SYSCALL_FD_CLOSE(fd)
+# define COMMON_SYSCALL_FD_CLOSE(fd) ((void)(fd))
+#endif
+
+#ifndef COMMON_SYSCALL_FD_ACQUIRE
+# define COMMON_SYSCALL_FD_ACQUIRE(fd) ((void)(fd))
+#endif
+
+#ifndef COMMON_SYSCALL_FD_RELEASE
+# define COMMON_SYSCALL_FD_RELEASE(fd) ((void)(fd))
 #endif
 
 #ifndef COMMON_SYSCALL_PRE_FORK
-# define COMMON_SYSCALL_PRE_FORK()
+# define COMMON_SYSCALL_PRE_FORK() {}
 #endif
 
 #ifndef COMMON_SYSCALL_POST_FORK
-# define COMMON_SYSCALL_POST_FORK(res)
+# define COMMON_SYSCALL_POST_FORK(res) {}
 #endif
 
 // FIXME: do some kind of PRE_READ for all syscall arguments (int(s) and such).
@@ -210,6 +234,7 @@ POST_SYSCALL(settimeofday)(long res, void *tv, void *tz) {
   }
 }
 
+#if !SANITIZER_ANDROID
 PRE_SYSCALL(adjtimex)(void *txc_p) {}
 
 POST_SYSCALL(adjtimex)(long res, void *txc_p) {
@@ -217,6 +242,7 @@ POST_SYSCALL(adjtimex)(long res, void *txc_p) {
     if (txc_p) POST_WRITE(txc_p, struct_timex_sz);
   }
 }
+#endif
 
 PRE_SYSCALL(times)(void *tbuf) {}
 
@@ -362,24 +388,21 @@ PRE_SYSCALL(acct)(const void *name) {
 
 POST_SYSCALL(acct)(long res, const void *name) {}
 
-PRE_SYSCALL(capget)(void *header, void *dataptr) {}
+PRE_SYSCALL(capget)(void *header, void *dataptr) {
+  if (header) PRE_READ(header, __user_cap_header_struct_sz);
+}
 
 POST_SYSCALL(capget)(long res, void *header, void *dataptr) {
-  if (res >= 0) {
-    if (header) POST_WRITE(header, __user_cap_header_struct_sz);
+  if (res >= 0)
     if (dataptr) POST_WRITE(dataptr, __user_cap_data_struct_sz);
-  }
 }
 
 PRE_SYSCALL(capset)(void *header, const void *data) {
+  if (header) PRE_READ(header, __user_cap_header_struct_sz);
   if (data) PRE_READ(data, __user_cap_data_struct_sz);
 }
 
-POST_SYSCALL(capset)(long res, void *header, const void *data) {
-  if (res >= 0) {
-    if (header) POST_WRITE(header, __user_cap_header_struct_sz);
-  }
-}
+POST_SYSCALL(capset)(long res, void *header, const void *data) {}
 
 PRE_SYSCALL(personality)(long personality) {}
 
@@ -472,6 +495,7 @@ POST_SYSCALL(clock_gettime)(long res, long which_clock, void *tp) {
   }
 }
 
+#if !SANITIZER_ANDROID
 PRE_SYSCALL(clock_adjtime)(long which_clock, void *tx) {}
 
 POST_SYSCALL(clock_adjtime)(long res, long which_clock, void *tx) {
@@ -479,6 +503,7 @@ POST_SYSCALL(clock_adjtime)(long res, long which_clock, void *tx) {
     if (tx) POST_WRITE(tx, struct_timex_sz);
   }
 }
+#endif
 
 PRE_SYSCALL(clock_getres)(long which_clock, void *tp) {}
 
@@ -896,6 +921,7 @@ POST_SYSCALL(newfstat)(long res, long fd, void *statbuf) {
   }
 }
 
+#if !SANITIZER_ANDROID
 PRE_SYSCALL(ustat)(long dev, void *ubuf) {}
 
 POST_SYSCALL(ustat)(long res, long dev, void *ubuf) {
@@ -903,6 +929,7 @@ POST_SYSCALL(ustat)(long res, long dev, void *ubuf) {
     if (ubuf) POST_WRITE(ubuf, struct_ustat_sz);
   }
 }
+#endif  // !SANITIZER_ANDROID
 
 PRE_SYSCALL(stat64)(const void *filename, void *statbuf) {
   if (filename)
@@ -980,8 +1007,8 @@ PRE_SYSCALL(getxattr)(const void *path, const void *name, void *value,
 
 POST_SYSCALL(getxattr)(long res, const void *path, const void *name,
                        void *value, long size) {
-  if (res >= 0) {
-    if (value) POST_WRITE(value, size);
+  if (size && res > 0) {
+    if (value) POST_WRITE(value, res);
   }
 }
 
@@ -995,8 +1022,8 @@ PRE_SYSCALL(lgetxattr)(const void *path, const void *name, void *value,
 
 POST_SYSCALL(lgetxattr)(long res, const void *path, const void *name,
                         void *value, long size) {
-  if (res >= 0) {
-    if (value) POST_WRITE(value, size);
+  if (size && res > 0) {
+    if (value) POST_WRITE(value, res);
   }
 }
 
@@ -1007,8 +1034,8 @@ PRE_SYSCALL(fgetxattr)(long fd, const void *name, void *value, long size) {
 
 POST_SYSCALL(fgetxattr)(long res, long fd, const void *name, void *value,
                         long size) {
-  if (res >= 0) {
-    if (value) POST_WRITE(value, size);
+  if (size && res > 0) {
+    if (value) POST_WRITE(value, res);
   }
 }
 
@@ -1018,8 +1045,8 @@ PRE_SYSCALL(listxattr)(const void *path, void *list, long size) {
 }
 
 POST_SYSCALL(listxattr)(long res, const void *path, void *list, long size) {
-  if (res >= 0) {
-    if (list) POST_WRITE(list, size);
+  if (size && res > 0) {
+    if (list) POST_WRITE(list, res);
   }
 }
 
@@ -1029,16 +1056,16 @@ PRE_SYSCALL(llistxattr)(const void *path, void *list, long size) {
 }
 
 POST_SYSCALL(llistxattr)(long res, const void *path, void *list, long size) {
-  if (res >= 0) {
-    if (list) POST_WRITE(list, size);
+  if (size && res > 0) {
+    if (list) POST_WRITE(list, res);
   }
 }
 
 PRE_SYSCALL(flistxattr)(long fd, void *list, long size) {}
 
 POST_SYSCALL(flistxattr)(long res, long fd, void *list, long size) {
-  if (res >= 0) {
-    if (list) POST_WRITE(list, size);
+  if (size && res > 0) {
+    if (list) POST_WRITE(list, res);
   }
 }
 
@@ -1245,11 +1272,17 @@ PRE_SYSCALL(flock)(long fd, long cmd) {}
 
 POST_SYSCALL(flock)(long res, long fd, long cmd) {}
 
-PRE_SYSCALL(io_setup)(long nr_reqs, void *ctx) {}
+PRE_SYSCALL(io_setup)(long nr_reqs, void **ctx) {
+  if (ctx) PRE_WRITE(ctx, sizeof(*ctx));
+}
 
-POST_SYSCALL(io_setup)(long res, long nr_reqs, void *ctx) {
+POST_SYSCALL(io_setup)(long res, long nr_reqs, void **ctx) {
   if (res >= 0) {
-    if (ctx) POST_WRITE(ctx, sizeof(long));
+    if (ctx) POST_WRITE(ctx, sizeof(*ctx));
+    // (*ctx) is actually a pointer to a kernel mapped page, and there are
+    // people out there who are crazy enough to peek into that page's 32-byte
+    // header.
+    if (*ctx) POST_WRITE(*ctx, 32);
   }
 }
 
@@ -1257,29 +1290,70 @@ PRE_SYSCALL(io_destroy)(long ctx) {}
 
 POST_SYSCALL(io_destroy)(long res, long ctx) {}
 
-PRE_SYSCALL(io_getevents)(long ctx_id, long min_nr, long nr, void *events,
-                          void *timeout) {
+PRE_SYSCALL(io_getevents)(long ctx_id, long min_nr, long nr,
+                          __sanitizer_io_event *ioevpp, void *timeout) {
   if (timeout) PRE_READ(timeout, struct_timespec_sz);
 }
 
 POST_SYSCALL(io_getevents)(long res, long ctx_id, long min_nr, long nr,
-                           void *events, void *timeout) {
+                           __sanitizer_io_event *ioevpp, void *timeout) {
   if (res >= 0) {
-    if (events) POST_WRITE(events, res * struct_io_event_sz);
+    if (ioevpp) POST_WRITE(ioevpp, res * sizeof(*ioevpp));
     if (timeout) POST_WRITE(timeout, struct_timespec_sz);
+  }
+  for (long i = 0; i < res; i++) {
+    // We synchronize io_submit -> io_getevents/io_cancel using the
+    // user-provided data context. Data is not necessary a pointer, it can be
+    // an int, 0 or whatever; acquire/release will correctly handle this.
+    // This scheme can lead to false negatives, e.g. when all operations
+    // synchronize on 0. But there does not seem to be a better solution
+    // (except wrapping all operations in own context, which is unreliable).
+    // We can not reliably extract fildes in io_getevents.
+    COMMON_SYSCALL_ACQUIRE((void*)ioevpp[i].data);
   }
 }
 
-PRE_SYSCALL(io_submit)(long, long arg1, void *arg2) {}
+PRE_SYSCALL(io_submit)(long ctx_id, long nr, __sanitizer_iocb **iocbpp) {
+  for (long i = 0; i < nr; ++i) {
+    uptr op = iocbpp[i]->aio_lio_opcode;
+    void *data = (void*)iocbpp[i]->aio_data;
+    void *buf = (void*)iocbpp[i]->aio_buf;
+    uptr len = (uptr)iocbpp[i]->aio_nbytes;
+    if (op == iocb_cmd_pwrite && buf && len) {
+      PRE_READ(buf, len);
+    } else if (op == iocb_cmd_pread && buf && len) {
+      POST_WRITE(buf, len);
+    } else if (op == iocb_cmd_pwritev) {
+      __sanitizer_iovec *iovec = (__sanitizer_iovec*)iocbpp[i]->aio_buf;
+      for (uptr v = 0; v < len; v++)
+        PRE_READ(iovec[i].iov_base, iovec[i].iov_len);
+    } else if (op == iocb_cmd_preadv) {
+      __sanitizer_iovec *iovec = (__sanitizer_iovec*)iocbpp[i]->aio_buf;
+      for (uptr v = 0; v < len; v++)
+        POST_WRITE(iovec[i].iov_base, iovec[i].iov_len);
+    }
+    // See comment in io_getevents.
+    COMMON_SYSCALL_RELEASE(data);
+  }
+}
 
-POST_SYSCALL(io_submit)(long res, long, long arg1, void *arg2) {}
+POST_SYSCALL(io_submit)(long res, long ctx_id, long nr,
+    __sanitizer_iocb **iocbpp) {}
 
-PRE_SYSCALL(io_cancel)(long ctx_id, void *iocb, void *result) {}
+PRE_SYSCALL(io_cancel)(long ctx_id, __sanitizer_iocb *iocb,
+    __sanitizer_io_event *result) {
+}
 
-POST_SYSCALL(io_cancel)(long res, long ctx_id, void *iocb, void *result) {
-  if (res >= 0) {
-    if (iocb) POST_WRITE(iocb, struct_iocb_sz);
-    if (result) POST_WRITE(result, struct_io_event_sz);
+POST_SYSCALL(io_cancel)(long res, long ctx_id, __sanitizer_iocb *iocb,
+    __sanitizer_io_event *result) {
+  if (res == 0) {
+    if (result) {
+      // See comment in io_getevents.
+      COMMON_SYSCALL_ACQUIRE((void*)result->data);
+      POST_WRITE(result, sizeof(*result));
+    }
+    if (iocb)
+      POST_WRITE(iocb, sizeof(*iocb));
   }
 }
 
@@ -2011,6 +2085,7 @@ POST_SYSCALL(msgrcv)(long res, long msqid, void *msgp, long msgsz, long msgtyp,
   }
 }
 
+#if !SANITIZER_ANDROID
 PRE_SYSCALL(msgctl)(long msqid, long cmd, void *buf) {}
 
 POST_SYSCALL(msgctl)(long res, long msqid, long cmd, void *buf) {
@@ -2018,6 +2093,7 @@ POST_SYSCALL(msgctl)(long res, long msqid, long cmd, void *buf) {
     if (buf) POST_WRITE(buf, struct_msqid_ds_sz);
   }
 }
+#endif
 
 PRE_SYSCALL(semget)(long key, long nsems, long semflg) {}
 
@@ -2063,14 +2139,6 @@ POST_SYSCALL(shmdt)(long res, void *shmaddr) {
   }
 }
 
-PRE_SYSCALL(shmctl)(long shmid, long cmd, void *buf) {}
-
-POST_SYSCALL(shmctl)(long res, long shmid, long cmd, void *buf) {
-  if (res >= 0) {
-    if (buf) POST_WRITE(buf, struct_shmid_ds_sz);
-  }
-}
-
 PRE_SYSCALL(ipc)(long call, long first, long second, long third, void *ptr,
                  long fifth) {}
 
@@ -2078,6 +2146,14 @@ POST_SYSCALL(ipc)(long res, long call, long first, long second, long third,
                   void *ptr, long fifth) {}
 
 #if !SANITIZER_ANDROID
+PRE_SYSCALL(shmctl)(long shmid, long cmd, void *buf) {}
+
+POST_SYSCALL(shmctl)(long res, long shmid, long cmd, void *buf) {
+  if (res >= 0) {
+    if (buf) POST_WRITE(buf, sizeof(__sanitizer_shmid_ds));
+  }
+}
+
 PRE_SYSCALL(mq_open)(const void *name, long oflag, long mode, void *attr) {
   if (name)
     PRE_READ(name, __sanitizer::internal_strlen((const char *)name) + 1);
@@ -2218,9 +2294,49 @@ PRE_SYSCALL(ni_syscall)() {}
 
 POST_SYSCALL(ni_syscall)(long res) {}
 
-PRE_SYSCALL(ptrace)(long request, long pid, long addr, long data) {}
+PRE_SYSCALL(ptrace)(long request, long pid, long addr, long data) {
+#if defined(__i386) || defined (__x86_64)
+  if (data) {
+    if (request == ptrace_setregs) {
+      PRE_READ((void *)data, struct_user_regs_struct_sz);
+    } else if (request == ptrace_setfpregs) {
+      PRE_READ((void *)data, struct_user_fpregs_struct_sz);
+    } else if (request == ptrace_setfpxregs) {
+      PRE_READ((void *)data, struct_user_fpxregs_struct_sz);
+    } else if (request == ptrace_setsiginfo) {
+      PRE_READ((void *)data, siginfo_t_sz);
+    } else if (request == ptrace_setregset) {
+      __sanitizer_iovec *iov = (__sanitizer_iovec *)data;
+      PRE_READ(iov->iov_base, iov->iov_len);
+    }
+  }
+#endif
+}
 
-POST_SYSCALL(ptrace)(long res, long request, long pid, long addr, long data) {}
+POST_SYSCALL(ptrace)(long res, long request, long pid, long addr, long data) {
+#if defined(__i386) || defined (__x86_64)
+  if (res >= 0 && data) {
+    // Note that this is different from the interceptor in
+    // sanitizer_common_interceptors.inc.
+    // PEEK* requests return resulting values through data pointer.
+    if (request == ptrace_getregs) {
+      POST_WRITE((void *)data, struct_user_regs_struct_sz);
+    } else if (request == ptrace_getfpregs) {
+      POST_WRITE((void *)data, struct_user_fpregs_struct_sz);
+    } else if (request == ptrace_getfpxregs) {
+      POST_WRITE((void *)data, struct_user_fpxregs_struct_sz);
+    } else if (request == ptrace_getsiginfo) {
+      POST_WRITE((void *)data, siginfo_t_sz);
+    } else if (request == ptrace_getregset) {
+      __sanitizer_iovec *iov = (__sanitizer_iovec *)data;
+      POST_WRITE(iov->iov_base, iov->iov_len);
+    } else if (request == ptrace_peekdata || request == ptrace_peektext ||
+               request == ptrace_peekuser) {
+      POST_WRITE((void *)data, sizeof(void *));
+    }
+  }
+#endif
+}
 
 PRE_SYSCALL(add_key)(const void *_type, const void *_description,
                      const void *_payload, long plen, long destringid) {
@@ -2648,15 +2764,13 @@ PRE_SYSCALL(syncfs)(long fd) {}
 
 POST_SYSCALL(syncfs)(long res, long fd) {}
 
-PRE_SYSCALL(perf_event_open)(void *attr_uptr, long pid, long cpu, long group_fd,
-                             long flags) {}
-
-POST_SYSCALL(perf_event_open)(long res, void *attr_uptr, long pid, long cpu,
-                              long group_fd, long flags) {
-  if (res >= 0) {
-    if (attr_uptr) POST_WRITE(attr_uptr, struct_perf_event_attr_sz);
-  }
+PRE_SYSCALL(perf_event_open)(__sanitizer_perf_event_attr *attr_uptr, long pid,
+                             long cpu, long group_fd, long flags) {
+  if (attr_uptr) PRE_READ(attr_uptr, attr_uptr->size);
 }
+
+POST_SYSCALL(perf_event_open)(long res, __sanitizer_perf_event_attr *attr_uptr,
+                              long pid, long cpu, long group_fd, long flags) {}
 
 PRE_SYSCALL(mmap_pgoff)(long addr, long len, long prot, long flags, long fd,
                         long pgoff) {}

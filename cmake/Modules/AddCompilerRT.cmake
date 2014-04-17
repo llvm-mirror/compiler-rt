@@ -21,50 +21,57 @@ macro(add_compiler_rt_object_library name arch)
   endif()
 endmacro()
 
-# Same as above, but adds universal osx library with name "<name>.osx"
-# targeting multiple architectures.
-# add_compiler_rt_osx_object_library(<name> ARCH <architectures>
-#                                           SOURCES <source files>
-#                                           CFLAGS <compile flags>)
-#                                           DEFS <compile definitions>)
-macro(add_compiler_rt_osx_object_library name)
+# Same as above, but adds universal osx library for either OSX or iOS simulator
+# with name "<name>.<os>" targeting multiple architectures.
+# add_compiler_rt_darwin_object_library(<name> <os> ARCH <architectures>
+#                                                   SOURCES <source files>
+#                                                   CFLAGS <compile flags>
+#                                                   DEFS <compile definitions>)
+macro(add_compiler_rt_darwin_object_library name os)
   parse_arguments(LIB "ARCH;SOURCES;CFLAGS;DEFS" "" ${ARGN})
-  set(libname "${name}.osx")
+  set(libname "${name}.${os}")
   add_library(${libname} OBJECT ${LIB_SOURCES})
-  set_target_compile_flags(${libname} ${LIB_CFLAGS})
+  set_target_compile_flags(${libname} ${LIB_CFLAGS} ${DARWIN_${os}_CFLAGS})
   set_target_properties(${libname} PROPERTIES OSX_ARCHITECTURES "${LIB_ARCH}")
   set_property(TARGET ${libname} APPEND PROPERTY
     COMPILE_DEFINITIONS ${LIB_DEFS})
 endmacro()
 
-# Adds static runtime for a given architecture and puts it in the proper
-# directory in the build and install trees.
-# add_compiler_rt_static_runtime(<name> <arch>
-#                                SOURCES <source files>
-#                                CFLAGS <compile flags>
-#                                DEFS <compile definitions>)
-macro(add_compiler_rt_static_runtime name arch)
+# Adds static or shared runtime for a given architecture and puts it in the
+# proper directory in the build and install trees.
+# add_compiler_rt_runtime(<name> <arch> {STATIC,SHARED}
+#                         SOURCES <source files>
+#                         CFLAGS <compile flags>
+#                         DEFS <compile definitions>)
+macro(add_compiler_rt_runtime name arch type)
   if(CAN_TARGET_${arch})
-    parse_arguments(LIB "SOURCES;CFLAGS;DEFS" "" ${ARGN})
-    add_library(${name} STATIC ${LIB_SOURCES})
+    parse_arguments(LIB "SOURCES;CFLAGS;DEFS;OUTPUT_NAME" "" ${ARGN})
+    add_library(${name} ${type} ${LIB_SOURCES})
     # Setup compile flags and definitions.
     set_target_compile_flags(${name}
+      ${TARGET_${arch}_CFLAGS} ${LIB_CFLAGS})
+    set_target_link_flags(${name}
       ${TARGET_${arch}_CFLAGS} ${LIB_CFLAGS})
     set_property(TARGET ${name} APPEND PROPERTY
       COMPILE_DEFINITIONS ${LIB_DEFS})
     # Setup correct output directory in the build tree.
     set_target_properties(${name} PROPERTIES
-      ARCHIVE_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
+      ARCHIVE_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR}
+      LIBRARY_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
+    if (LIB_OUTPUT_NAME)
+      set_target_properties(${name} PROPERTIES
+        OUTPUT_NAME ${LIB_OUTPUT_NAME})
+    endif()
     # Add installation command.
     install(TARGETS ${name}
-      ARCHIVE DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
-    add_dependencies(compiler-rt ${name})
+      ARCHIVE DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR}
+      LIBRARY DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
   else()
     message(FATAL_ERROR "Archtecture ${arch} can't be targeted")
   endif()
 endmacro()
 
-# Same as add_compiler_rt_static_runtime, but creates a universal library
+# Same as add_compiler_rt_runtime(... STATIC), but creates a universal library
 # for several architectures.
 # add_compiler_rt_osx_static_runtime(<name> ARCH <architectures>
 #                                    SOURCES <source files>
@@ -81,20 +88,21 @@ macro(add_compiler_rt_osx_static_runtime name)
     ARCHIVE_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
   install(TARGETS ${name}
     ARCHIVE DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
-  add_dependencies(compiler-rt ${name})
 endmacro()
 
-# Adds dynamic runtime library on osx, which supports multiple architectures.
-# add_compiler_rt_osx_dynamic_runtime(<name> ARCH <architectures>
-#                                     SOURCES <source files>
-#                                     CFLAGS <compile flags>
-#                                     DEFS <compile definitions>
-#                                     LINKFLAGS <link flags>)
-macro(add_compiler_rt_osx_dynamic_runtime name)
+# Adds dynamic runtime library on osx/iossim, which supports multiple
+# architectures.
+# add_compiler_rt_darwin_dynamic_runtime(<name> <os>
+#                                        ARCH <architectures>
+#                                        SOURCES <source files>
+#                                        CFLAGS <compile flags>
+#                                        DEFS <compile definitions>
+#                                        LINKFLAGS <link flags>)
+macro(add_compiler_rt_darwin_dynamic_runtime name os)
   parse_arguments(LIB "ARCH;SOURCES;CFLAGS;DEFS;LINKFLAGS" "" ${ARGN})
   add_library(${name} SHARED ${LIB_SOURCES})
-  set_target_compile_flags(${name} ${LIB_CFLAGS})
-  set_target_link_flags(${name} ${LIB_LINKFLAGS})
+  set_target_compile_flags(${name} ${LIB_CFLAGS} ${DARWIN_${os}_CFLAGS})
+  set_target_link_flags(${name} ${LIB_LINKFLAGS} ${DARWIN_${os}_LINKFLAGS})
   set_property(TARGET ${name} APPEND PROPERTY
     COMPILE_DEFINITIONS ${LIB_DEFS})
   set_target_properties(${name} PROPERTIES
@@ -102,19 +110,19 @@ macro(add_compiler_rt_osx_dynamic_runtime name)
     LIBRARY_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
   install(TARGETS ${name}
     LIBRARY DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
-  add_dependencies(compiler-rt ${name})
 endmacro()
 
 # Unittests support.
 set(COMPILER_RT_GTEST_PATH ${LLVM_MAIN_SRC_DIR}/utils/unittest/googletest)
-set(COMPILER_RT_GTEST_SOURCE ${COMPILER_RT_GTEST_PATH}/gtest-all.cc)
-set(COMPILER_RT_GTEST_INCLUDE_CFLAGS
+set(COMPILER_RT_GTEST_SOURCE ${COMPILER_RT_GTEST_PATH}/src/gtest-all.cc)
+set(COMPILER_RT_GTEST_CFLAGS
   -DGTEST_NO_LLVM_RAW_OSTREAM=1
   -I${COMPILER_RT_GTEST_PATH}/include
+  -I${COMPILER_RT_GTEST_PATH}
 )
 
-# Use Clang to link objects into a single executable with just-built
-# Clang, using specific link flags. Make executable a part of provided
+# Link objects into a single executable with COMPILER_RT_TEST_COMPILER,
+# using specified link flags. Make executable a part of provided
 # test_suite.
 # add_compiler_rt_test(<test_suite> <test_name>
 #                      OBJECTS <object files>
@@ -123,20 +131,39 @@ set(COMPILER_RT_GTEST_INCLUDE_CFLAGS
 macro(add_compiler_rt_test test_suite test_name)
   parse_arguments(TEST "OBJECTS;DEPS;LINK_FLAGS" "" ${ARGN})
   set(output_bin "${CMAKE_CURRENT_BINARY_DIR}/${test_name}")
+  # Use host compiler in a standalone build, and just-built Clang otherwise.
+  if(NOT COMPILER_RT_STANDALONE_BUILD)
+    list(APPEND TEST_DEPS clang)
+  endif()
   add_custom_target(${test_name}
-    COMMAND clang ${TEST_OBJECTS} -o "${output_bin}"
+    COMMAND ${COMPILER_RT_TEST_COMPILER} ${TEST_OBJECTS} -o "${output_bin}"
             ${TEST_LINK_FLAGS}
-    DEPENDS clang ${TEST_DEPS})
+    DEPENDS ${TEST_DEPS})
   # Make the test suite depend on the binary.
   add_dependencies(${test_suite} ${test_name})
 endmacro()
 
 macro(add_compiler_rt_resource_file target_name file_name)
   set(src_file "${CMAKE_CURRENT_SOURCE_DIR}/${file_name}")
-  set(dst_file "${CLANG_RESOURCE_DIR}/${file_name}")
-  add_custom_target(${target_name}
+  set(dst_file "${COMPILER_RT_OUTPUT_DIR}/${file_name}")
+  add_custom_command(OUTPUT ${dst_file}
+    DEPENDS ${src_file}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${src_file} ${dst_file}
-    DEPENDS ${file_name})
+    COMMENT "Copying ${file_name}...")
+  add_custom_target(${target_name} DEPENDS ${dst_file})
   # Install in Clang resource directory.
-  install(FILES ${file_name} DESTINATION ${LIBCLANG_INSTALL_PATH})
+  install(FILES ${file_name} DESTINATION ${COMPILER_RT_INSTALL_PATH})
 endmacro()
+
+macro(add_compiler_rt_script name)
+  set(dst ${COMPILER_RT_EXEC_OUTPUT_DIR}/${name})
+  set(src ${CMAKE_CURRENT_SOURCE_DIR}/${name})
+  add_custom_command(OUTPUT ${dst}
+    DEPENDS ${src}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${src} ${dst}
+    COMMENT "Copying ${name}...")
+  add_custom_target(${name} DEPENDS ${dst})
+  install(FILES ${dst}
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+    DESTINATION ${COMPILER_RT_INSTALL_PATH}/bin)
+endmacro(add_compiler_rt_script src name)

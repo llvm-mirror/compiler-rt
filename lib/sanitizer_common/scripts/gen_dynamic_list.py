@@ -24,7 +24,8 @@ new_delete = set(['_ZdaPv', '_ZdaPvRKSt9nothrow_t',
                   '_Znam', '_ZnamRKSt9nothrow_t',
                   '_Znwm', '_ZnwmRKSt9nothrow_t'])
 
-versioned_functions = set(['memcpy', 'pthread_cond_broadcast',
+versioned_functions = set(['memcpy', 'pthread_attr_getaffinity_np',
+                           'pthread_cond_broadcast',
                            'pthread_cond_destroy', 'pthread_cond_init',
                            'pthread_cond_signal', 'pthread_cond_timedwait',
                            'pthread_cond_wait', 'realpath',
@@ -34,7 +35,7 @@ def get_global_functions(library):
   functions = []
   nm_proc = subprocess.Popen(['nm', library], stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE)
-  nm_out = nm_proc.communicate()[0].split('\n')
+  nm_out = nm_proc.communicate()[0].decode().split('\n')
   if nm_proc.returncode != 0:
     raise subprocess.CalledProcessError(nm_proc.returncode, 'nm')
   for line in nm_out:
@@ -74,11 +75,11 @@ def main(argv):
     for line in f:
       result.append(line.rstrip())
   # Print the resulting list in the format recognized by ld.
-  print '{'
+  print('{')
   result.sort()
   for f in result:
-    print '  ' + f + ';'
-  print '};'
+    print('  ' + f + ';')
+  print('};')
 
 if __name__ == '__main__':
   main(sys.argv)

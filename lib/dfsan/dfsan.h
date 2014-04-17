@@ -15,14 +15,35 @@
 #ifndef DFSAN_H
 #define DFSAN_H
 
-#include "sanitizer/dfsan_interface.h"
+#include "sanitizer_common/sanitizer_internal_defs.h"
+
+// Copy declarations from public sanitizer/dfsan_interface.h header here.
+typedef u16 dfsan_label;
+
+struct dfsan_label_info {
+  dfsan_label l1;
+  dfsan_label l2;
+  const char *desc;
+  void *userdata;
+};
+
+extern "C" {
+void dfsan_set_label(dfsan_label label, void *addr, uptr size);
+dfsan_label dfsan_read_label(const void *addr, uptr size);
+dfsan_label dfsan_union(dfsan_label l1, dfsan_label l2);
+}  // extern "C"
+
+template <typename T>
+void dfsan_set_label(dfsan_label label, T &data) {  // NOLINT
+  dfsan_set_label(label, (void *)&data, sizeof(T));
+}
 
 namespace __dfsan {
 
 void InitializeInterceptors();
 
 inline dfsan_label *shadow_for(void *ptr) {
-  return (dfsan_label *) ((((uintptr_t) ptr) & ~0x700000000000) << 1);
+  return (dfsan_label *) ((((uptr) ptr) & ~0x700000000000) << 1);
 }
 
 inline const dfsan_label *shadow_for(const void *ptr) {
@@ -34,6 +55,11 @@ struct Flags {
   bool warn_unimplemented;
   // Whether to warn on non-zero labels.
   bool warn_nonzero_labels;
+  // Whether to propagate labels only when there is an obvious data dependency
+  // (e.g., when comparing strings, ignore the fact that the output of the
+  // comparison might be data-dependent on the content of the strings). This
+  // applies only to the custom functions defined in 'custom.c'.
+  bool strict_data_dependencies;
 };
 
 extern Flags flags_data;
