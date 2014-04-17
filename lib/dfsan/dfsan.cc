@@ -19,9 +19,9 @@
 // prefixed __dfsan_.
 //===----------------------------------------------------------------------===//
 
-#include "sanitizer/dfsan_interface.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
 #include "dfsan/dfsan.h"
@@ -35,6 +35,8 @@ static const uptr kNumLabels = 1 << (sizeof(dfsan_label) * 8);
 
 static atomic_dfsan_label __dfsan_last_label;
 static dfsan_label_info __dfsan_label_info[kNumLabels];
+
+Flags __dfsan::flags_data;
 
 SANITIZER_INTERFACE_ATTRIBUTE THREADLOCAL dfsan_label __dfsan_retval_tls;
 SANITIZER_INTERFACE_ATTRIBUTE THREADLOCAL dfsan_label __dfsan_arg_tls[64];
@@ -120,9 +122,9 @@ dfsan_label __dfsan_union(dfsan_label l1, dfsan_label l2) {
 }
 
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
-dfsan_label __dfsan_union_load(const dfsan_label *ls, size_t n) {
+dfsan_label __dfsan_union_load(const dfsan_label *ls, uptr n) {
   dfsan_label label = ls[0];
-  for (size_t i = 1; i != n; ++i) {
+  for (uptr i = 1; i != n; ++i) {
     dfsan_label next_label = ls[i];
     if (label != next_label)
       label = __dfsan_union(label, next_label);
@@ -132,8 +134,17 @@ dfsan_label __dfsan_union_load(const dfsan_label *ls, size_t n) {
 
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 void __dfsan_unimplemented(char *fname) {
-  Report("WARNING: DataFlowSanitizer: call to uninstrumented function %s\n",
-         fname);
+  if (flags().warn_unimplemented)
+    Report("WARNING: DataFlowSanitizer: call to uninstrumented function %s\n",
+           fname);
+}
+
+// Use '-mllvm -dfsan-debug-nonzero-labels' and break on this function
+// to try to figure out where labels are being introduced in a nominally
+// label-free program.
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE void __dfsan_nonzero_label() {
+  if (flags().warn_nonzero_labels)
+    Report("WARNING: DataFlowSanitizer: saw nonzero label\n");
 }
 
 // Like __dfsan_union, but for use from the client or custom functions.  Hence
@@ -145,7 +156,7 @@ dfsan_union(dfsan_label l1, dfsan_label l2) {
   return __dfsan_union(l1, l2);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 dfsan_label dfsan_create_label(const char *desc, void *userdata) {
   dfsan_label label =
     atomic_fetch_add(&__dfsan_last_label, 1, memory_order_relaxed) + 1;
@@ -157,18 +168,18 @@ dfsan_label dfsan_create_label(const char *desc, void *userdata) {
 }
 
 extern "C" SANITIZER_INTERFACE_ATTRIBUTE
-void __dfsan_set_label(dfsan_label label, void *addr, size_t size) {
+void __dfsan_set_label(dfsan_label label, void *addr, uptr size) {
   for (dfsan_label *labelp = shadow_for(addr); size != 0; --size, ++labelp)
     *labelp = label;
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-void dfsan_set_label(dfsan_label label, void *addr, size_t size) {
+void dfsan_set_label(dfsan_label label, void *addr, uptr size) {
   __dfsan_set_label(label, addr, size);
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-void dfsan_add_label(dfsan_label label, void *addr, size_t size) {
+void dfsan_add_label(dfsan_label label, void *addr, uptr size) {
   for (dfsan_label *labelp = shadow_for(addr); size != 0; --size, ++labelp)
     if (*labelp != label)
       *labelp = __dfsan_union(*labelp, label);
@@ -185,7 +196,7 @@ __dfsw_dfsan_get_label(long data, dfsan_label data_label,
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
-dfsan_read_label(const void *addr, size_t size) {
+dfsan_read_label(const void *addr, uptr size) {
   if (size == 0)
     return 0;
   return __dfsan_union_load(shadow_for(addr), size);
@@ -196,7 +207,8 @@ const struct dfsan_label_info *dfsan_get_label_info(dfsan_label label) {
   return &__dfsan_label_info[label];
 }
 
-int dfsan_has_label(dfsan_label label, dfsan_label elem) {
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE int
+dfsan_has_label(dfsan_label label, dfsan_label elem) {
   if (label == elem)
     return true;
   const dfsan_label_info *info = dfsan_get_label_info(label);
@@ -207,7 +219,8 @@ int dfsan_has_label(dfsan_label label, dfsan_label elem) {
   }
 }
 
-dfsan_label dfsan_has_label_with_desc(dfsan_label label, const char *desc) {
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE dfsan_label
+dfsan_has_label_with_desc(dfsan_label label, const char *desc) {
   const dfsan_label_info *info = dfsan_get_label_info(label);
   if (info->l1 != 0) {
     return dfsan_has_label_with_desc(info->l1, desc) ||
@@ -215,6 +228,24 @@ dfsan_label dfsan_has_label_with_desc(dfsan_label label, const char *desc) {
   } else {
     return internal_strcmp(desc, info->desc) == 0;
   }
+}
+
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE uptr
+dfsan_get_label_count(void) {
+  dfsan_label max_label_allocated =
+      atomic_load(&__dfsan_last_label, memory_order_relaxed);
+
+  return static_cast<uptr>(max_label_allocated);
+}
+
+static void InitializeFlags(Flags &f, const char *env) {
+  f.warn_unimplemented = true;
+  f.warn_nonzero_labels = false;
+  f.strict_data_dependencies = true;
+
+  ParseFlag(env, &f.warn_unimplemented, "warn_unimplemented", "");
+  ParseFlag(env, &f.warn_nonzero_labels, "warn_nonzero_labels", "");
+  ParseFlag(env, &f.strict_data_dependencies, "strict_data_dependencies", "");
 }
 
 #ifdef DFSAN_NOLIBC
@@ -232,6 +263,10 @@ static void dfsan_init(int argc, char **argv, char **envp) {
   uptr init_addr = (uptr)&dfsan_init;
   if (!(init_addr >= kUnusedAddr && init_addr < kAppAddr))
     Mprotect(kUnusedAddr, kAppAddr - kUnusedAddr);
+
+  InitializeFlags(flags(), GetEnv("DFSAN_OPTIONS"));
+
+  InitializeInterceptors();
 }
 
 #ifndef DFSAN_NOLIBC

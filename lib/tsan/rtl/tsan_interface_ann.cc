@@ -33,33 +33,27 @@ class ScopedAnnotation {
  public:
   ScopedAnnotation(ThreadState *thr, const char *aname, const char *f, int l,
                    uptr pc)
-      : thr_(thr)
-      , in_rtl_(thr->in_rtl) {
-    CHECK_EQ(thr_->in_rtl, 0);
+      : thr_(thr) {
     FuncEntry(thr_, pc);
-    thr_->in_rtl++;
     DPrintf("#%d: annotation %s() %s:%d\n", thr_->tid, aname, f, l);
   }
 
   ~ScopedAnnotation() {
-    thr_->in_rtl--;
-    CHECK_EQ(in_rtl_, thr_->in_rtl);
     FuncExit(thr_);
   }
  private:
   ThreadState *const thr_;
-  const int in_rtl_;
 };
 
 #define SCOPED_ANNOTATION(typ) \
     if (!flags()->enable_annotations) \
       return; \
     ThreadState *thr = cur_thread(); \
-    const uptr pc = (uptr)__builtin_return_address(0); \
+    const uptr caller_pc = (uptr)__builtin_return_address(0); \
     StatInc(thr, StatAnnotation); \
     StatInc(thr, Stat##typ); \
-    ScopedAnnotation sa(thr, __FUNCTION__, f, l, \
-        (uptr)__builtin_return_address(0)); \
+    ScopedAnnotation sa(thr, __func__, f, l, caller_pc); \
+    const uptr pc = __sanitizer::StackTrace::GetCurrentPc(); \
     (void)pc; \
 /**/
 
@@ -230,12 +224,12 @@ using namespace __tsan;  // NOLINT
 extern "C" {
 void INTERFACE_ATTRIBUTE AnnotateHappensBefore(char *f, int l, uptr addr) {
   SCOPED_ANNOTATION(AnnotateHappensBefore);
-  Release(cur_thread(), pc, addr);
+  Release(thr, pc, addr);
 }
 
 void INTERFACE_ATTRIBUTE AnnotateHappensAfter(char *f, int l, uptr addr) {
   SCOPED_ANNOTATION(AnnotateHappensAfter);
-  Acquire(cur_thread(), pc, addr);
+  Acquire(thr, pc, addr);
 }
 
 void INTERFACE_ATTRIBUTE AnnotateCondVarSignal(char *f, int l, uptr cv) {
@@ -311,7 +305,7 @@ void INTERFACE_ATTRIBUTE AnnotateFlushExpectedRaces(char *f, int l) {
   while (dyn_ann_ctx->expect.next != &dyn_ann_ctx->expect) {
     ExpectRace *race = dyn_ann_ctx->expect.next;
     if (race->hitcount == 0) {
-      CTX()->nmissed_expected++;
+      ctx->nmissed_expected++;
       ReportMissedExpectedRace(race);
     }
     race->prev->next = race->next;
@@ -383,22 +377,32 @@ void INTERFACE_ATTRIBUTE AnnotateBenignRace(
 
 void INTERFACE_ATTRIBUTE AnnotateIgnoreReadsBegin(char *f, int l) {
   SCOPED_ANNOTATION(AnnotateIgnoreReadsBegin);
-  IgnoreCtl(cur_thread(), false, true);
+  ThreadIgnoreBegin(thr, pc);
 }
 
 void INTERFACE_ATTRIBUTE AnnotateIgnoreReadsEnd(char *f, int l) {
   SCOPED_ANNOTATION(AnnotateIgnoreReadsEnd);
-  IgnoreCtl(cur_thread(), false, false);
+  ThreadIgnoreEnd(thr, pc);
 }
 
 void INTERFACE_ATTRIBUTE AnnotateIgnoreWritesBegin(char *f, int l) {
   SCOPED_ANNOTATION(AnnotateIgnoreWritesBegin);
-  IgnoreCtl(cur_thread(), true, true);
+  ThreadIgnoreBegin(thr, pc);
 }
 
 void INTERFACE_ATTRIBUTE AnnotateIgnoreWritesEnd(char *f, int l) {
   SCOPED_ANNOTATION(AnnotateIgnoreWritesEnd);
-  IgnoreCtl(thr, true, false);
+  ThreadIgnoreEnd(thr, pc);
+}
+
+void INTERFACE_ATTRIBUTE AnnotateIgnoreSyncBegin(char *f, int l) {
+  SCOPED_ANNOTATION(AnnotateIgnoreSyncBegin);
+  ThreadIgnoreSyncBegin(thr, pc);
+}
+
+void INTERFACE_ATTRIBUTE AnnotateIgnoreSyncEnd(char *f, int l) {
+  SCOPED_ANNOTATION(AnnotateIgnoreSyncEnd);
+  ThreadIgnoreSyncEnd(thr, pc);
 }
 
 void INTERFACE_ATTRIBUTE AnnotatePublishMemoryRange(
@@ -431,7 +435,7 @@ void INTERFACE_ATTRIBUTE WTFAnnotateHappensAfter(char *f, int l, uptr addr) {
 void INTERFACE_ATTRIBUTE WTFAnnotateBenignRaceSized(
     char *f, int l, uptr mem, uptr sz, char *desc) {
   SCOPED_ANNOTATION(AnnotateBenignRaceSized);
-  BenignRaceImpl(f, l, mem, 1, desc);
+  BenignRaceImpl(f, l, mem, sz, desc);
 }
 
 int INTERFACE_ATTRIBUTE RunningOnValgrind() {
@@ -448,4 +452,7 @@ const char INTERFACE_ATTRIBUTE* ThreadSanitizerQuery(const char *query) {
   else
     return "0";
 }
+
+void INTERFACE_ATTRIBUTE
+AnnotateMemoryIsInitialized(char *f, int l, uptr mem, uptr sz) {}
 }  // extern "C"

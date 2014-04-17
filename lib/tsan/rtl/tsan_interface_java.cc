@@ -18,6 +18,7 @@
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
+#include "sanitizer_common/sanitizer_procmaps.h"
 
 using namespace __tsan;  // NOLINT
 
@@ -78,13 +79,9 @@ class ScopedJavaFunc {
       : thr_(thr) {
     Initialize(thr_);
     FuncEntry(thr, pc);
-    CHECK_EQ(thr_->in_rtl, 0);
-    thr_->in_rtl++;
   }
 
   ~ScopedJavaFunc() {
-    thr_->in_rtl--;
-    CHECK_EQ(thr_->in_rtl, 0);
     FuncExit(thr_);
     // FIXME(dvyukov): process pending signals.
   }
@@ -135,7 +132,7 @@ SyncVar* GetJavaSync(ThreadState *thr, uptr pc, uptr addr,
   }
   if (s == 0 && create) {
     DPrintf("#%d: creating new sync for %p\n", thr->tid, addr);
-    s = CTX()->synctab.Create(thr, pc, addr);
+    s = ctx->synctab.Create(thr, pc, addr);
     s->next = b->head;
     b->head = s;
   }

@@ -15,7 +15,25 @@
 #ifndef SANITIZER_ATOMIC_CLANG_H
 #define SANITIZER_ATOMIC_CLANG_H
 
+#if defined(__i386__) || defined(__x86_64__)
+# include "sanitizer_atomic_clang_x86.h"
+#else
+# include "sanitizer_atomic_clang_other.h"
+#endif
+
 namespace __sanitizer {
+
+// We would like to just use compiler builtin atomic operations
+// for loads and stores, but they are mostly broken in clang:
+// - they lead to vastly inefficient code generation
+// (http://llvm.org/bugs/show_bug.cgi?id=17281)
+// - 64-bit atomic operations are not implemented on x86_32
+// (http://llvm.org/bugs/show_bug.cgi?id=15034)
+// - they are not implemented on ARM
+// error: undefined reference to '__atomic_load_4'
+
+// See http://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html
+// for mappings of the memory model to different processors.
 
 INLINE void atomic_signal_fence(memory_order) {
   __asm__ __volatile__("" ::: "memory");
@@ -23,50 +41,6 @@ INLINE void atomic_signal_fence(memory_order) {
 
 INLINE void atomic_thread_fence(memory_order) {
   __sync_synchronize();
-}
-
-INLINE void proc_yield(int cnt) {
-  __asm__ __volatile__("" ::: "memory");
-#if defined(__i386__) || defined(__x86_64__)
-  for (int i = 0; i < cnt; i++)
-    __asm__ __volatile__("pause");
-#endif
-  __asm__ __volatile__("" ::: "memory");
-}
-
-template<typename T>
-INLINE typename T::Type atomic_load(
-    const volatile T *a, memory_order mo) {
-  DCHECK(mo & (memory_order_relaxed | memory_order_consume
-      | memory_order_acquire | memory_order_seq_cst));
-  DCHECK(!((uptr)a % sizeof(*a)));
-  typename T::Type v;
-  // FIXME(dvyukov): 64-bit load is not atomic on 32-bits.
-  if (mo == memory_order_relaxed) {
-    v = a->val_dont_use;
-  } else {
-    atomic_signal_fence(memory_order_seq_cst);
-    v = a->val_dont_use;
-    atomic_signal_fence(memory_order_seq_cst);
-  }
-  return v;
-}
-
-template<typename T>
-INLINE void atomic_store(volatile T *a, typename T::Type v, memory_order mo) {
-  DCHECK(mo & (memory_order_relaxed | memory_order_release
-      | memory_order_seq_cst));
-  DCHECK(!((uptr)a % sizeof(*a)));
-  // FIXME(dvyukov): 64-bit store is not atomic on 32-bits.
-  if (mo == memory_order_relaxed) {
-    a->val_dont_use = v;
-  } else {
-    atomic_signal_fence(memory_order_seq_cst);
-    a->val_dont_use = v;
-    atomic_signal_fence(memory_order_seq_cst);
-  }
-  if (mo == memory_order_seq_cst)
-    atomic_thread_fence(memory_order_seq_cst);
 }
 
 template<typename T>
@@ -120,5 +94,7 @@ INLINE bool atomic_compare_exchange_weak(volatile T *a,
 }
 
 }  // namespace __sanitizer
+
+#undef ATOMIC_ORDER
 
 #endif  // SANITIZER_ATOMIC_CLANG_H

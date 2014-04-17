@@ -30,24 +30,9 @@
 
 // Build-time configuration options.
 
-// If set, asan will install its own SEGV signal handler.
-#ifndef ASAN_NEEDS_SEGV
-# if SANITIZER_ANDROID == 1
-#  define ASAN_NEEDS_SEGV 0
-# else
-#  define ASAN_NEEDS_SEGV 1
-# endif
-#endif
-
 // If set, asan will intercept C++ exception api call(s).
 #ifndef ASAN_HAS_EXCEPTIONS
 # define ASAN_HAS_EXCEPTIONS 1
-#endif
-
-// If set, asan uses the values of SHADOW_SCALE and SHADOW_OFFSET
-// provided by the instrumented objects. Otherwise constants are used.
-#ifndef ASAN_FLEXIBLE_MAPPING_AND_OFFSET
-# define ASAN_FLEXIBLE_MAPPING_AND_OFFSET 0
 #endif
 
 // If set, values like allocator chunk size, as well as defaults for some flags
@@ -64,6 +49,10 @@
 # define ASAN_USE_PREINIT_ARRAY (SANITIZER_LINUX && !SANITIZER_ANDROID)
 #endif
 
+#ifndef ASAN_DYNAMIC
+# define ASAN_DYNAMIC 0
+#endif
+
 // All internal functions in asan reside inside the __asan namespace
 // to avoid namespace collisions with the user programs.
 // Seperate namespace also makes it simpler to distinguish the asan run-time
@@ -72,6 +61,8 @@ namespace __asan {
 
 class AsanThread;
 using __sanitizer::StackTrace;
+
+void AsanInitFromRtl();
 
 // asan_rtl.cc
 void NORETURN ShowStatsAndAbort();
@@ -82,14 +73,14 @@ void ReplaceSystemMalloc();
 
 // asan_linux.cc / asan_mac.cc / asan_win.cc
 void *AsanDoesNotSupportStaticLinkage();
+void AsanCheckDynamicRTPrereqs();
+void AsanCheckIncompatibleRT();
 
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp);
+void AsanOnSIGSEGV(int, void *siginfo, void *context);
 
 void MaybeReexec();
 bool AsanInterceptsSignal(int signum);
-void SetAlternateSignalStack();
-void UnsetAlternateSignalStack();
-void InstallSignalHandlers();
 void ReadContextStack(void *context, uptr *stack, uptr *ssize);
 void AsanPlatformThreadInit();
 void StopInitOrderChecking();
@@ -98,8 +89,11 @@ void StopInitOrderChecking();
 void AsanTSDInit(void (*destructor)(void *tsd));
 void *AsanTSDGet();
 void AsanTSDSet(void *tsd);
+void PlatformTSDDtor(void *tsd);
 
 void AppendToErrorMessageBuffer(const char *buffer);
+
+void ParseExtraActivationFlags();
 
 // Platfrom-specific options.
 #if SANITIZER_MAC
@@ -135,6 +129,7 @@ const int kAsanStackPartialRedzoneMagic = 0xf4;
 const int kAsanStackAfterReturnMagic = 0xf5;
 const int kAsanInitializationOrderMagic = 0xf6;
 const int kAsanUserPoisonedMemoryMagic = 0xf7;
+const int kAsanContiguousContainerOOBMagic = 0xfc;
 const int kAsanStackUseAfterScopeMagic = 0xf8;
 const int kAsanGlobalRedzoneMagic = 0xf9;
 const int kAsanInternalHeapMagic = 0xfe;

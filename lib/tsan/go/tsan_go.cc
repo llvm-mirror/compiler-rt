@@ -51,25 +51,33 @@ void internal_free(void *p) {
   InternalFree(p);
 }
 
+struct SymbolizeContext {
+  uptr pc;
+  char *func;
+  char *file;
+  uptr line;
+  uptr off;
+  uptr res;
+};
+
 // Callback into Go.
-extern "C" int __tsan_symbolize(uptr pc, char **func, char **file,
-    int *line, int *off);
+static void (*symbolize_cb)(SymbolizeContext *ctx);
 
 ReportStack *SymbolizeCode(uptr addr) {
   ReportStack *s = (ReportStack*)internal_alloc(MBlockReportStack,
                                                 sizeof(ReportStack));
   internal_memset(s, 0, sizeof(*s));
   s->pc = addr;
-  char *func = 0, *file = 0;
-  int line = 0, off = 0;
-  if (__tsan_symbolize(addr, &func, &file, &line, &off)) {
-    s->offset = off;
-    s->func = internal_strdup(func ? func : "??");
-    s->file = internal_strdup(file ? file : "-");
-    s->line = line;
+  SymbolizeContext ctx;
+  internal_memset(&ctx, 0, sizeof(ctx));
+  ctx.pc = addr;
+  symbolize_cb(&ctx);
+  if (ctx.res) {
+    s->offset = ctx.off;
+    s->func = internal_strdup(ctx.func ? ctx.func : "??");
+    s->file = internal_strdup(ctx.file ? ctx.file : "-");
+    s->line = ctx.line;
     s->col = 0;
-    free(func);
-    free(file);
   }
   return s;
 }
@@ -77,6 +85,7 @@ ReportStack *SymbolizeCode(uptr addr) {
 extern "C" {
 
 static ThreadState *main_thr;
+static bool inited;
 
 static ThreadState *AllocGoroutine() {
   ThreadState *thr = (ThreadState*)internal_alloc(MBlockThreadContex,
@@ -85,20 +94,18 @@ static ThreadState *AllocGoroutine() {
   return thr;
 }
 
-void __tsan_init(ThreadState **thrp) {
+void __tsan_init(ThreadState **thrp, void (*cb)(SymbolizeContext *cb)) {
+  symbolize_cb = cb;
   ThreadState *thr = AllocGoroutine();
   main_thr = *thrp = thr;
-  thr->in_rtl++;
   Initialize(thr);
-  thr->in_rtl--;
+  inited = true;
 }
 
 void __tsan_fini() {
   // FIXME: Not necessary thread 0.
   ThreadState *thr = main_thr;
-  thr->in_rtl++;
   int res = Finalize(thr);
-  thr->in_rtl--;
   exit(res);
 }
 
@@ -110,19 +117,31 @@ void __tsan_read(ThreadState *thr, void *addr, void *pc) {
   MemoryRead(thr, (uptr)pc, (uptr)addr, kSizeLog1);
 }
 
+void __tsan_read_pc(ThreadState *thr, void *addr, uptr callpc, uptr pc) {
+  if (callpc != 0)
+    FuncEntry(thr, callpc);
+  MemoryRead(thr, (uptr)pc, (uptr)addr, kSizeLog1);
+  if (callpc != 0)
+    FuncExit(thr);
+}
+
 void __tsan_write(ThreadState *thr, void *addr, void *pc) {
   MemoryWrite(thr, (uptr)pc, (uptr)addr, kSizeLog1);
 }
 
-void __tsan_read_range(ThreadState *thr, void *addr, uptr size, uptr step,
-                       void *pc) {
-  (void)step;
+void __tsan_write_pc(ThreadState *thr, void *addr, uptr callpc, uptr pc) {
+  if (callpc != 0)
+    FuncEntry(thr, callpc);
+  MemoryWrite(thr, (uptr)pc, (uptr)addr, kSizeLog1);
+  if (callpc != 0)
+    FuncExit(thr);
+}
+
+void __tsan_read_range(ThreadState *thr, void *addr, uptr size, uptr pc) {
   MemoryAccessRange(thr, (uptr)pc, (uptr)addr, size, false);
 }
 
-void __tsan_write_range(ThreadState *thr, void *addr, uptr size, uptr step,
-                        void *pc) {
-  (void)step;
+void __tsan_write_range(ThreadState *thr, void *addr, uptr size, uptr pc) {
   MemoryAccessRange(thr, (uptr)pc, (uptr)addr, size, true);
 }
 
@@ -134,91 +153,56 @@ void __tsan_func_exit(ThreadState *thr) {
   FuncExit(thr);
 }
 
-void __tsan_malloc(ThreadState *thr, void *p, uptr sz, void *pc) {
-  if (thr == 0)  // probably before __tsan_init()
+void __tsan_malloc(void *p, uptr sz) {
+  if (!inited)
     return;
-  thr->in_rtl++;
-  MemoryResetRange(thr, (uptr)pc, (uptr)p, sz);
-  thr->in_rtl--;
-}
-
-void __tsan_free(void *p) {
-  (void)p;
+  MemoryResetRange(0, 0, (uptr)p, sz);
 }
 
 void __tsan_go_start(ThreadState *parent, ThreadState **pthr, void *pc) {
   ThreadState *thr = AllocGoroutine();
   *pthr = thr;
-  thr->in_rtl++;
-  parent->in_rtl++;
   int goid = ThreadCreate(parent, (uptr)pc, 0, true);
   ThreadStart(thr, goid, 0);
-  parent->in_rtl--;
-  thr->in_rtl--;
 }
 
 void __tsan_go_end(ThreadState *thr) {
-  thr->in_rtl++;
   ThreadFinish(thr);
-  thr->in_rtl--;
   internal_free(thr);
 }
 
 void __tsan_acquire(ThreadState *thr, void *addr) {
-  thr->in_rtl++;
   Acquire(thr, 0, (uptr)addr);
-  thr->in_rtl--;
 }
 
 void __tsan_release(ThreadState *thr, void *addr) {
-  thr->in_rtl++;
   ReleaseStore(thr, 0, (uptr)addr);
-  thr->in_rtl--;
 }
 
 void __tsan_release_merge(ThreadState *thr, void *addr) {
-  thr->in_rtl++;
   Release(thr, 0, (uptr)addr);
-  thr->in_rtl--;
 }
 
 void __tsan_finalizer_goroutine(ThreadState *thr) {
   AcquireGlobal(thr, 0);
 }
 
-#if SANITIZER_WINDOWS
-// MinGW gcc emits calls to the function.
-void ___chkstk_ms(void) {
-// The implementation must be along the lines of:
-// .code64
-// PUBLIC ___chkstk_ms
-//     //cfi_startproc()
-// ___chkstk_ms:
-//     push rcx
-//     //cfi_push(%rcx)
-//     push rax
-//     //cfi_push(%rax)
-//     cmp rax, PAGE_SIZE
-//     lea rcx, [rsp + 24]
-//     jb l_LessThanAPage
-// .l_MoreThanAPage:
-//     sub rcx, PAGE_SIZE
-//     or rcx, 0
-//     sub rax, PAGE_SIZE
-//     cmp rax, PAGE_SIZE
-//     ja l_MoreThanAPage
-// .l_LessThanAPage:
-//     sub rcx, rax
-//     or [rcx], 0
-//     pop rax
-//     //cfi_pop(%rax)
-//     pop rcx
-//     //cfi_pop(%rcx)
-//     ret
-//     //cfi_endproc()
-// END
+void __tsan_mutex_before_lock(ThreadState *thr, uptr addr, bool write) {
 }
-#endif
+
+void __tsan_mutex_after_lock(ThreadState *thr, uptr addr, bool write) {
+  if (write)
+    MutexLock(thr, 0, addr);
+  else
+    MutexReadLock(thr, 0, addr);
+}
+
+void __tsan_mutex_before_unlock(ThreadState *thr, uptr addr, bool write) {
+  if (write)
+    MutexUnlock(thr, 0, addr);
+  else
+    MutexReadUnlock(thr, 0, addr);
+}
 
 }  // extern "C"
 }  // namespace __tsan

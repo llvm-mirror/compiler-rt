@@ -43,10 +43,19 @@
 // || `[0x00007fff8000, 0x00008fff6fff]` || LowShadow  ||
 // || `[0x000000000000, 0x00007fff7fff]` || LowMem     ||
 //
-// Default Linux/i386 mapping:
+// Default Linux/i386 mapping on x86_64 machine:
 // || `[0x40000000, 0xffffffff]` || HighMem    ||
 // || `[0x28000000, 0x3fffffff]` || HighShadow ||
 // || `[0x24000000, 0x27ffffff]` || ShadowGap  ||
+// || `[0x20000000, 0x23ffffff]` || LowShadow  ||
+// || `[0x00000000, 0x1fffffff]` || LowMem     ||
+//
+// Default Linux/i386 mapping on i386 machine
+// (addresses starting with 0xc0000000 are reserved
+// for kernel and thus not sanitized):
+// || `[0x38000000, 0xbfffffff]` || HighMem    ||
+// || `[0x27000000, 0x37ffffff]` || HighShadow ||
+// || `[0x24000000, 0x26ffffff]` || ShadowGap  ||
 // || `[0x20000000, 0x23ffffff]` || LowShadow  ||
 // || `[0x00000000, 0x1fffffff]` || LowMem     ||
 //
@@ -57,36 +66,33 @@
 // || `[0x0aaa8000, 0x0bffcfff]` || LowShadow  ||
 // || `[0x00000000, 0x0aaa7fff]` || LowMem     ||
 
-#if ASAN_FLEXIBLE_MAPPING_AND_OFFSET == 1
-extern SANITIZER_INTERFACE_ATTRIBUTE uptr __asan_mapping_scale;
-extern SANITIZER_INTERFACE_ATTRIBUTE uptr __asan_mapping_offset;
-# define SHADOW_SCALE (__asan_mapping_scale)
-# define SHADOW_OFFSET (__asan_mapping_offset)
+static const u64 kDefaultShadowScale = 3;
+static const u64 kDefaultShadowOffset32 = 1ULL << 29;
+static const u64 kDefaultShadowOffset64 = 1ULL << 44;
+static const u64 kDefaultShort64bitShadowOffset = 0x7FFF8000;  // < 2G.
+static const u64 kAArch64_ShadowOffset64 = 1ULL << 36;
+static const u64 kMIPS32_ShadowOffset32 = 0x0aaa8000;
+
+#define SHADOW_SCALE kDefaultShadowScale
+#if SANITIZER_ANDROID
+# define SHADOW_OFFSET (0)
 #else
-# if SANITIZER_ANDROID
-#  define SHADOW_SCALE (3)
-#  define SHADOW_OFFSET (0)
-# else
-#  define SHADOW_SCALE (3)
-#  if SANITIZER_WORDSIZE == 32
-#   if defined(__mips__)
-#     define SHADOW_OFFSET 0x0aaa8000
-#   else
-#     define SHADOW_OFFSET (1 << 29)
-#   endif
+# if SANITIZER_WORDSIZE == 32
+#  if defined(__mips__)
+#    define SHADOW_OFFSET kMIPS32_ShadowOffset32
 #  else
-#   if defined(__powerpc64__)
-#    define SHADOW_OFFSET (1ULL << 41)
-#   else
-#    if SANITIZER_MAC
-#     define SHADOW_OFFSET (1ULL << 44)
-#    else
-#     define SHADOW_OFFSET 0x7fff8000ULL
-#    endif
-#   endif
+#    define SHADOW_OFFSET kDefaultShadowOffset32
+#  endif
+# else
+#  if defined(__aarch64__)
+#    define SHADOW_OFFSET kAArch64_ShadowOffset64
+#  elif SANITIZER_MAC
+#   define SHADOW_OFFSET kDefaultShadowOffset64
+#  else
+#   define SHADOW_OFFSET kDefaultShort64bitShadowOffset
 #  endif
 # endif
-#endif  // ASAN_FLEXIBLE_MAPPING_AND_OFFSET
+#endif
 
 #define SHADOW_GRANULARITY (1ULL << SHADOW_SCALE)
 #define MEM_TO_SHADOW(mem) (((mem) >> SHADOW_SCALE) + (SHADOW_OFFSET))
@@ -144,7 +150,6 @@ static uptr kHighMemEnd = 0x7fffffffffffULL;
 static uptr kMidMemBeg =    0x3000000000ULL;
 static uptr kMidMemEnd =    0x4fffffffffULL;
 #else
-SANITIZER_INTERFACE_ATTRIBUTE
 extern uptr kHighMemEnd, kMidMemBeg, kMidMemEnd;  // Initialized in __asan_init.
 #endif
 

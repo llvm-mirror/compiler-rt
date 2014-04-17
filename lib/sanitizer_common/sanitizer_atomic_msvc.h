@@ -108,6 +108,14 @@ INLINE u32 atomic_fetch_add(volatile atomic_uint32_t *a,
       (volatile long*)&a->val_dont_use, (long)v);  // NOLINT
 }
 
+INLINE u32 atomic_fetch_sub(volatile atomic_uint32_t *a,
+    u32 v, memory_order mo) {
+  (void)mo;
+  DCHECK(!((uptr)a % sizeof(*a)));
+  return (u32)_InterlockedExchangeAdd(
+      (volatile long*)&a->val_dont_use, -(long)v);  // NOLINT
+}
+
 INLINE u8 atomic_exchange(volatile atomic_uint8_t *a,
     u8 v, memory_order mo) {
   (void)mo;
@@ -162,6 +170,19 @@ INLINE bool atomic_compare_exchange_strong(volatile atomic_uintptr_t *a,
   uptr cmpv = *cmp;
   uptr prev = (uptr)_InterlockedCompareExchangePointer(
       (void*volatile*)&a->val_dont_use, (void*)xchg, (void*)cmpv);
+  if (prev == cmpv)
+    return true;
+  *cmp = prev;
+  return false;
+}
+
+INLINE bool atomic_compare_exchange_strong(volatile atomic_uint32_t *a,
+                                           u32 *cmp,
+                                           u32 xchg,
+                                           memory_order mo) {
+  u32 cmpv = *cmp;
+  u32 prev = (u32)_InterlockedCompareExchange(
+      (volatile long*)&a->val_dont_use, (long)xchg, (long)cmpv);
   if (prev == cmpv)
     return true;
   *cmp = prev;

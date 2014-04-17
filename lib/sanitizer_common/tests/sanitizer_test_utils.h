@@ -36,14 +36,14 @@ typedef __int64          int64_t;
 #define __has_feature(x) 0
 #endif
 
-#ifndef ATTRIBUTE_NO_ADDRESS_SAFETY_ANALYSIS
+#ifndef ATTRIBUTE_NO_SANITIZE_ADDRESS
 # if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
-#  define ATTRIBUTE_NO_ADDRESS_SAFETY_ANALYSIS \
+#  define ATTRIBUTE_NO_SANITIZE_ADDRESS \
     __attribute__((no_sanitize_address))
 # else
-#  define ATTRIBUTE_NO_ADDRESS_SAFETY_ANALYSIS
+#  define ATTRIBUTE_NO_SANITIZE_ADDRESS
 # endif
-#endif  // ATTRIBUTE_NO_ADDRESS_SAFETY_ANALYSIS
+#endif  // ATTRIBUTE_NO_SANITIZE_ADDRESS
 
 #if __LP64__ || defined(_WIN64)
 #  define SANITIZER_WORDSIZE 64
@@ -78,5 +78,28 @@ static inline uint32_t my_rand() {
   return my_rand_r(&global_seed);
 }
 
+// Set availability of platform-specific functions.
+
+#if !defined(__APPLE__) && !defined(ANDROID) && !defined(__ANDROID__)
+# define SANITIZER_TEST_HAS_POSIX_MEMALIGN 1
+#else
+# define SANITIZER_TEST_HAS_POSIX_MEMALIGN 0
+#endif
+
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
+# define SANITIZER_TEST_HAS_MEMALIGN 1
+# define SANITIZER_TEST_HAS_PVALLOC 1
+# define SANITIZER_TEST_HAS_MALLOC_USABLE_SIZE 1
+#else
+# define SANITIZER_TEST_HAS_MEMALIGN 0
+# define SANITIZER_TEST_HAS_PVALLOC 0
+# define SANITIZER_TEST_HAS_MALLOC_USABLE_SIZE 0
+#endif
+
+#if !defined(__APPLE__)
+# define SANITIZER_TEST_HAS_STRNLEN 1
+#else
+# define SANITIZER_TEST_HAS_STRNLEN 0
+#endif
 
 #endif  // SANITIZER_TEST_UTILS_H

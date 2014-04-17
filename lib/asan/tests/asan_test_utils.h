@@ -41,11 +41,7 @@
 #include <unistd.h>
 #endif
 
-#if defined(__i386__) || defined(__x86_64__)
-#include <emmintrin.h>
-#endif
-
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__FreeBSD__)
 #include <malloc.h>
 #endif
 

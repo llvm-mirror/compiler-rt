@@ -12,6 +12,10 @@
 //===----------------------------------------------------------------------===//
 #include "asan_test_utils.h"
 
+#if defined(__APPLE__)
+#include <AvailabilityMacros.h>  // For MAC_OS_X_VERSION_*
+#endif
+
 // Used for string functions tests
 static char global_string[] = "global";
 static size_t global_string_length = 6;
@@ -61,7 +65,19 @@ TEST(AddressSanitizer, StrLenOOBTest) {
   free(heap_string);
 }
 
-#ifndef __APPLE__
+TEST(AddressSanitizer, WcsLenTest) {
+  EXPECT_EQ(0U, wcslen(Ident(L"")));
+  size_t hello_len = 13;
+  size_t hello_size = (hello_len + 1) * sizeof(wchar_t);
+  EXPECT_EQ(hello_len, wcslen(Ident(L"Hello, World!")));
+  wchar_t *heap_string = Ident((wchar_t*)malloc(hello_size));
+  memcpy(heap_string, L"Hello, World!", hello_size);
+  EXPECT_EQ(hello_len, Ident(wcslen(heap_string)));
+  EXPECT_DEATH(Ident(wcslen(heap_string + 14)), RightOOBReadMessage(0));
+  free(heap_string);
+}
+
+#if SANITIZER_TEST_HAS_STRNLEN
 TEST(AddressSanitizer, StrNLenOOBTest) {
   size_t size = Ident(123);
   char *str = MallocAndMemsetString(size);
@@ -79,7 +95,7 @@ TEST(AddressSanitizer, StrNLenOOBTest) {
   EXPECT_DEATH(Ident(strnlen(str, size + 1)), RightOOBReadMessage(0));
   free(str);
 }
-#endif
+#endif  // SANITIZER_TEST_HAS_STRNLEN
 
 TEST(AddressSanitizer, StrDupOOBTest) {
   size_t size = Ident(42);

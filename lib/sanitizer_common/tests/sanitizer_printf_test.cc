@@ -120,7 +120,6 @@ TEST(Printf, MinMax) {
   TestAgainstLibc<unsigned long>("%zu-%zu", 0, ULONG_MAX);  // NOLINT
   TestAgainstLibc<unsigned>("%x-%x", 0, UINT_MAX);  // NOLINT
   TestAgainstLibc<unsigned long>("%zx-%zx", 0, ULONG_MAX);  // NOLINT
-  Report("%zd\n", LONG_MIN);
 }
 
 TEST(Printf, Padding) {
@@ -134,6 +133,16 @@ TEST(Printf, Padding) {
   TestAgainstLibc<int>("%03d - %03d", -1, -123);
   TestAgainstLibc<int>("%03d - %03d", 12, 1234);
   TestAgainstLibc<int>("%03d - %03d", -12, -1234);
+}
+
+TEST(Printf, Precision) {
+  char buf[1024];
+  uptr len = internal_snprintf(buf, sizeof(buf), "%.*s", 3, "12345");
+  EXPECT_EQ(3U, len);
+  EXPECT_STREQ("123", buf);
+  len = internal_snprintf(buf, sizeof(buf), "%.*s", 6, "12345");
+  EXPECT_EQ(5U, len);
+  EXPECT_STREQ("12345", buf);
 }
 
 }  // namespace __sanitizer
