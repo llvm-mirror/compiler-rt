@@ -146,7 +146,7 @@ void __asan_unpoison_memory_region(void const volatile *addr, uptr size) {
   }
 }
 
-bool __asan_address_is_poisoned(void const volatile *addr) {
+int __asan_address_is_poisoned(void const volatile *addr) {
   return __asan::AddressIsPoisoned((uptr)addr);
 }
 
@@ -155,6 +155,7 @@ uptr __asan_region_is_poisoned(uptr beg, uptr size) {
   uptr end = beg + size;
   if (!AddrIsInMem(beg)) return beg;
   if (!AddrIsInMem(end)) return end;
+  CHECK_LT(beg, end);
   uptr aligned_b = RoundUpTo(beg, SHADOW_GRANULARITY);
   uptr aligned_e = RoundDownTo(end, SHADOW_GRANULARITY);
   uptr shadow_beg = MemToShadow(aligned_b);

@@ -25,6 +25,11 @@
 #include <vector>
 #include <limits>
 
+// ATTENTION!
+// Please don't call intercepted functions (including malloc() and friends)
+// in this test. The static runtime library is linked explicitly (without
+// -fsanitize=address), thus the interceptors do not work correctly on OS X.
+
 extern "C" {
 // Set specific ASan options for uninstrumented unittest.
 const char* __asan_default_options() {
@@ -216,4 +221,46 @@ TEST(AddressSanitizer, ShadowRegionIsPoisonedTest) {
   EXPECT_EQ(ptr, __asan_region_is_poisoned(ptr, 100));
   ptr = kHighShadowBeg + 200;
   EXPECT_EQ(ptr, __asan_region_is_poisoned(ptr, 100));
+}
+
+// Test __asan_load1 & friends.
+TEST(AddressSanitizer, LoadStoreCallbacks) {
+  typedef void (*CB)(uptr p);
+  CB cb[2][5] = {
+      {
+        __asan_load1, __asan_load2, __asan_load4, __asan_load8, __asan_load16,
+      }, {
+        __asan_store1, __asan_store2, __asan_store4, __asan_store8,
+        __asan_store16,
+      }
+  };
+
+  uptr buggy_ptr;
+
+  __asan_test_only_reported_buggy_pointer = &buggy_ptr;
+  StackTrace stack;
+  stack.trace[0] = 0x890;
+  stack.size = 1;
+
+  for (uptr len = 16; len <= 32; len++) {
+    char *ptr = (char*) __asan::asan_malloc(len, &stack);
+    uptr p = reinterpret_cast<uptr>(ptr);
+    for (uptr is_write = 0; is_write <= 1; is_write++) {
+      for (uptr size_log = 0; size_log <= 4; size_log++) {
+        uptr size = 1 << size_log;
+        CB call = cb[is_write][size_log];
+        // Iterate only size-aligned offsets.
+        for (uptr offset = 0; offset <= len; offset += size) {
+          buggy_ptr = 0;
+          call(p + offset);
+          if (offset + size <= len)
+            EXPECT_EQ(buggy_ptr, 0U);
+          else
+            EXPECT_EQ(buggy_ptr, p + offset);
+        }
+      }
+    }
+    __asan::asan_free(ptr, &stack, __asan::FROM_MALLOC);
+  }
+  __asan_test_only_reported_buggy_pointer = 0;
 }
