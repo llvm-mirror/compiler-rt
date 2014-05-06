@@ -40,15 +40,15 @@ void SetCommonFlagsDefaults(CommonFlags *f) {
   f->malloc_context_size = 1;
   f->log_path = "stderr";
   f->verbosity = 0;
-  f->detect_leaks = false;
+  f->detect_leaks = true;
   f->leak_check_at_exit = true;
   f->allocator_may_return_null = false;
   f->print_summary = true;
-  f->check_printf = false;
+  f->check_printf = true;
   // TODO(glider): tools may want to set different defaults for handle_segv.
   f->handle_segv = SANITIZER_NEEDS_SEGV;
   f->allow_user_segv_handler = false;
-  f->use_sigaltstack = false;
+  f->use_sigaltstack = true;
   f->detect_deadlocks = false;
   f->clear_shadow_mmap_threshold = 64 * 1024;
   f->color = "auto";

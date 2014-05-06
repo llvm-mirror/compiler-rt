@@ -536,6 +536,9 @@ struct Context {
   int nmissed_expected;
   atomic_uint64_t last_symbolize_time_ns;
 
+  void *background_thread;
+  atomic_uint32_t stop_background_thread;
+
   ThreadRegistry *thread_registry;
 
   Vector<RacyStacks> racy_stacks;
@@ -626,7 +629,7 @@ void ForkChildAfter(ThreadState *thr, uptr pc);
 void ReportRace(ThreadState *thr);
 bool OutputReport(Context *ctx,
                   const ScopedReport &srep,
-                  const ReportStack *suppress_stack1 = 0,
+                  const ReportStack *suppress_stack1,
                   const ReportStack *suppress_stack2 = 0,
                   const ReportLocation *suppress_loc = 0);
 bool IsFiredSuppression(Context *ctx,
