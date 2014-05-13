@@ -750,7 +750,7 @@ FORMAT_INTERCEPTOR_IMPL(__isoc99_sscanf, __isoc99_vsscanf, str, format)
       printf_common(ctx, format, aq);                                          \
     }                                                                          \
     int res = REAL(vname)(str, __VA_ARGS__);                                   \
-    if (res >= 0 && common_flags()->check_printf) {                            \
+    if (res >= 0) {                                                            \
       COMMON_INTERCEPTOR_WRITE_RANGE(ctx, str, res + 1);                       \
     }                                                                          \
     VPRINTF_INTERCEPTOR_RETURN();                                              \
@@ -764,7 +764,7 @@ FORMAT_INTERCEPTOR_IMPL(__isoc99_sscanf, __isoc99_vsscanf, str, format)
       printf_common(ctx, format, aq);                                          \
     }                                                                          \
     int res = REAL(vname)(str, size, __VA_ARGS__);                             \
-    if (res >= 0 && common_flags()->check_printf) {                            \
+    if (res >= 0) {                                                            \
       COMMON_INTERCEPTOR_WRITE_RANGE(ctx, str, Min(size, (SIZE_T)(res + 1)));  \
     }                                                                          \
     VPRINTF_INTERCEPTOR_RETURN();                                              \
@@ -774,12 +774,12 @@ FORMAT_INTERCEPTOR_IMPL(__isoc99_sscanf, __isoc99_vsscanf, str, format)
 #define VASPRINTF_INTERCEPTOR_IMPL(vname, strp, ...)                           \
   {                                                                            \
     VPRINTF_INTERCEPTOR_ENTER(vname, strp, __VA_ARGS__)                        \
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, strp, sizeof(char *));                 \
     if (common_flags()->check_printf) {                                        \
-      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, strp, sizeof(char *));               \
       printf_common(ctx, format, aq);                                          \
     }                                                                          \
     int res = REAL(vname)(strp, __VA_ARGS__);                                  \
-    if (res >= 0 && common_flags()->check_printf) {                            \
+    if (res >= 0) {                                                            \
       COMMON_INTERCEPTOR_WRITE_RANGE(ctx, *strp, res + 1);                     \
     }                                                                          \
     VPRINTF_INTERCEPTOR_RETURN();                                              \
@@ -3894,138 +3894,182 @@ INTERCEPTOR(__sanitizer_FILE *, fmemopen, void *buf, SIZE_T size,
 #define INIT_OPEN_MEMSTREAM
 #endif
 
-#define SANITIZER_COMMON_INTERCEPTORS_INIT \
-  INIT_TEXTDOMAIN;                         \
-  INIT_STRCMP;                             \
-  INIT_STRNCMP;                            \
-  INIT_STRCASECMP;                         \
-  INIT_STRNCASECMP;                        \
-  INIT_MEMCHR;                             \
-  INIT_MEMRCHR;                            \
-  INIT_READ;                               \
-  INIT_PREAD;                              \
-  INIT_PREAD64;                            \
-  INIT_READV;                              \
-  INIT_PREADV;                             \
-  INIT_PREADV64;                           \
-  INIT_WRITE;                              \
-  INIT_PWRITE;                             \
-  INIT_PWRITE64;                           \
-  INIT_WRITEV;                             \
-  INIT_PWRITEV;                            \
-  INIT_PWRITEV64;                          \
-  INIT_PRCTL;                              \
-  INIT_LOCALTIME_AND_FRIENDS;              \
-  INIT_STRPTIME;                           \
-  INIT_SCANF;                              \
-  INIT_ISOC99_SCANF;                       \
-  INIT_PRINTF;                             \
-  INIT_ISOC99_PRINTF;                      \
-  INIT_FREXP;                              \
-  INIT_FREXPF_FREXPL;                      \
-  INIT_GETPWNAM_AND_FRIENDS;               \
-  INIT_GETPWNAM_R_AND_FRIENDS;             \
-  INIT_GETPWENT;                           \
-  INIT_FGETPWENT;                          \
-  INIT_GETPWENT_R;                         \
-  INIT_SETPWENT;                           \
-  INIT_CLOCK_GETTIME;                      \
-  INIT_GETITIMER;                          \
-  INIT_TIME;                               \
-  INIT_GLOB;                               \
-  INIT_WAIT;                               \
-  INIT_WAIT4;                              \
-  INIT_INET;                               \
-  INIT_PTHREAD_GETSCHEDPARAM;              \
-  INIT_GETADDRINFO;                        \
-  INIT_GETNAMEINFO;                        \
-  INIT_GETSOCKNAME;                        \
-  INIT_GETHOSTBYNAME;                      \
-  INIT_GETHOSTBYNAME_R;                    \
-  INIT_GETSOCKOPT;                         \
-  INIT_ACCEPT;                             \
-  INIT_ACCEPT4;                            \
-  INIT_MODF;                               \
-  INIT_RECVMSG;                            \
-  INIT_GETPEERNAME;                        \
-  INIT_IOCTL;                              \
-  INIT_INET_ATON;                          \
-  INIT_SYSINFO;                            \
-  INIT_READDIR;                            \
-  INIT_READDIR64;                          \
-  INIT_PTRACE;                             \
-  INIT_SETLOCALE;                          \
-  INIT_GETCWD;                             \
-  INIT_GET_CURRENT_DIR_NAME;               \
-  INIT_STRTOIMAX;                          \
-  INIT_MBSTOWCS;                           \
-  INIT_MBSNRTOWCS;                         \
-  INIT_WCSTOMBS;                           \
-  INIT_WCSNRTOMBS;                         \
-  INIT_TCGETATTR;                          \
-  INIT_REALPATH;                           \
-  INIT_CANONICALIZE_FILE_NAME;             \
-  INIT_CONFSTR;                            \
-  INIT_SCHED_GETAFFINITY;                  \
-  INIT_STRERROR;                           \
-  INIT_STRERROR_R;                         \
-  INIT_XPG_STRERROR_R;                     \
-  INIT_SCANDIR;                            \
-  INIT_SCANDIR64;                          \
-  INIT_GETGROUPS;                          \
-  INIT_POLL;                               \
-  INIT_PPOLL;                              \
-  INIT_WORDEXP;                            \
-  INIT_SIGWAIT;                            \
-  INIT_SIGWAITINFO;                        \
-  INIT_SIGTIMEDWAIT;                       \
-  INIT_SIGSETOPS;                          \
-  INIT_SIGPENDING;                         \
-  INIT_SIGPROCMASK;                        \
-  INIT_BACKTRACE;                          \
-  INIT__EXIT;                              \
-  INIT_PTHREAD_MUTEX_LOCK;                 \
-  INIT_PTHREAD_MUTEX_UNLOCK;               \
-  INIT_GETMNTENT;                          \
-  INIT_GETMNTENT_R;                        \
-  INIT_STATFS;                             \
-  INIT_STATFS64;                           \
-  INIT_STATVFS;                            \
-  INIT_STATVFS64;                          \
-  INIT_INITGROUPS;                         \
-  INIT_ETHER;                              \
-  INIT_ETHER_R;                            \
-  INIT_SHMCTL;                             \
-  INIT_RANDOM_R;                           \
-  INIT_PTHREAD_ATTR_GET;                   \
-  INIT_PTHREAD_ATTR_GETINHERITSCHED;       \
-  INIT_PTHREAD_ATTR_GETAFFINITY_NP;        \
-  INIT_TMPNAM;                             \
-  INIT_TMPNAM_R;                           \
-  INIT_TEMPNAM;                            \
-  INIT_PTHREAD_SETNAME_NP;                 \
-  INIT_SINCOS;                             \
-  INIT_REMQUO;                             \
-  INIT_LGAMMA;                             \
-  INIT_LGAMMA_R;                           \
-  INIT_DRAND48_R;                          \
-  INIT_RAND_R;                             \
-  INIT_GETLINE;                            \
-  INIT_ICONV;                              \
-  INIT_TIMES;                              \
-  INIT_TLS_GET_ADDR;                       \
-  INIT_LISTXATTR;                          \
-  INIT_GETXATTR;                           \
-  INIT_GETRESID;                           \
-  INIT_GETIFADDRS;                         \
-  INIT_IF_INDEXTONAME;                     \
-  INIT_CAPGET;                             \
-  INIT_AEABI_MEM;                          \
-  INIT___BZERO;                            \
-  INIT_FTIME;                              \
-  INIT_XDR;                                \
-  INIT_TSEARCH;                            \
-  INIT_LIBIO_INTERNALS;                    \
-  INIT_FOPEN;                              \
+#if SANITIZER_INTERCEPT_OBSTACK
+static void initialize_obstack(__sanitizer_obstack *obstack) {
+  COMMON_INTERCEPTOR_INITIALIZE_RANGE(obstack, sizeof(*obstack));
+  if (obstack->chunk)
+    COMMON_INTERCEPTOR_INITIALIZE_RANGE(obstack->chunk,
+                                        sizeof(*obstack->chunk));
+}
+
+INTERCEPTOR(int, _obstack_begin_1, __sanitizer_obstack *obstack, int sz,
+            int align, void *(*alloc_fn)(uptr arg, uptr sz),
+            void (*free_fn)(uptr arg, void *p)) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, _obstack_begin_1, obstack, sz, align, alloc_fn,
+                           free_fn);
+  int res = REAL(_obstack_begin_1)(obstack, sz, align, alloc_fn, free_fn);
+  if (res) initialize_obstack(obstack);
+  return res;
+}
+INTERCEPTOR(int, _obstack_begin, __sanitizer_obstack *obstack, int sz,
+            int align, void *(*alloc_fn)(uptr sz), void (*free_fn)(void *p)) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, _obstack_begin, obstack, sz, align, alloc_fn,
+                           free_fn);
+  int res = REAL(_obstack_begin)(obstack, sz, align, alloc_fn, free_fn);
+  if (res) initialize_obstack(obstack);
+  return res;
+}
+INTERCEPTOR(void, _obstack_newchunk, __sanitizer_obstack *obstack, int length) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, _obstack_newchunk, obstack, length);
+  REAL(_obstack_newchunk)(obstack, length);
+  if (obstack->chunk)
+    COMMON_INTERCEPTOR_INITIALIZE_RANGE(
+        obstack->chunk, obstack->next_free - (char *)obstack->chunk);
+}
+#define INIT_OBSTACK                           \
+  COMMON_INTERCEPT_FUNCTION(_obstack_begin_1); \
+  COMMON_INTERCEPT_FUNCTION(_obstack_begin);   \
+  COMMON_INTERCEPT_FUNCTION(_obstack_newchunk);
+#else
+#define INIT_OBSTACK
+#endif
+
+static void InitializeCommonInterceptors() {
+  INIT_TEXTDOMAIN;
+  INIT_STRCMP;
+  INIT_STRNCMP;
+  INIT_STRCASECMP;
+  INIT_STRNCASECMP;
+  INIT_MEMCHR;
+  INIT_MEMRCHR;
+  INIT_READ;
+  INIT_PREAD;
+  INIT_PREAD64;
+  INIT_READV;
+  INIT_PREADV;
+  INIT_PREADV64;
+  INIT_WRITE;
+  INIT_PWRITE;
+  INIT_PWRITE64;
+  INIT_WRITEV;
+  INIT_PWRITEV;
+  INIT_PWRITEV64;
+  INIT_PRCTL;
+  INIT_LOCALTIME_AND_FRIENDS;
+  INIT_STRPTIME;
+  INIT_SCANF;
+  INIT_ISOC99_SCANF;
+  INIT_PRINTF;
+  INIT_ISOC99_PRINTF;
+  INIT_FREXP;
+  INIT_FREXPF_FREXPL;
+  INIT_GETPWNAM_AND_FRIENDS;
+  INIT_GETPWNAM_R_AND_FRIENDS;
+  INIT_GETPWENT;
+  INIT_FGETPWENT;
+  INIT_GETPWENT_R;
+  INIT_SETPWENT;
+  INIT_CLOCK_GETTIME;
+  INIT_GETITIMER;
+  INIT_TIME;
+  INIT_GLOB;
+  INIT_WAIT;
+  INIT_WAIT4;
+  INIT_INET;
+  INIT_PTHREAD_GETSCHEDPARAM;
+  INIT_GETADDRINFO;
+  INIT_GETNAMEINFO;
+  INIT_GETSOCKNAME;
+  INIT_GETHOSTBYNAME;
+  INIT_GETHOSTBYNAME_R;
+  INIT_GETSOCKOPT;
+  INIT_ACCEPT;
+  INIT_ACCEPT4;
+  INIT_MODF;
+  INIT_RECVMSG;
+  INIT_GETPEERNAME;
+  INIT_IOCTL;
+  INIT_INET_ATON;
+  INIT_SYSINFO;
+  INIT_READDIR;
+  INIT_READDIR64;
+  INIT_PTRACE;
+  INIT_SETLOCALE;
+  INIT_GETCWD;
+  INIT_GET_CURRENT_DIR_NAME;
+  INIT_STRTOIMAX;
+  INIT_MBSTOWCS;
+  INIT_MBSNRTOWCS;
+  INIT_WCSTOMBS;
+  INIT_WCSNRTOMBS;
+  INIT_TCGETATTR;
+  INIT_REALPATH;
+  INIT_CANONICALIZE_FILE_NAME;
+  INIT_CONFSTR;
+  INIT_SCHED_GETAFFINITY;
+  INIT_STRERROR;
+  INIT_STRERROR_R;
+  INIT_XPG_STRERROR_R;
+  INIT_SCANDIR;
+  INIT_SCANDIR64;
+  INIT_GETGROUPS;
+  INIT_POLL;
+  INIT_PPOLL;
+  INIT_WORDEXP;
+  INIT_SIGWAIT;
+  INIT_SIGWAITINFO;
+  INIT_SIGTIMEDWAIT;
+  INIT_SIGSETOPS;
+  INIT_SIGPENDING;
+  INIT_SIGPROCMASK;
+  INIT_BACKTRACE;
+  INIT__EXIT;
+  INIT_PTHREAD_MUTEX_LOCK;
+  INIT_PTHREAD_MUTEX_UNLOCK;
+  INIT_GETMNTENT;
+  INIT_GETMNTENT_R;
+  INIT_STATFS;
+  INIT_STATFS64;
+  INIT_STATVFS;
+  INIT_STATVFS64;
+  INIT_INITGROUPS;
+  INIT_ETHER;
+  INIT_ETHER_R;
+  INIT_SHMCTL;
+  INIT_RANDOM_R;
+  INIT_PTHREAD_ATTR_GET;
+  INIT_PTHREAD_ATTR_GETINHERITSCHED;
+  INIT_PTHREAD_ATTR_GETAFFINITY_NP;
+  INIT_TMPNAM;
+  INIT_TMPNAM_R;
+  INIT_TEMPNAM;
+  INIT_PTHREAD_SETNAME_NP;
+  INIT_SINCOS;
+  INIT_REMQUO;
+  INIT_LGAMMA;
+  INIT_LGAMMA_R;
+  INIT_DRAND48_R;
+  INIT_RAND_R;
+  INIT_GETLINE;
+  INIT_ICONV;
+  INIT_TIMES;
+  INIT_TLS_GET_ADDR;
+  INIT_LISTXATTR;
+  INIT_GETXATTR;
+  INIT_GETRESID;
+  INIT_GETIFADDRS;
+  INIT_IF_INDEXTONAME;
+  INIT_CAPGET;
+  INIT_AEABI_MEM;
+  INIT___BZERO;
+  INIT_FTIME;
+  INIT_XDR;
+  INIT_TSEARCH;
+  INIT_LIBIO_INTERNALS;
+  INIT_FOPEN;
   INIT_OPEN_MEMSTREAM;
-/**/
+  INIT_OBSTACK;
+}

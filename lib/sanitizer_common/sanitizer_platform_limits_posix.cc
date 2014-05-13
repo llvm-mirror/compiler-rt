@@ -115,6 +115,7 @@
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
 #include <glob.h>
+#include <obstack.h>
 #include <mqueue.h>
 #include <net/if_ppp.h>
 #include <netax25/ax25.h>
@@ -288,15 +289,21 @@ namespace __sanitizer {
   int ptrace_setfpregs = PTRACE_SETFPREGS;
   int ptrace_getfpxregs = PTRACE_GETFPXREGS;
   int ptrace_setfpxregs = PTRACE_SETFPXREGS;
+#if (defined(PTRACE_GETSIGINFO) && defined(PTRACE_SETSIGINFO)) ||              \
+    (defined(PT_GETSIGINFO) && defined(PT_SETSIGINFO))
   int ptrace_getsiginfo = PTRACE_GETSIGINFO;
   int ptrace_setsiginfo = PTRACE_SETSIGINFO;
+#else
+  int ptrace_getsiginfo = -1;
+  int ptrace_setsiginfo = -1;
+#endif  // PTRACE_GETSIGINFO/PTRACE_SETSIGINFO
 #if defined(PTRACE_GETREGSET) && defined(PTRACE_SETREGSET)
   int ptrace_getregset = PTRACE_GETREGSET;
   int ptrace_setregset = PTRACE_SETREGSET;
 #else
   int ptrace_getregset = -1;
   int ptrace_setregset = -1;
-#endif
+#endif  // PTRACE_GETREGSET/PTRACE_SETREGSET
 #endif
 
   unsigned path_max = PATH_MAX;
@@ -1143,6 +1150,17 @@ CHECK_SIZE_AND_OFFSET(FILE, _IO_save_end);
 CHECK_SIZE_AND_OFFSET(FILE, _markers);
 CHECK_SIZE_AND_OFFSET(FILE, _chain);
 CHECK_SIZE_AND_OFFSET(FILE, _fileno);
+#endif
+
+#if SANITIZER_LINUX && !SANITIZER_ANDROID
+COMPILER_CHECK(sizeof(__sanitizer__obstack_chunk) <= sizeof(_obstack_chunk));
+CHECK_SIZE_AND_OFFSET(_obstack_chunk, limit);
+CHECK_SIZE_AND_OFFSET(_obstack_chunk, prev);
+CHECK_TYPE_SIZE(obstack);
+CHECK_SIZE_AND_OFFSET(obstack, chunk_size);
+CHECK_SIZE_AND_OFFSET(obstack, chunk);
+CHECK_SIZE_AND_OFFSET(obstack, object_base);
+CHECK_SIZE_AND_OFFSET(obstack, next_free);
 #endif
 
 #endif  // SANITIZER_LINUX || SANITIZER_FREEBSD || SANITIZER_MAC

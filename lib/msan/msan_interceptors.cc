@@ -67,8 +67,7 @@ bool IsInInterceptorScope() {
     if (offset >= 0 && __msan::flags()->report_umrs) {                       \
       GET_CALLER_PC_BP_SP;                                                   \
       (void) sp;                                                             \
-      Printf("UMR in %s at offset %d inside [%p, +%d) \n", __func__,         \
-             offset, x, n);                                                  \
+      ReportUMRInsideAddressRange(__func__, x, n, offset);                   \
       __msan::PrintWarningWithOrigin(pc, bp,                                 \
                                      __msan_get_origin((char *)x + offset)); \
       if (__msan::flags()->halt_on_error) {                                  \
@@ -379,44 +378,7 @@ INTERCEPTOR_STRTO_BASE_LOC(long long, strtoll_l)            // NOLINT
 INTERCEPTOR_STRTO_BASE_LOC(unsigned long, strtoul_l)        // NOLINT
 INTERCEPTOR_STRTO_BASE_LOC(unsigned long long, strtoull_l)  // NOLINT
 
-INTERCEPTOR(int, vasprintf, char **strp, const char *format, va_list ap) {
-  ENSURE_MSAN_INITED();
-  int res = REAL(vasprintf)(strp, format, ap);
-  if (res >= 0 && !__msan_has_dynamic_component()) {
-    __msan_unpoison(strp, sizeof(*strp));
-    __msan_unpoison(*strp, res + 1);
-  }
-  return res;
-}
-
-INTERCEPTOR(int, asprintf, char **strp, const char *format, ...) {  // NOLINT
-  ENSURE_MSAN_INITED();
-  va_list ap;
-  va_start(ap, format);
-  int res = vasprintf(strp, format, ap);  // NOLINT
-  va_end(ap);
-  return res;
-}
-
-INTERCEPTOR(int, vsnprintf, char *str, uptr size,
-            const char *format, va_list ap) {
-  ENSURE_MSAN_INITED();
-  int res = REAL(vsnprintf)(str, size, format, ap);
-  if (res >= 0 && !__msan_has_dynamic_component()) {
-    __msan_unpoison(str, res + 1);
-  }
-  return res;
-}
-
-INTERCEPTOR(int, vsprintf, char *str, const char *format, va_list ap) {
-  ENSURE_MSAN_INITED();
-  int res = REAL(vsprintf)(str, format, ap);
-  if (res >= 0 && !__msan_has_dynamic_component()) {
-    __msan_unpoison(str, res + 1);
-  }
-  return res;
-}
-
+// FIXME: support *wprintf in common format interceptors.
 INTERCEPTOR(int, vswprintf, void *str, uptr size, void *format, va_list ap) {
   ENSURE_MSAN_INITED();
   int res = REAL(vswprintf)(str, size, format, ap);
@@ -426,30 +388,29 @@ INTERCEPTOR(int, vswprintf, void *str, uptr size, void *format, va_list ap) {
   return res;
 }
 
-INTERCEPTOR(int, sprintf, char *str, const char *format, ...) {  // NOLINT
-  ENSURE_MSAN_INITED();
-  va_list ap;
-  va_start(ap, format);
-  int res = vsprintf(str, format, ap);  // NOLINT
-  va_end(ap);
-  return res;
-}
-
-INTERCEPTOR(int, snprintf, char *str, uptr size, const char *format, ...) {
-  ENSURE_MSAN_INITED();
-  va_list ap;
-  va_start(ap, format);
-  int res = vsnprintf(str, size, format, ap);
-  va_end(ap);
-  return res;
-}
-
 INTERCEPTOR(int, swprintf, void *str, uptr size, void *format, ...) {
   ENSURE_MSAN_INITED();
   va_list ap;
   va_start(ap, format);
   int res = vswprintf(str, size, format, ap);
   va_end(ap);
+  return res;
+}
+
+INTERCEPTOR(SIZE_T, strxfrm, char *dest, const char *src, SIZE_T n) {
+  ENSURE_MSAN_INITED();
+  CHECK_UNPOISONED(src, REAL(strlen)(src) + 1);
+  SIZE_T res = REAL(strxfrm)(dest, src, n);
+  if (res < n) __msan_unpoison(dest, res + 1);
+  return res;
+}
+
+INTERCEPTOR(SIZE_T, strxfrm_l, char *dest, const char *src, SIZE_T n,
+            void *loc) {
+  ENSURE_MSAN_INITED();
+  CHECK_UNPOISONED(src, REAL(strlen)(src) + 1);
+  SIZE_T res = REAL(strxfrm_l)(dest, src, n, loc);
+  if (res < n) __msan_unpoison(dest, res + 1);
   return res;
 }
 
@@ -983,8 +944,14 @@ INTERCEPTOR(int, getrusage, int who, void *usage) {
 
 class SignalHandlerScope {
  public:
-  SignalHandlerScope() { GetCurrentThread()->EnterSignalHandler(); }
-  ~SignalHandlerScope() { GetCurrentThread()->LeaveSignalHandler(); }
+  SignalHandlerScope() {
+    if (MsanThread *t = GetCurrentThread())
+      t->EnterSignalHandler();
+  }
+  ~SignalHandlerScope() {
+    if (MsanThread *t = GetCurrentThread())
+      t->LeaveSignalHandler();
+  }
 };
 
 // sigactions_mu guarantees atomicity of sigaction() and signal() calls.
@@ -1265,8 +1232,6 @@ int OnExit() {
   } while (false)  // FIXME
 #define COMMON_INTERCEPTOR_BLOCK_REAL(name) REAL(name)
 #define COMMON_INTERCEPTOR_ON_EXIT(ctx) OnExit()
-// FIXME: update Msan to use common printf interceptors
-#define SANITIZER_INTERCEPT_PRINTF 0
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
 
 #define COMMON_SYSCALL_PRE_READ_RANGE(p, s) CHECK_UNPOISONED(p, s)
@@ -1488,7 +1453,7 @@ void CopyPoison(void *dst, const void *src, uptr size, StackTrace *stack) {
 void InitializeInterceptors() {
   static int inited = 0;
   CHECK_EQ(inited, 0);
-  SANITIZER_COMMON_INTERCEPTORS_INIT;
+  InitializeCommonInterceptors();
 
   INTERCEPT_FUNCTION(mmap);
   INTERCEPT_FUNCTION(mmap64);
@@ -1547,14 +1512,10 @@ void InitializeInterceptors() {
   INTERCEPT_FUNCTION(strtoll_l);
   INTERCEPT_FUNCTION(strtoul_l);
   INTERCEPT_FUNCTION(strtoull_l);
-  INTERCEPT_FUNCTION(vasprintf);
-  INTERCEPT_FUNCTION(asprintf);
-  INTERCEPT_FUNCTION(vsprintf);
-  INTERCEPT_FUNCTION(vsnprintf);
   INTERCEPT_FUNCTION(vswprintf);
-  INTERCEPT_FUNCTION(sprintf);  // NOLINT
-  INTERCEPT_FUNCTION(snprintf);
   INTERCEPT_FUNCTION(swprintf);
+  INTERCEPT_FUNCTION(strxfrm);
+  INTERCEPT_FUNCTION(strxfrm_l);
   INTERCEPT_FUNCTION(strftime);
   INTERCEPT_FUNCTION(strftime_l);
   INTERCEPT_FUNCTION(__strftime_l);
