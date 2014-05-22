@@ -454,8 +454,13 @@ void BlockingMutex::CheckLocked() {
 // Note that getdents64 uses a different structure format. We only provide the
 // 32-bit syscall here.
 struct linux_dirent {
+#if SANITIZER_X32
+  u64 d_ino;
+  u64 d_off;
+#else
   unsigned long      d_ino;
   unsigned long      d_off;
+#endif
   unsigned short     d_reclen;
   char               d_name[256];
 };
@@ -555,8 +560,9 @@ uptr internal_sigprocmask(int how, __sanitizer_sigset_t *set,
 #else
   __sanitizer_kernel_sigset_t *k_set = (__sanitizer_kernel_sigset_t *)set;
   __sanitizer_kernel_sigset_t *k_oldset = (__sanitizer_kernel_sigset_t *)oldset;
-  return internal_syscall(SYSCALL(rt_sigprocmask), (uptr)how, &k_set->sig[0],
-      &k_oldset->sig[0], sizeof(__sanitizer_kernel_sigset_t));
+  return internal_syscall(SYSCALL(rt_sigprocmask), (uptr)how,
+                          (uptr)&k_set->sig[0], (uptr)&k_oldset->sig[0],
+                          sizeof(__sanitizer_kernel_sigset_t));
 #endif
 }
 
