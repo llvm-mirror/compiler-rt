@@ -117,13 +117,15 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
 #define COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, size) \
   ASAN_WRITE_RANGE(ptr, size)
 #define COMMON_INTERCEPTOR_READ_RANGE(ctx, ptr, size) ASAN_READ_RANGE(ptr, size)
-#define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)                       \
-  do {                                                                 \
-    if (asan_init_is_running) return REAL(func)(__VA_ARGS__);          \
-    ctx = 0;                                                           \
-    (void) ctx;                                                        \
-    if (SANITIZER_MAC && !asan_inited) return REAL(func)(__VA_ARGS__); \
-    ENSURE_ASAN_INITED();                                              \
+#define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)                               \
+  do {                                                                         \
+    if (asan_init_is_running)                                                  \
+      return REAL(func)(__VA_ARGS__);                                          \
+    ctx = 0;                                                                   \
+    (void) ctx;                                                                \
+    if (SANITIZER_MAC && UNLIKELY(!asan_inited))                               \
+      return REAL(func)(__VA_ARGS__);                                          \
+    ENSURE_ASAN_INITED();                                                      \
   } while (false)
 #define COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd) \
   do {                                         \
@@ -328,7 +330,7 @@ static inline int CharCmp(unsigned char c1, unsigned char c2) {
 }
 
 INTERCEPTOR(int, memcmp, const void *a1, const void *a2, uptr size) {
-  if (!asan_inited) return internal_memcmp(a1, a2, size);
+  if (UNLIKELY(!asan_inited)) return internal_memcmp(a1, a2, size);
   ENSURE_ASAN_INITED();
   if (flags()->replace_intrin) {
     if (flags()->strict_memcmp) {
@@ -355,24 +357,8 @@ INTERCEPTOR(int, memcmp, const void *a1, const void *a2, uptr size) {
   return REAL(memcmp(a1, a2, size));
 }
 
-#define MEMMOVE_BODY { \
-  if (!asan_inited) return internal_memmove(to, from, size); \
-  if (asan_init_is_running) { \
-    return REAL(memmove)(to, from, size); \
-  } \
-  ENSURE_ASAN_INITED(); \
-  if (flags()->replace_intrin) { \
-    ASAN_READ_RANGE(from, size); \
-    ASAN_WRITE_RANGE(to, size); \
-  } \
-  return internal_memmove(to, from, size); \
-}
-
-INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) MEMMOVE_BODY
-
-INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
-#if !SANITIZER_MAC
-  if (!asan_inited) return internal_memcpy(to, from, size);
+void *__asan_memcpy(void *to, const void *from, uptr size) {
+  if (UNLIKELY(!asan_inited)) return internal_memcpy(to, from, size);
   // memcpy is called during __asan_init() from the internals
   // of printf(...).
   if (asan_init_is_running) {
@@ -389,19 +375,10 @@ INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
     ASAN_WRITE_RANGE(to, size);
   }
   return REAL(memcpy)(to, from, size);
-#else
-  // At least on 10.7 and 10.8 both memcpy() and memmove() are being replaced
-  // with WRAP(memcpy). As a result, false positives are reported for memmove()
-  // calls. If we just disable error reporting with
-  // ASAN_OPTIONS=replace_intrin=0, memmove() is still replaced with
-  // internal_memcpy(), which may lead to crashes, see
-  // http://llvm.org/bugs/show_bug.cgi?id=16362.
-  MEMMOVE_BODY
-#endif  // !SANITIZER_MAC
 }
 
-INTERCEPTOR(void*, memset, void *block, int c, uptr size) {
-  if (!asan_inited) return internal_memset(block, c, size);
+void *__asan_memset(void *block, int c, uptr size) {
+  if (UNLIKELY(!asan_inited)) return internal_memset(block, c, size);
   // memset is called inside Printf.
   if (asan_init_is_running) {
     return REAL(memset)(block, c, size);
@@ -413,8 +390,41 @@ INTERCEPTOR(void*, memset, void *block, int c, uptr size) {
   return REAL(memset)(block, c, size);
 }
 
+void *__asan_memmove(void *to, const void *from, uptr size) {
+  if (UNLIKELY(!asan_inited))
+    return internal_memmove(to, from, size);
+  ENSURE_ASAN_INITED();
+  if (flags()->replace_intrin) {
+    ASAN_READ_RANGE(from, size);
+    ASAN_WRITE_RANGE(to, size);
+  }
+  return internal_memmove(to, from, size);
+}
+
+INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) {
+  return __asan_memmove(to, from, size);
+}
+
+INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
+#if !SANITIZER_MAC
+  return __asan_memcpy(to, from, size);
+#else
+  // At least on 10.7 and 10.8 both memcpy() and memmove() are being replaced
+  // with WRAP(memcpy). As a result, false positives are reported for memmove()
+  // calls. If we just disable error reporting with
+  // ASAN_OPTIONS=replace_intrin=0, memmove() is still replaced with
+  // internal_memcpy(), which may lead to crashes, see
+  // http://llvm.org/bugs/show_bug.cgi?id=16362.
+  return __asan_memmove(to, from, size);
+#endif  // !SANITIZER_MAC
+}
+
+INTERCEPTOR(void*, memset, void *block, int c, uptr size) {
+  return __asan_memset(block, c, size);
+}
+
 INTERCEPTOR(char*, strchr, const char *str, int c) {
-  if (!asan_inited) return internal_strchr(str, c);
+  if (UNLIKELY(!asan_inited)) return internal_strchr(str, c);
   // strchr is called inside create_purgeable_zone() when MallocGuardEdges=1 is
   // used.
   if (asan_init_is_running) {
@@ -483,7 +493,7 @@ INTERCEPTOR(char*, strncat, char *to, const char *from, uptr size) {
 
 INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
 #if SANITIZER_MAC
-  if (!asan_inited) return REAL(strcpy)(to, from);  // NOLINT
+  if (UNLIKELY(!asan_inited)) return REAL(strcpy)(to, from);  // NOLINT
 #endif
   // strcpy is called from malloc_default_purgeable_zone()
   // in __asan::ReplaceSystemAlloc() on Mac.
@@ -502,7 +512,7 @@ INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
 
 #if ASAN_INTERCEPT_STRDUP
 INTERCEPTOR(char*, strdup, const char *s) {
-  if (!asan_inited) return internal_strdup(s);
+  if (UNLIKELY(!asan_inited)) return internal_strdup(s);
   ENSURE_ASAN_INITED();
   uptr length = REAL(strlen)(s);
   if (flags()->replace_str) {
@@ -516,7 +526,7 @@ INTERCEPTOR(char*, strdup, const char *s) {
 #endif
 
 INTERCEPTOR(uptr, strlen, const char *s) {
-  if (!asan_inited) return internal_strlen(s);
+  if (UNLIKELY(!asan_inited)) return internal_strlen(s);
   // strlen is called from malloc_default_purgeable_zone()
   // in __asan::ReplaceSystemAlloc() on Mac.
   if (asan_init_is_running) {
@@ -598,7 +608,7 @@ INTERCEPTOR(long, strtol, const char *nptr,  // NOLINT
 
 INTERCEPTOR(int, atoi, const char *nptr) {
 #if SANITIZER_MAC
-  if (!asan_inited) return REAL(atoi)(nptr);
+  if (UNLIKELY(!asan_inited)) return REAL(atoi)(nptr);
 #endif
   ENSURE_ASAN_INITED();
   if (!flags()->replace_str) {
@@ -617,7 +627,7 @@ INTERCEPTOR(int, atoi, const char *nptr) {
 
 INTERCEPTOR(long, atol, const char *nptr) {  // NOLINT
 #if SANITIZER_MAC
-  if (!asan_inited) return REAL(atol)(nptr);
+  if (UNLIKELY(!asan_inited)) return REAL(atol)(nptr);
 #endif
   ENSURE_ASAN_INITED();
   if (!flags()->replace_str) {
@@ -674,7 +684,7 @@ static void AtCxaAtexit(void *unused) {
 INTERCEPTOR(int, __cxa_atexit, void (*func)(void *), void *arg,
             void *dso_handle) {
 #if SANITIZER_MAC
-  if (!asan_inited) return REAL(__cxa_atexit)(func, arg, dso_handle);
+  if (UNLIKELY(!asan_inited)) return REAL(__cxa_atexit)(func, arg, dso_handle);
 #endif
   ENSURE_ASAN_INITED();
   int res = REAL(__cxa_atexit)(func, arg, dso_handle);
@@ -715,7 +725,7 @@ void InitializeAsanInterceptors() {
   static bool was_called_once;
   CHECK(was_called_once == false);
   was_called_once = true;
-  SANITIZER_COMMON_INTERCEPTORS_INIT;
+  InitializeCommonInterceptors();
 
   // Intercept mem* functions.
   ASAN_INTERCEPT_FUNC(memcmp);

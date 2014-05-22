@@ -53,7 +53,7 @@ static void AsanDie() {
       UnmapOrDie((void*)kLowShadowBeg, kHighShadowEnd - kLowShadowBeg);
     }
   }
-  if (flags()->coverage)
+  if (common_flags()->coverage)
     __sanitizer_cov_dump();
   if (death_callback)
     death_callback();
@@ -80,7 +80,7 @@ static const char *MaybeCallAsanDefaultOptions() {
   return (&__asan_default_options) ? __asan_default_options() : "";
 }
 
-static const char *MaybeUseAsanDefaultOptionsCompileDefiniton() {
+static const char *MaybeUseAsanDefaultOptionsCompileDefinition() {
 #ifdef ASAN_DEFAULT_OPTIONS
 // Stringize the macro value.
 # define ASAN_STRINGIZE(x) #x
@@ -172,13 +172,11 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->atexit, "atexit",
       "If set, prints ASan exit stats even after program terminates "
       "successfully.");
-  ParseFlag(str, &f->coverage, "coverage",
-      "If set, coverage information will be dumped at program shutdown (if the "
-      "coverage instrumentation was enabled at compile time).");
 
   ParseFlag(str, &f->disable_core, "disable_core",
       "Disable core dumping. By default, disable_core=1 on 64-bit to avoid "
-      "dumping a 16T+ core file.");
+      "dumping a 16T+ core file. "
+      "Ignored on OSes that don't dump core by default.");
 
   ParseFlag(str, &f->allow_reexec, "allow_reexec",
       "Allow the tool to re-exec the program. This may interfere badly with "
@@ -220,14 +218,26 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
       "If non-zero, try to detect operations like <, <=, >, >= and - on "
       "invalid pointer pairs (e.g. when pointers belong to different objects). "
       "The bigger the value the harder we try.");
+
+  ParseFlag(str, &f->detect_container_overflow,
+      "detect_container_overflow",
+      "If true, honor the container overflow  annotations. "
+      "See https://code.google.com/p/address-sanitizer/wiki/ContainerOverflow");
+
+  ParseFlag(str, &f->detect_odr_violation, "detect_odr_violation",
+            "If >=2, detect violation of One-Definition-Rule (ODR); "
+            "If ==1, detect ODR-violation only if the two variables "
+            "have different sizes");
 }
 
 void InitializeFlags(Flags *f, const char *env) {
   CommonFlags *cf = common_flags();
   SetCommonFlagsDefaults(cf);
+  cf->detect_leaks = CAN_SANITIZE_LEAKS;
   cf->external_symbolizer_path = GetEnv("ASAN_SYMBOLIZER_PATH");
   cf->malloc_context_size = kDefaultMallocContextSize;
   cf->intercept_tls_get_addr = true;
+  cf->coverage = false;
 
   internal_memset(f, 0, sizeof(*f));
   f->quarantine_size = (ASAN_LOW_MEMORY) ? 1UL << 26 : 1UL << 28;
@@ -254,22 +264,24 @@ void InitializeFlags(Flags *f, const char *env) {
   f->print_stats = false;
   f->print_legend = true;
   f->atexit = false;
-  f->coverage = false;
   f->disable_core = (SANITIZER_WORDSIZE == 64);
   f->allow_reexec = true;
   f->print_full_thread_history = true;
   f->poison_heap = true;
   f->poison_partial = true;
   // Turn off alloc/dealloc mismatch checker on Mac and Windows for now.
+  // https://code.google.com/p/address-sanitizer/issues/detail?id=131
+  // https://code.google.com/p/address-sanitizer/issues/detail?id=309
   // TODO(glider,timurrrr): Fix known issues and enable this back.
   f->alloc_dealloc_mismatch = (SANITIZER_MAC == 0) && (SANITIZER_WINDOWS == 0);
   f->strict_memcmp = true;
   f->strict_init_order = false;
   f->start_deactivated = false;
   f->detect_invalid_pointer_pairs = 0;
+  f->detect_container_overflow = true;
 
   // Override from compile definition.
-  ParseFlagsFromString(f, MaybeUseAsanDefaultOptionsCompileDefiniton());
+  ParseFlagsFromString(f, MaybeUseAsanDefaultOptionsCompileDefinition());
 
   // Override from user-specified string.
   ParseFlagsFromString(f, MaybeCallAsanDefaultOptions());
@@ -282,13 +294,11 @@ void InitializeFlags(Flags *f, const char *env) {
     PrintFlagDescriptions();
   }
 
-#if !CAN_SANITIZE_LEAKS
-  if (cf->detect_leaks) {
+  if (!CAN_SANITIZE_LEAKS && cf->detect_leaks) {
     Report("%s: detect_leaks is not supported on this platform.\n",
            SanitizerToolName);
     cf->detect_leaks = false;
   }
-#endif
 
   // Make "strict_init_order" imply "check_initialization_order".
   // TODO(samsonov): Use a single runtime flag for an init-order checker.
@@ -381,9 +391,10 @@ ASAN_REPORT_ERROR_N(store, true)
     uptr sp = MEM_TO_SHADOW(addr);                                             \
     uptr s = size <= SHADOW_GRANULARITY ? *reinterpret_cast<u8 *>(sp)          \
                                         : *reinterpret_cast<u16 *>(sp);        \
-    if (s) {                                                                   \
-      if (size >= SHADOW_GRANULARITY ||                                        \
-          ((s8)((addr & (SHADOW_GRANULARITY - 1)) + size - 1)) >= (s8)s) {     \
+    if (UNLIKELY(s)) {                                                         \
+      if (UNLIKELY(size >= SHADOW_GRANULARITY ||                               \
+                   ((s8)((addr & (SHADOW_GRANULARITY - 1)) + size - 1)) >=     \
+                       (s8)s)) {                                               \
         if (__asan_test_only_reported_buggy_pointer) {                         \
           *__asan_test_only_reported_buggy_pointer = addr;                     \
         } else {                                                               \
@@ -404,6 +415,22 @@ ASAN_MEMORY_ACCESS_CALLBACK(store, true, 2)
 ASAN_MEMORY_ACCESS_CALLBACK(store, true, 4)
 ASAN_MEMORY_ACCESS_CALLBACK(store, true, 8)
 ASAN_MEMORY_ACCESS_CALLBACK(store, true, 16)
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE void __asan_loadN(uptr addr, uptr size) {
+  if (__asan_region_is_poisoned(addr, size)) {
+    GET_CALLER_PC_BP_SP;
+    __asan_report_error(pc, bp, sp, addr, false, size);
+  }
+}
+
+extern "C"
+NOINLINE INTERFACE_ATTRIBUTE void __asan_storeN(uptr addr, uptr size) {
+  if (__asan_region_is_poisoned(addr, size)) {
+    GET_CALLER_PC_BP_SP;
+    __asan_report_error(pc, bp, sp, addr, true, size);
+  }
+}
 
 // Force the linker to keep the symbols for various ASan interface functions.
 // We want to keep those in the executable in order to let the instrumented
@@ -525,10 +552,16 @@ static void PrintAddressSpaceLayout() {
 }
 
 static void AsanInitInternal() {
-  if (asan_inited) return;
+  if (LIKELY(asan_inited)) return;
   SanitizerToolName = "AddressSanitizer";
   CHECK(!asan_init_is_running && "ASan init calls itself!");
   asan_init_is_running = true;
+
+  // Initialize flags. This must be done early, because most of the
+  // initialization steps look at flags().
+  const char *options = GetEnv("ASAN_OPTIONS");
+  InitializeFlags(flags(), options);
+
   InitializeHighMemEnd();
 
   // Make sure we are not statically linked.
@@ -538,11 +571,6 @@ static void AsanInitInternal() {
   SetDieCallback(AsanDie);
   SetCheckFailedCallback(AsanCheckFailed);
   SetPrintfAndReportCallback(AppendToErrorMessageBuffer);
-
-  // Initialize flags. This must be done early, because most of the
-  // initialization steps look at flags().
-  const char *options = GetEnv("ASAN_OPTIONS");
-  InitializeFlags(flags(), options);
 
   if (!flags()->start_deactivated)
     ParseExtraActivationFlags();
@@ -568,7 +596,6 @@ static void AsanInitInternal() {
   InitializeAsanInterceptors();
 
   ReplaceSystemMalloc();
-  ReplaceOperatorsNewAndDelete();
 
   uptr shadow_start = kLowShadowBeg;
   if (kLowShadowBeg)
@@ -637,8 +664,10 @@ static void AsanInitInternal() {
   if (flags()->atexit)
     Atexit(asan_atexit);
 
-  if (flags()->coverage)
+  if (common_flags()->coverage) {
+    __sanitizer_cov_init();
     Atexit(__sanitizer_cov_dump);
+  }
 
   // interceptors
   InitTlsSize();
@@ -679,7 +708,7 @@ public:  // NOLINT
   AsanInitializer() {
     AsanCheckIncompatibleRT();
     AsanCheckDynamicRTPrereqs();
-    if (!asan_inited)
+    if (UNLIKELY(!asan_inited))
       __asan_init();
   }
 };

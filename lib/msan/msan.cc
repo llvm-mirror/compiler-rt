@@ -134,6 +134,8 @@ static void InitializeFlags(Flags *f, const char *options) {
   cf->external_symbolizer_path = GetEnv("MSAN_SYMBOLIZER_PATH");
   cf->malloc_context_size = 20;
   cf->handle_ioctl = true;
+  // FIXME: test and enable.
+  cf->check_printf = false;
 
   internal_memset(f, 0, sizeof(*f));
   f->poison_heap_with_zeroes = false;
@@ -237,6 +239,9 @@ const char *GetOriginDescrIfStack(u32 id, uptr *pc) {
 }
 
 u32 ChainOrigin(u32 id, StackTrace *stack) {
+  MsanThread *t = GetCurrentThread();
+  if (t && t->InSignalHandler())
+    return id;
   uptr idx = Min(stack->size, kStackTraceMax - 1);
   stack->trace[idx] = TRACE_MAKE_CHAINED(id);
   u32 new_id = StackDepotPut(stack->trace, idx + 1);
@@ -381,18 +386,21 @@ void __msan_print_shadow(const void *x, uptr size) {
     Printf("Not a valid application address: %p\n", x);
     return;
   }
+
+  DescribeMemoryRange(x, size);
+}
+
+void __msan_dump_shadow(const void *x, uptr size) {
+  if (!MEM_IS_APP(x)) {
+    Printf("Not a valid application address: %p\n", x);
+    return;
+  }
+
   unsigned char *s = (unsigned char*)MEM_TO_SHADOW(x);
-  u32 *o = (u32*)MEM_TO_ORIGIN(x);
   for (uptr i = 0; i < size; i++) {
     Printf("%x%x ", s[i] >> 4, s[i] & 0xf);
   }
   Printf("\n");
-  if (__msan_get_track_origins()) {
-    for (uptr i = 0; i < size / 4; i++) {
-      Printf(" o: %x ", o[i]);
-    }
-    Printf("\n");
-  }
 }
 
 sptr __msan_test_shadow(const void *x, uptr size) {
@@ -406,12 +414,13 @@ sptr __msan_test_shadow(const void *x, uptr size) {
 
 void __msan_check_mem_is_initialized(const void *x, uptr size) {
   if (!__msan::flags()->report_umrs) return;
-  sptr offset = __msan_test_shadow(x, size) < 0;
+  sptr offset = __msan_test_shadow(x, size);
   if (offset < 0)
     return;
 
   GET_CALLER_PC_BP_SP;
   (void)sp;
+  ReportUMRInsideAddressRange(__func__, x, size, offset);
   __msan::PrintWarningWithOrigin(pc, bp,
                                  __msan_get_origin(((char *)x) + offset));
   if (__msan::flags()->halt_on_error) {

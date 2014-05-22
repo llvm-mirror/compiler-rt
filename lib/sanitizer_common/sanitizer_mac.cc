@@ -126,6 +126,11 @@ int internal_sigaction(int signum, const void *act, void *oldact) {
                    (struct sigaction *)act, (struct sigaction *)oldact);
 }
 
+int internal_fork() {
+  // TODO(glider): this may call user's pthread_atfork() handlers which is bad.
+  return fork();
+}
+
 // ----------------- sanitizer_common.h
 bool FileExists(const char *filename) {
   struct stat st;
@@ -191,7 +196,8 @@ void ReExec() {
   UNIMPLEMENTED();
 }
 
-void PrepareForSandboxing() {
+void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
+  (void)args;
   // Nothing here for now.
 }
 

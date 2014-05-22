@@ -1,4 +1,4 @@
-// RUN: %clang_tsan -O1 %s -o %t && not %t 2>&1 | FileCheck %s
+// RUN: %clang_tsan -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,7 +44,6 @@ int main() {
 
 // CHECK: WARNING: ThreadSanitizer: signal handler spoils errno
 // CHECK:     #0 MyHandler(int, siginfo{{(_t)?}}*, void*) {{.*}}signal_errno.cc
-// CHECK:     #1 loop
-// CHECK:     #2 main
+// CHECK:     main
 // CHECK: SUMMARY: ThreadSanitizer: signal handler spoils errno{{.*}}MyHandler
 

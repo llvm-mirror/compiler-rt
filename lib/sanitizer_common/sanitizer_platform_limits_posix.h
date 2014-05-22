@@ -275,11 +275,10 @@ namespace __sanitizer {
 #endif
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
+
   struct __sanitizer_XDR {
     int x_op;
-    struct xdr_ops {
-      uptr fns[10];
-    } *x_ops;
+    void *x_ops;
     uptr x_public;
     uptr x_private;
     uptr x_base;
@@ -320,8 +319,14 @@ namespace __sanitizer {
     char **gr_mem;
   };
 
+#if defined(__x86_64__) && !defined(_LP64)
+  typedef long long __sanitizer_time_t;
+#else
+  typedef long __sanitizer_time_t;
+#endif
+
   struct __sanitizer_timeb {
-    long time;
+    __sanitizer_time_t time;
     unsigned short millitm;
     short timezone;
     short dstflag;
@@ -630,6 +635,30 @@ namespace __sanitizer {
 #endif
   };
 
+#if SANITIZER_LINUX && !SANITIZER_ANDROID
+  struct __sanitizer_FILE {
+    int _flags;
+    char *_IO_read_ptr;
+    char *_IO_read_end;
+    char *_IO_read_base;
+    char *_IO_write_base;
+    char *_IO_write_ptr;
+    char *_IO_write_end;
+    char *_IO_buf_base;
+    char *_IO_buf_end;
+    char *_IO_save_base;
+    char *_IO_backup_base;
+    char *_IO_save_end;
+    void *_markers;
+    __sanitizer_FILE *_chain;
+    int _fileno;
+  };
+# define SANITIZER_HAS_STRUCT_FILE 1
+#else
+  typedef void __sanitizer_FILE;
+# define SANITIZER_HAS_STRUCT_FILE 0
+#endif
+
 #if SANITIZER_LINUX && !SANITIZER_ANDROID && \
     (defined(__i386) || defined(__x86_64))
   extern unsigned struct_user_regs_struct_sz;
@@ -672,6 +701,21 @@ namespace __sanitizer {
   } __attribute__((packed));
 #else
   };
+#endif
+
+#if SANITIZER_LINUX && !SANITIZER_ANDROID
+struct __sanitizer__obstack_chunk {
+  char *limit;
+  struct __sanitizer__obstack_chunk *prev;
+};
+
+struct __sanitizer_obstack {
+  long chunk_size;
+  struct __sanitizer__obstack_chunk *chunk;
+  char *object_base;
+  char *next_free;
+  uptr more_fields[7];
+};
 #endif
 
 #define IOC_NRBITS 8

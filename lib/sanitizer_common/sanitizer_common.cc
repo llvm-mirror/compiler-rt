@@ -263,6 +263,11 @@ void DecreaseTotalMmap(uptr size) {
   atomic_fetch_sub(&g_total_mmaped, size, memory_order_relaxed);
 }
 
+static void (*sandboxing_callback)();
+void SetSandboxingCallback(void (*f)()) {
+  sandboxing_callback = f;
+}
+
 }  // namespace __sanitizer
 
 using namespace __sanitizer;  // NOLINT
@@ -295,9 +300,11 @@ void __sanitizer_set_report_path(const char *path) {
   }
 }
 
-void NOINLINE __sanitizer_sandbox_on_notify(void *reserved) {
-  (void)reserved;
-  PrepareForSandboxing();
+void NOINLINE
+__sanitizer_sandbox_on_notify(__sanitizer_sandbox_arguments *args) {
+  PrepareForSandboxing(args);
+  if (sandboxing_callback)
+    sandboxing_callback();
 }
 
 void __sanitizer_report_error_summary(const char *error_summary) {

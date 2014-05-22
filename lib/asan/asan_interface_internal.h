@@ -22,7 +22,7 @@ using __sanitizer::uptr;
 extern "C" {
   // This function should be called at the very beginning of the process,
   // before any instrumented code is executed and before any call to malloc.
-  // Everytime the asan ABI changes we also change the version number in this
+  // Every time the asan ABI changes we also change the version number in this
   // name. Objects build with incompatible asan ABI version
   // will not link with run-time.
   // Changes between ABI versions:
@@ -135,6 +135,15 @@ extern "C" {
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_store4(uptr p);
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_store8(uptr p);
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_store16(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_loadN(uptr p, uptr size);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_storeN(uptr p, uptr size);
+
+  SANITIZER_INTERFACE_ATTRIBUTE
+      void* __asan_memcpy(void *dst, const void *src, uptr size);
+  SANITIZER_INTERFACE_ATTRIBUTE
+      void* __asan_memset(void *s, int c, uptr n);
+  SANITIZER_INTERFACE_ATTRIBUTE
+      void* __asan_memmove(void* dest, const void* src, uptr n);
 }  // extern "C"
 
 #endif  // ASAN_INTERFACE_INTERNAL_H

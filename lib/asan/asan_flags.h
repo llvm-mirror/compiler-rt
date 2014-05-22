@@ -52,7 +52,6 @@ struct Flags {
   bool print_stats;
   bool print_legend;
   bool atexit;
-  bool coverage;
   bool disable_core;
   bool allow_reexec;
   bool print_full_thread_history;
@@ -63,6 +62,8 @@ struct Flags {
   bool strict_init_order;
   bool start_deactivated;
   int detect_invalid_pointer_pairs;
+  bool detect_container_overflow;
+  int detect_odr_violation;
 };
 
 extern Flags asan_flags_dont_use_directly;

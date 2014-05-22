@@ -17,6 +17,21 @@ if(CAN_TARGET_arm_android)
   list(APPEND ASAN_TESTSUITES ${CMAKE_CURRENT_BINARY_DIR}/ARMAndroidConfig)
 endif()
 
+if(CAN_TARGET_arm)
+  # This is only true if we are cross-compiling.
+  # Build all tests with host compiler and use host tools.
+  set(ASAN_TEST_TARGET_CC ${COMPILER_RT_TEST_COMPILER})
+  set(ASAN_TEST_TARGET_CFLAGS ${COMPILER_RT_TEST_COMPILER_CFLAGS})
+  set(ASAN_TEST_CONFIG_SUFFIX "-arm-linux")
+  set(ASAN_TEST_BITS "32")
+  set(ASAN_TEST_DYNAMIC False)
+  configure_lit_site_cfg(
+    ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.in
+    ${CMAKE_CURRENT_BINARY_DIR}/ARMLinuxConfig/lit.site.cfg
+    )
+  list(APPEND ASAN_TESTSUITES ${CMAKE_CURRENT_BINARY_DIR}/ARMLinuxConfig)
+endif()
+
 if(CAN_TARGET_x86_64 OR CAN_TARGET_powerpc64)
   set(ASAN_TEST_CONFIG_SUFFIX "64")
   set(ASAN_TEST_BITS "64")

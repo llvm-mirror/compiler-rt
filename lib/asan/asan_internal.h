@@ -50,12 +50,16 @@
 #endif
 
 #ifndef ASAN_DYNAMIC
-# define ASAN_DYNAMIC 0
+# ifdef PIC
+#  define ASAN_DYNAMIC 1
+# else
+#  define ASAN_DYNAMIC 0
+# endif
 #endif
 
 // All internal functions in asan reside inside the __asan namespace
 // to avoid namespace collisions with the user programs.
-// Seperate namespace also makes it simpler to distinguish the asan run-time
+// Separate namespace also makes it simpler to distinguish the asan run-time
 // functions from the instrumented user code in a profile.
 namespace __asan {
 
@@ -67,7 +71,6 @@ void AsanInitFromRtl();
 // asan_rtl.cc
 void NORETURN ShowStatsAndAbort();
 
-void ReplaceOperatorsNewAndDelete();
 // asan_malloc_linux.cc / asan_malloc_mac.cc
 void ReplaceSystemMalloc();
 
@@ -95,7 +98,7 @@ void AppendToErrorMessageBuffer(const char *buffer);
 
 void ParseExtraActivationFlags();
 
-// Platfrom-specific options.
+// Platform-specific options.
 #if SANITIZER_MAC
 bool PlatformHasDifferentMemcpyAndMemmove();
 # define PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE \

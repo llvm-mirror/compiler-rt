@@ -3,17 +3,17 @@
 // With allocator_may_return_null=1 the allocator should return 0.
 //
 // RUN: %clangxx_asan -O0 %s -o %t
-// RUN: not %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mCRASH
-// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mCRASH
-// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mNULL
-// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %t calloc 2>&1 | FileCheck %s --check-prefix=CHECK-cCRASH
-// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %t calloc 2>&1 | FileCheck %s --check-prefix=CHECK-cNULL
-// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %t calloc-overflow 2>&1 | FileCheck %s --check-prefix=CHECK-coCRASH
-// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %t calloc-overflow 2>&1 | FileCheck %s --check-prefix=CHECK-coNULL
-// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %t realloc 2>&1 | FileCheck %s --check-prefix=CHECK-rCRASH
-// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %t realloc 2>&1 | FileCheck %s --check-prefix=CHECK-rNULL
-// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %t realloc-after-malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mrCRASH
-// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %t realloc-after-malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mrNULL
+// RUN: not %run %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mCRASH
+// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %run %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mCRASH
+// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %run %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mNULL
+// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %run %t calloc 2>&1 | FileCheck %s --check-prefix=CHECK-cCRASH
+// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %run %t calloc 2>&1 | FileCheck %s --check-prefix=CHECK-cNULL
+// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %run %t calloc-overflow 2>&1 | FileCheck %s --check-prefix=CHECK-coCRASH
+// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %run %t calloc-overflow 2>&1 | FileCheck %s --check-prefix=CHECK-coNULL
+// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %run %t realloc 2>&1 | FileCheck %s --check-prefix=CHECK-rCRASH
+// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %run %t realloc 2>&1 | FileCheck %s --check-prefix=CHECK-rNULL
+// RUN: ASAN_OPTIONS=allocator_may_return_null=0 not %run %t realloc-after-malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mrCRASH
+// RUN: ASAN_OPTIONS=allocator_may_return_null=1     %run %t realloc-after-malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mrNULL
 
 #include <limits.h>
 #include <stdlib.h>
@@ -52,10 +52,12 @@ int main(int argc, char **argv) {
     *t = 42;
     x = (char*)realloc(t, size);
     assert(*t == 42);
+    free(t);
   }
   // The NULL pointer is printed differently on different systems, while (long)0
   // is always the same.
   fprintf(stderr, "x: %lx\n", (long)x);
+  free(x);
   return x != 0;
 }
 // CHECK-mCRASH: malloc:

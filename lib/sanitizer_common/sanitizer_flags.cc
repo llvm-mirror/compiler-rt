@@ -40,20 +40,22 @@ void SetCommonFlagsDefaults(CommonFlags *f) {
   f->malloc_context_size = 1;
   f->log_path = "stderr";
   f->verbosity = 0;
-  f->detect_leaks = false;
+  f->detect_leaks = true;
   f->leak_check_at_exit = true;
   f->allocator_may_return_null = false;
   f->print_summary = true;
-  f->check_printf = false;
+  f->check_printf = true;
   // TODO(glider): tools may want to set different defaults for handle_segv.
   f->handle_segv = SANITIZER_NEEDS_SEGV;
   f->allow_user_segv_handler = false;
-  f->use_sigaltstack = false;
+  f->use_sigaltstack = true;
   f->detect_deadlocks = false;
   f->clear_shadow_mmap_threshold = 64 * 1024;
   f->color = "auto";
   f->legacy_pthread_cond = false;
   f->intercept_tls_get_addr = false;
+  f->coverage = false;
+  f->full_address_space = false;
 }
 
 void ParseCommonFlagsFromString(CommonFlags *f, const char *str) {
@@ -122,6 +124,12 @@ void ParseCommonFlagsFromString(CommonFlags *f, const char *str) {
   ParseFlag(str, &f->mmap_limit_mb, "mmap_limit_mb",
             "Limit the amount of mmap-ed memory (excluding shadow) in Mb; "
             "not a user-facing flag, used mosly for testing the tools");
+  ParseFlag(str, &f->coverage, "coverage",
+      "If set, coverage information will be dumped at program shutdown (if the "
+      "coverage instrumentation was enabled at compile time).");
+  ParseFlag(str, &f->full_address_space, "full_address_space",
+            "Sanitize complete address space; "
+            "by default kernel area on 32-bit platforms will not be sanitized");
 
   // Do a sanity check for certain flags.
   if (f->malloc_context_size < 1)

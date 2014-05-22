@@ -1,7 +1,9 @@
 // Test that kernel area is not sanitized on 32-bit machines.
 //
 // RUN: %clangxx_asan %s -o %t
-// RUN: ASAN_OPTIONS=verbosity=1 %t 2>&1 | FileCheck %s --check-prefix=CHECK-%kernel_bits
+// RUN: ASAN_OPTIONS=verbosity=1 %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-%kernel_bits
+// RUN: ASAN_OPTIONS=verbosity=1:full_address_space=0 %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-%kernel_bits
+// RUN: ASAN_OPTIONS=verbosity=1:full_address_space=1 %run %t 2>&1 | FileCheck %s --check-prefix=CHECK-kernel-64-bits
 //
 // CHECK-kernel-32-bits: || `[0x38000000, 0xbfffffff]` || HighMem    ||
 // CHECK-kernel-32-bits: || `[0x27000000, 0x37ffffff]` || HighShadow ||

@@ -473,6 +473,7 @@ struct ThreadState {
 };
 
 #ifndef TSAN_GO
+__attribute__((tls_model("initial-exec")))
 extern THREADLOCAL char cur_thread_placeholder[];
 INLINE ThreadState *cur_thread() {
   return reinterpret_cast<ThreadState *>(&cur_thread_placeholder);
@@ -535,6 +536,9 @@ struct Context {
   int nreported;
   int nmissed_expected;
   atomic_uint64_t last_symbolize_time_ns;
+
+  void *background_thread;
+  atomic_uint32_t stop_background_thread;
 
   ThreadRegistry *thread_registry;
 
@@ -626,7 +630,7 @@ void ForkChildAfter(ThreadState *thr, uptr pc);
 void ReportRace(ThreadState *thr);
 bool OutputReport(Context *ctx,
                   const ScopedReport &srep,
-                  const ReportStack *suppress_stack1 = 0,
+                  const ReportStack *suppress_stack1,
                   const ReportStack *suppress_stack2 = 0,
                   const ReportLocation *suppress_loc = 0);
 bool IsFiredSuppression(Context *ctx,
@@ -772,6 +776,8 @@ Trace *ThreadTrace(int tid);
 extern "C" void __tsan_trace_switch();
 void ALWAYS_INLINE TraceAddEvent(ThreadState *thr, FastState fs,
                                         EventType typ, u64 addr) {
+  if (!kCollectHistory)
+    return;
   DCHECK_GE((int)typ, 0);
   DCHECK_LE((int)typ, 7);
   DCHECK_EQ(GetLsb(addr, 61), addr);

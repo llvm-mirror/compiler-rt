@@ -1,8 +1,8 @@
-// RUN: %clangxx_msan -m64 -O0 -g %s -o %t && %t
-// RUN: %clangxx_msan -m64 -O3 -g %s -o %t && %t
+// RUN: %clangxx_msan -m64 -O0 -g %s -o %t && %run %t
+// RUN: %clangxx_msan -m64 -O3 -g %s -o %t && %run %t
 
-// RUN: %clangxx_msan -DPOSITIVE -m64 -O0 -g %s -o %t && not %t 2>&1 | FileCheck %s
-// RUN: %clangxx_msan -DPOSITIVE -m64 -O3 -g %s -o %t && not %t 2>&1 | FileCheck %s
+// RUN: %clangxx_msan -DPOSITIVE -m64 -O0 -g %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_msan -DPOSITIVE -m64 -O3 -g %s -o %t && not %run %t 2>&1 | FileCheck %s
 
 #include <assert.h>
 #include <stdlib.h>
@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
   ifc.ifc_len = sizeof(ifreqs);
 #endif
   int res = ioctl(fd, SIOCGIFCONF, (void *)&ifc);
-  // CHECK: UMR in ioctl{{.*}} at offset 0
+  // CHECK: Uninitialized bytes in ioctl{{.*}} at offset 0 inside [0x{{.*}}, 4)
   // CHECK: WARNING: MemorySanitizer: use-of-uninitialized-value
   // CHECK: #{{.*}} in main {{.*}}ioctl_custom.cc:[[@LINE-3]]
   assert(res == 0);

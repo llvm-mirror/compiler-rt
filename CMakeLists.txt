@@ -57,8 +57,17 @@ if (NOT COMPILER_RT_STANDALONE_BUILD)
          ${LLVM_INCLUDE_TESTS})
  option(COMPILER_RT_ENABLE_WERROR "Fail and stop if warning is triggered"
         ${LLVM_ENABLE_WERROR})
-  # Use just-built Clang to compile/link tests.
-  set(COMPILER_RT_TEST_COMPILER ${LLVM_RUNTIME_OUTPUT_INTDIR}/clang)
+  # Use just-built Clang to compile/link tests on all platforms, except for
+  # Windows where we need to use clang-cl instead.
+  if(NOT MSVC)
+    set(COMPILER_RT_TEST_COMPILER ${LLVM_RUNTIME_OUTPUT_INTDIR}/clang)
+    set(COMPILER_RT_TEST_COMPILER_EXE "-o")
+    set(COMPILER_RT_TEST_COMPILER_OBJ "-o")
+  else()
+    set(COMPILER_RT_TEST_COMPILER ${LLVM_RUNTIME_OUTPUT_INTDIR}/clang-cl.exe)
+    set(COMPILER_RT_TEST_COMPILER_EXE "-Fe")
+    set(COMPILER_RT_TEST_COMPILER_OBJ "-Fo")
+  endif()
 else()
   # Take output dir and install path from the user.
   set(COMPILER_RT_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR} CACHE PATH
@@ -71,6 +80,8 @@ else()
   option(COMPILER_RT_ENABLE_WERROR "Fail and stop if warning is triggered" OFF)
   # Use a host compiler to compile/link tests.
   set(COMPILER_RT_TEST_COMPILER ${CMAKE_C_COMPILER} CACHE PATH "Compiler to use for testing")
+  set(COMPILER_RT_TEST_COMPILER_EXE "-o")
+  set(COMPILER_RT_TEST_COMPILER_OBJ "-o")
 
   if (NOT LLVM_CONFIG_PATH)
     find_program(LLVM_CONFIG_PATH "llvm-config"
@@ -119,6 +130,8 @@ else()
 endif()
 
 if("${COMPILER_RT_TEST_COMPILER}" MATCHES "clang[+]*$")
+  set(COMPILER_RT_TEST_COMPILER_ID Clang)
+elseif("${COMPILER_RT_TEST_COMPILER}" MATCHES "clang-cl.exe$")
   set(COMPILER_RT_TEST_COMPILER_ID Clang)
 else()
   set(COMPILER_RT_TEST_COMPILER_ID GNU)
@@ -207,10 +220,11 @@ else()
   endif()
 endif()
 
-# We only support running instrumented tests when we're not cross compiling
-# and target a unix-like system. We can run tests on Android even when we are
-# cross-compiling.
-if(("${CMAKE_HOST_SYSTEM}" STREQUAL "${CMAKE_SYSTEM}" AND UNIX) OR ANDROID)
+# We support running instrumented tests when we're not cross compiling
+# and target a UNIX-like system or Windows.
+# We can run tests on Android even when we are cross-compiling.
+if(("${CMAKE_HOST_SYSTEM}" STREQUAL "${CMAKE_SYSTEM}" AND (UNIX OR MSVC)) OR ANDROID
+   OR COMPILER_RT_EMULATOR)
   option(COMPILER_RT_CAN_EXECUTE_TESTS "Can we execute instrumented tests" ON)
 else()
   option(COMPILER_RT_CAN_EXECUTE_TESTS "Can we execute instrumented tests" OFF)

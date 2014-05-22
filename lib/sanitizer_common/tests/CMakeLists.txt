@@ -26,6 +26,8 @@ set(SANITIZER_UNITTESTS
   sanitizer_thread_registry_test.cc)
 
 set(SANITIZER_TEST_HEADERS
+  sanitizer_pthread_wrappers.h
+  sanitizer_test_config.h
   sanitizer_test_utils.h)
 foreach(header ${SANITIZER_HEADERS})
   list(APPEND SANITIZER_TEST_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/../${header})
@@ -37,14 +39,42 @@ set(SANITIZER_TEST_CFLAGS_COMMON
   -I${COMPILER_RT_SOURCE_DIR}/lib
   -I${COMPILER_RT_SOURCE_DIR}/lib/sanitizer_common
   -DGTEST_HAS_RTTI=0
-  -O2 -g -fno-rtti
+  -O2
   -Werror=sign-compare
   -Wno-non-virtual-dtor)
 
-set(SANITIZER_TEST_LINK_FLAGS_COMMON
-  -lstdc++)
+append_if(COMPILER_RT_HAS_G_FLAG -g SANITIZER_TEST_CFLAGS_COMMON)
+append_if(COMPILER_RT_HAS_Zi_FLAG -Zi SANITIZER_TEST_CFLAGS_COMMON)
+
+append_if(COMPILER_RT_HAS_FNO_RTTI_FLAG -fno-rtti SANITIZER_TEST_CFLAGS_COMMON)
+append_if(COMPILER_RT_HAS_GR_FLAG -GR- SANITIZER_TEST_CFLAGS_COMMON)
+
+if(MSVC)
+  # System headers and gtest use a lot of deprecated stuff.
+  list(APPEND SANITIZER_TEST_CFLAGS_COMMON
+       -Wno-deprecated-declarations)
+
+  # clang-cl doesn't support exceptions yet.
+  list(APPEND SANITIZER_TEST_CFLAGS_COMMON
+       /fallback
+       -D_HAS_EXCEPTIONS=0)
+
+  # We should teach clang-cl to understand more pragmas.
+  list(APPEND SANITIZER_TEST_CFLAGS_COMMON
+       -Wno-unknown-pragmas
+       -Wno-undefined-inline)
+endif()
+
+if(NOT MSVC)
+  list(APPEND SANITIZER_TEST_LINK_FLAGS_COMMON --driver-mode=g++)
+endif()
+
 append_if(COMPILER_RT_HAS_LIBDL -ldl SANITIZER_TEST_LINK_FLAGS_COMMON)
 append_if(COMPILER_RT_HAS_LIBPTHREAD -lpthread SANITIZER_TEST_LINK_FLAGS_COMMON)
+# x86_64 FreeBSD 9.2 additionally requires libc++ to build the tests.
+if(CMAKE_SYSTEM MATCHES "FreeBSD-9.2-RELEASE")
+  list(APPEND SANITIZER_TEST_LINK_FLAGS_COMMON "-lc++")
+endif()
 
 include_directories(..)
 include_directories(../..)
@@ -64,7 +94,11 @@ function(get_sanitizer_common_lib_for_arch arch lib lib_name)
     set(tgt_name "RTSanitizerCommon.test.${arch}")
   endif()
   set(${lib} "${tgt_name}" PARENT_SCOPE)
-  set(${lib_name} "lib${tgt_name}.a" PARENT_SCOPE)
+  if(NOT MSVC)
+    set(${lib_name} "lib${tgt_name}.a" PARENT_SCOPE)
+  else()
+    set(${lib_name} "${tgt_name}.lib" PARENT_SCOPE)
+  endif()
 endfunction()
 
 # Sanitizer_common unit tests testsuite.

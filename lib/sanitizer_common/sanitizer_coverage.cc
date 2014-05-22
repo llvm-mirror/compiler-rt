@@ -40,40 +40,100 @@
 #include "sanitizer_stacktrace.h"
 #include "sanitizer_flags.h"
 
-struct CovData {
-  BlockingMutex mu;
-  InternalMmapVector<uptr> v;
-  atomic_uint32_t guard;
-};
+atomic_uint32_t dump_once_guard;  // Ensure that CovDump runs only once.
 
-static uptr cov_data_placeholder[(sizeof(CovData) / sizeof(uptr)) + 1];
-COMPILER_CHECK(sizeof(cov_data_placeholder) >= sizeof(CovData));
-static CovData *cov_data = reinterpret_cast<CovData*>(cov_data_placeholder);
+// pc_array is the array containing the covered PCs.
+// To make the pc_array thread- and async-signal-safe it has to be large enough.
+// 128M counters "ought to be enough for anybody" (4M on 32-bit).
+// pc_array is allocated with MmapNoReserveOrDie and so it uses only as
+// much RAM as it really needs.
+static const uptr kPcArraySize = FIRST_32_SECOND_64(1 << 22, 1 << 27);
+static uptr *pc_array;
+static atomic_uintptr_t pc_array_index;
+
+static bool cov_sandboxed = false;
+static int cov_fd = kInvalidFd;
+static unsigned int cov_max_block_size = 0;
 
 namespace __sanitizer {
 
 // Simply add the pc into the vector under lock. If the function is called more
 // than once for a given PC it will be inserted multiple times, which is fine.
 static void CovAdd(uptr pc) {
-  BlockingMutexLock lock(&cov_data->mu);
-  cov_data->v.push_back(pc);
+  if (!pc_array) return;
+  uptr idx = atomic_fetch_add(&pc_array_index, 1, memory_order_relaxed);
+  CHECK_LT(idx, kPcArraySize);
+  pc_array[idx] = pc;
+}
+
+void CovInit() {
+  pc_array = reinterpret_cast<uptr *>(
+      MmapNoReserveOrDie(sizeof(uptr) * kPcArraySize, "CovInit"));
 }
 
 static inline bool CompareLess(const uptr &a, const uptr &b) {
   return a < b;
 }
 
+// Block layout for packed file format: header, followed by module name (no
+// trailing zero), followed by data blob.
+struct CovHeader {
+  int pid;
+  unsigned int module_name_length;
+  unsigned int data_length;
+};
+
+static void CovWritePacked(int pid, const char *module, const void *blob,
+                           unsigned int blob_size) {
+  CHECK_GE(cov_fd, 0);
+  unsigned module_name_length = internal_strlen(module);
+  CovHeader header = {pid, module_name_length, blob_size};
+
+  if (cov_max_block_size == 0) {
+    // Writing to a file. Just go ahead.
+    internal_write(cov_fd, &header, sizeof(header));
+    internal_write(cov_fd, module, module_name_length);
+    internal_write(cov_fd, blob, blob_size);
+  } else {
+    // Writing to a socket. We want to split the data into appropriately sized
+    // blocks.
+    InternalScopedBuffer<char> block(cov_max_block_size);
+    CHECK_EQ((uptr)block.data(), (uptr)(CovHeader *)block.data());
+    uptr header_size_with_module = sizeof(header) + module_name_length;
+    CHECK_LT(header_size_with_module, cov_max_block_size);
+    unsigned int max_payload_size =
+        cov_max_block_size - header_size_with_module;
+    char *block_pos = block.data();
+    internal_memcpy(block_pos, &header, sizeof(header));
+    block_pos += sizeof(header);
+    internal_memcpy(block_pos, module, module_name_length);
+    block_pos += module_name_length;
+    char *block_data_begin = block_pos;
+    char *blob_pos = (char *)blob;
+    while (blob_size > 0) {
+      unsigned int payload_size = Min(blob_size, max_payload_size);
+      blob_size -= payload_size;
+      internal_memcpy(block_data_begin, blob_pos, payload_size);
+      blob_pos += payload_size;
+      ((CovHeader *)block.data())->data_length = payload_size;
+      internal_write(cov_fd, block.data(),
+                     header_size_with_module + payload_size);
+    }
+  }
+}
+
 // Dump the coverage on disk.
-void CovDump() {
+static void CovDump() {
+  if (!common_flags()->coverage) return;
 #if !SANITIZER_WINDOWS
-  if (atomic_fetch_add(&cov_data->guard, 1, memory_order_relaxed) != 0) return;
-  BlockingMutexLock lock(&cov_data->mu);
-  InternalMmapVector<uptr> &v = cov_data->v;
-  InternalSort(&v, v.size(), CompareLess);
-  InternalMmapVector<u32> offsets(v.size());
-  const uptr *vb = v.data();
-  const uptr *ve = vb + v.size();
-  MemoryMappingLayout proc_maps(/*cache_enabled*/false);
+  if (atomic_fetch_add(&dump_once_guard, 1, memory_order_relaxed))
+    return;
+  uptr size = atomic_load(&pc_array_index, memory_order_relaxed);
+  InternalSort(&pc_array, size, CompareLess);
+  InternalMmapVector<u32> offsets(size);
+  const uptr *vb = pc_array;
+  const uptr *ve = vb + size;
+  MemoryMappingLayout proc_maps(/*cache_enabled*/true);
   uptr mb, me, off, prot;
   InternalScopedBuffer<char> module(4096);
   InternalScopedBuffer<char> path(4096 * 2);
@@ -82,8 +142,9 @@ void CovDump() {
        i++) {
     if ((prot & MemoryMappingLayout::kProtectionExecute) == 0)
       continue;
+    while (vb < ve && *vb < mb) vb++;
     if (vb >= ve) break;
-    if (mb <= *vb && *vb < me) {
+    if (*vb < me) {
       offsets.clear();
       const uptr *old_vb = vb;
       CHECK_LE(off, *vb);
@@ -93,20 +154,55 @@ void CovDump() {
         offsets.push_back(static_cast<u32>(diff));
       }
       char *module_name = StripModuleName(module.data());
-      internal_snprintf((char *)path.data(), path.size(), "%s.%zd.sancov",
-                        module_name, internal_getpid());
-      InternalFree(module_name);
-      uptr fd = OpenFile(path.data(), true);
-      if (internal_iserror(fd)) {
-        Report(" CovDump: failed to open %s for writing\n", path.data());
+      if (cov_sandboxed) {
+        CovWritePacked(internal_getpid(), module_name, offsets.data(),
+                       offsets.size() * sizeof(u32));
+        VReport(1, " CovDump: %zd PCs written to packed file\n", vb - old_vb);
       } else {
-        internal_write(fd, offsets.data(), offsets.size() * sizeof(u32));
-        internal_close(fd);
-        VReport(1, " CovDump: %s: %zd PCs written\n", path.data(), vb - old_vb);
+        // One file per module per process.
+        internal_snprintf((char *)path.data(), path.size(), "%s.%zd.sancov",
+                          module_name, internal_getpid());
+        uptr fd = OpenFile(path.data(), true);
+        if (internal_iserror(fd)) {
+          Report(" CovDump: failed to open %s for writing\n", path.data());
+        } else {
+          internal_write(fd, offsets.data(), offsets.size() * sizeof(u32));
+          internal_close(fd);
+          VReport(1, " CovDump: %s: %zd PCs written\n", path.data(),
+                  vb - old_vb);
+        }
       }
+      InternalFree(module_name);
     }
   }
+  if (cov_fd >= 0)
+    internal_close(cov_fd);
 #endif  // !SANITIZER_WINDOWS
+}
+
+static void OpenPackedFileForWriting() {
+  CHECK(cov_fd == kInvalidFd);
+  InternalScopedBuffer<char> path(1024);
+  internal_snprintf((char *)path.data(), path.size(), "%zd.sancov.packed",
+                    internal_getpid());
+  uptr fd = OpenFile(path.data(), true);
+  if (internal_iserror(fd)) {
+    Report(" Coverage: failed to open %s for writing\n", path.data());
+    Die();
+  }
+  cov_fd = fd;
+}
+
+void CovPrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
+  if (!args) return;
+  if (!common_flags()->coverage) return;
+  cov_sandboxed = args->coverage_sandboxed;
+  if (!cov_sandboxed) return;
+  cov_fd = args->coverage_fd;
+  cov_max_block_size = args->coverage_max_block_size;
+  if (cov_fd < 0)
+    // Pre-open the file now. The sandbox won't allow us to do it later.
+    OpenPackedFileForWriting();
 }
 
 }  // namespace __sanitizer
@@ -116,4 +212,5 @@ SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov() {
   CovAdd(StackTrace::GetPreviousInstructionPc(GET_CALLER_PC()));
 }
 SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov_dump() { CovDump(); }
+SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov_init() { CovInit(); }
 }  // extern "C"

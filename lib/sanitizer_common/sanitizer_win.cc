@@ -185,14 +185,15 @@ void DumpProcessMap() {
 }
 
 void DisableCoreDumper() {
-  UNIMPLEMENTED();
+  // Do nothing.
 }
 
 void ReExec() {
   UNIMPLEMENTED();
 }
 
-void PrepareForSandboxing() {
+void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
+  (void)args;
   // Nothing here for now.
 }
 
