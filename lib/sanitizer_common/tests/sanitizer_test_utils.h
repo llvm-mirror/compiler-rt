@@ -15,15 +15,35 @@
 #ifndef SANITIZER_TEST_UTILS_H
 #define SANITIZER_TEST_UTILS_H
 
+#if defined(_WIN32)
+// <windows.h> should always be the first include on Windows.
+# include <windows.h>
+// MSVS headers define max/min as macros, so std::max/min gets crazy.
+# undef max
+# undef min
+#endif
+
+#if !defined(SANITIZER_EXTERNAL_TEST_CONFIG)
+# define INCLUDED_FROM_SANITIZER_TEST_UTILS_H
+# include "sanitizer_test_config.h"
+# undef INCLUDED_FROM_SANITIZER_TEST_UTILS_H
+#endif
+
 #include <stdint.h>
 
-#if defined(_WIN32)
+#if defined(_MSC_VER)
 # define NOINLINE __declspec(noinline)
-# define USED
-#else  // defined(_WIN32)
+#else  // defined(_MSC_VER)
 # define NOINLINE __attribute__((noinline))
+#endif  // defined(_MSC_VER)
+
+#if !defined(_MSC_VER) || defined(__clang__)
+# define UNUSED __attribute__((unused))
 # define USED __attribute__((used))
-#endif  // defined(_WIN32)
+#else
+# define UNUSED
+# define USED
+#endif
 
 #if !defined(__has_feature)
 #define __has_feature(x) 0

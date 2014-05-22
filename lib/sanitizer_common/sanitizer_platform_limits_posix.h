@@ -275,11 +275,10 @@ namespace __sanitizer {
 #endif
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
+
   struct __sanitizer_XDR {
     int x_op;
-    struct xdr_ops {
-      uptr fns[10];
-    } *x_ops;
+    void *x_ops;
     uptr x_public;
     uptr x_private;
     uptr x_base;
@@ -320,8 +319,14 @@ namespace __sanitizer {
     char **gr_mem;
   };
 
+#if defined(__x86_64__) && !defined(_LP64)
+  typedef long long __sanitizer_time_t;
+#else
+  typedef long __sanitizer_time_t;
+#endif
+
   struct __sanitizer_timeb {
-    long time;
+    __sanitizer_time_t time;
     unsigned short millitm;
     short timezone;
     short dstflag;
@@ -648,6 +653,10 @@ namespace __sanitizer {
     __sanitizer_FILE *_chain;
     int _fileno;
   };
+# define SANITIZER_HAS_STRUCT_FILE 1
+#else
+  typedef void __sanitizer_FILE;
+# define SANITIZER_HAS_STRUCT_FILE 0
 #endif
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID && \

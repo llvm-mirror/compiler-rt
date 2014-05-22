@@ -390,7 +390,7 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
 }
 #endif  // SANITIZER_GO
 
-void PrepareForSandboxing() {
+void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
   // Some kinds of sandboxes may forbid filesystem access, so we won't be able
   // to read the file mappings from /proc/self/maps. Luckily, neither the
   // process will be able to load additional libraries, so it's fine to use the
@@ -400,6 +400,7 @@ void PrepareForSandboxing() {
 #if !SANITIZER_GO
   if (Symbolizer *sym = Symbolizer::GetOrNull())
     sym->PrepareForSandboxing();
+  CovPrepareForSandboxing(args);
 #endif
 }
 
@@ -499,6 +500,10 @@ uptr internal_prctl(int option, uptr arg2, uptr arg3, uptr arg4, uptr arg5) {
 uptr internal_sigaltstack(const struct sigaltstack *ss,
                          struct sigaltstack *oss) {
   return internal_syscall(SYSCALL(sigaltstack), (uptr)ss, (uptr)oss);
+}
+
+int internal_fork() {
+  return internal_syscall(SYSCALL(fork));
 }
 
 #if SANITIZER_LINUX

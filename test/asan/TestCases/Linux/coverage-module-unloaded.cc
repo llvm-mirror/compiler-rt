@@ -2,10 +2,12 @@
 // modules.
 // RUN: %clangxx_asan -mllvm -asan-coverage=1 -DSHARED %s -shared -o %T/libcoverage_module_unloaded_test_1.so -fPIC
 // RUN: %clangxx_asan -mllvm -asan-coverage=1 -DSHARED %s -shared -o %T/libcoverage_module_unloaded_test_2.so -fPIC
-// RUN: %clangxx_asan -mllvm -asan-coverage=1 -DSO_DIR=\"%T\" %s -o %t -Wl,-R,\$ORIGIN -L%T -lcoverage_test
+// RUN: %clangxx_asan -mllvm -asan-coverage=1 -DSO_DIR=\"%T\" %s -o %t
 // RUN: export ASAN_OPTIONS=coverage=1:verbosity=1
-// RUN: %t 2>&1         | FileCheck %s
-// RUN: %t foo 2>&1         | FileCheck %s
+// RUN: mkdir -p %T/coverage-module-unloaded && cd %T/coverage-module-unloaded
+// RUN: %run %t 2>&1         | FileCheck %s
+// RUN: %run %t foo 2>&1         | FileCheck %s
+// RUN: cd .. && rm coverage-module-unloaded -r
 //
 // https://code.google.com/p/address-sanitizer/issues/detail?id=263
 // XFAIL: android
@@ -23,7 +25,6 @@ void bar() { printf("bar\n"); }
 
 int main(int argc, char **argv) {
   fprintf(stderr, "PID: %d\n", getpid());
-  fprintf(stderr, "Opening %s\n", SO_DIR "/libcoverage_module_unloaded_test_1.so");
   void *handle1 =
       dlopen(SO_DIR "/libcoverage_module_unloaded_test_1.so", RTLD_LAZY);
   assert(handle1);

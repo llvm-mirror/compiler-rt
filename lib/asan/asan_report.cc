@@ -191,9 +191,13 @@ static bool IsASCII(unsigned char c) {
 static const char *MaybeDemangleGlobalName(const char *name) {
   // We can spoil names of globals with C linkage, so use an heuristic
   // approach to check if the name should be demangled.
-  return (name[0] == '_' && name[1] == 'Z')
-             ? Symbolizer::Get()->Demangle(name)
-             : name;
+  bool should_demangle = false;
+  if (name[0] == '_' && name[1] == 'Z')
+    should_demangle = true;
+  else if (SANITIZER_WINDOWS && name[0] == '\01' && name[1] == '?')
+    should_demangle = true;
+
+  return should_demangle ? Symbolizer::Get()->Demangle(name) : name;
 }
 
 // Check if the global is a zero-terminated ASCII string. If so, print it.
@@ -557,6 +561,8 @@ class ScopedInErrorReport {
   NORETURN ~ScopedInErrorReport() {
     // Make sure the current thread is announced.
     DescribeThread(GetCurrentThread());
+    // We may want to grab this lock again when printing stats.
+    asanThreadRegistry().Unlock();
     // Print memory stats.
     if (flags()->print_stats)
       __asan_print_accumulated_stats();

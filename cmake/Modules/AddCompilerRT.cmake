@@ -1,4 +1,5 @@
 include(AddLLVM)
+include(ExternalProject)
 include(LLVMParseArguments)
 include(CompilerRTUtils)
 
@@ -13,7 +14,7 @@ macro(add_compiler_rt_object_library name arch)
     parse_arguments(LIB "SOURCES;CFLAGS;DEFS" "" ${ARGN})
     add_library(${name}.${arch} OBJECT ${LIB_SOURCES})
     set_target_compile_flags(${name}.${arch}
-      ${TARGET_${arch}_CFLAGS} ${LIB_CFLAGS})
+      ${CMAKE_CXX_FLAGS} ${TARGET_${arch}_CFLAGS} ${LIB_CFLAGS})
     set_property(TARGET ${name}.${arch} APPEND PROPERTY
       COMPILE_DEFINITIONS ${LIB_DEFS})
   else()
@@ -135,8 +136,20 @@ macro(add_compiler_rt_test test_suite test_name)
   if(NOT COMPILER_RT_STANDALONE_BUILD)
     list(APPEND TEST_DEPS clang)
   endif()
+  # If we're not on MSVC, include the linker flags from CMAKE but override them
+  # with the provided link flags. This ensures that flags which are required to
+  # link programs at all are included, but the changes needed for the test
+  # trump. With MSVC we can't do that because CMake is set up to run link.exe
+  # when linking, not the compiler. Here, we hack it to use the compiler
+  # because we want to use -fsanitize flags.
+  if(NOT MSVC)
+    set(TEST_LINK_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${TEST_LINK_FLAGS}")
+    separate_arguments(TEST_LINK_FLAGS)
+  endif()
   add_custom_target(${test_name}
-    COMMAND ${COMPILER_RT_TEST_COMPILER} ${TEST_OBJECTS} -o "${output_bin}"
+    # MSVS CL doesn't allow a space between -Fe and the output file name.
+    COMMAND ${COMPILER_RT_TEST_COMPILER} ${TEST_OBJECTS}
+            ${COMPILER_RT_TEST_COMPILER_EXE}"${output_bin}"
             ${TEST_LINK_FLAGS}
     DEPENDS ${TEST_DEPS})
   # Make the test suite depend on the binary.
@@ -167,3 +180,51 @@ macro(add_compiler_rt_script name)
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
     DESTINATION ${COMPILER_RT_INSTALL_PATH}/bin)
 endmacro(add_compiler_rt_script src name)
+
+# Builds custom version of libc++ and installs it in <prefix>.
+# Can be used to build sanitized versions of libc++ for running unit tests.
+# add_custom_libcxx(<name> <prefix>
+#                   DEPS <list of build deps>
+#                   CFLAGS <list of compile flags>)
+macro(add_custom_libcxx name prefix)
+  if(NOT COMPILER_RT_HAS_LIBCXX_SOURCES)
+    message(FATAL_ERROR "libcxx not found!")
+  endif()
+
+  parse_arguments(LIBCXX "DEPS;CFLAGS" "" ${ARGN})
+  foreach(flag ${LIBCXX_CFLAGS})
+    set(flagstr "${flagstr} ${flag}")
+  endforeach()
+  set(LIBCXX_CFLAGS ${flagstr})
+
+  if(NOT COMPILER_RT_STANDALONE_BUILD)
+    list(APPEND LIBCXX_DEPS clang)
+  endif()
+
+  ExternalProject_Add(${name}
+    PREFIX ${prefix}
+    SOURCE_DIR ${COMPILER_RT_LIBCXX_PATH}
+    CMAKE_ARGS -DCMAKE_C_COMPILER=${COMPILER_RT_TEST_COMPILER}
+               -DCMAKE_CXX_COMPILER=${COMPILER_RT_TEST_COMPILER}
+               -DCMAKE_C_FLAGS=${LIBCXX_CFLAGS}
+               -DCMAKE_CXX_FLAGS=${LIBCXX_CFLAGS}
+               -DCMAKE_BUILD_TYPE=Release
+               -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
+    LOG_BUILD 1
+    LOG_CONFIGURE 1
+    LOG_INSTALL 1
+    )
+
+  ExternalProject_Add_Step(${name} force-reconfigure
+    DEPENDERS configure
+    ALWAYS 1
+    )
+
+  ExternalProject_Add_Step(${name} clobber
+    COMMAND ${CMAKE_COMMAND} -E remove_directory <BINARY_DIR>
+    COMMAND ${CMAKE_COMMAND} -E make_directory <BINARY_DIR>
+    COMMENT "Clobberring ${name} build directory..."
+    DEPENDERS configure
+    DEPENDS ${LIBCXX_DEPS}
+    )
+endmacro()

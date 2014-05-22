@@ -473,6 +473,7 @@ struct ThreadState {
 };
 
 #ifndef TSAN_GO
+__attribute__((tls_model("initial-exec")))
 extern THREADLOCAL char cur_thread_placeholder[];
 INLINE ThreadState *cur_thread() {
   return reinterpret_cast<ThreadState *>(&cur_thread_placeholder);
@@ -775,6 +776,8 @@ Trace *ThreadTrace(int tid);
 extern "C" void __tsan_trace_switch();
 void ALWAYS_INLINE TraceAddEvent(ThreadState *thr, FastState fs,
                                         EventType typ, u64 addr) {
+  if (!kCollectHistory)
+    return;
   DCHECK_GE((int)typ, 0);
   DCHECK_LE((int)typ, 7);
   DCHECK_EQ(GetLsb(addr, 61), addr);

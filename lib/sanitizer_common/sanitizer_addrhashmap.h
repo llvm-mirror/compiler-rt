@@ -17,11 +17,12 @@
 #include "sanitizer_common.h"
 #include "sanitizer_mutex.h"
 #include "sanitizer_atomic.h"
+#include "sanitizer_allocator_internal.h"
 
 namespace __sanitizer {
 
 // Concurrent uptr->T hashmap.
-// T must be a POD type, kSize is preferrably a prime but can be any number.
+// T must be a POD type, kSize is preferably a prime but can be any number.
 // Usage example:
 //
 // typedef AddrHashMap<uptr, 11> Map;
@@ -66,9 +67,12 @@ class AddrHashMap {
 
   class Handle {
    public:
-    Handle(AddrHashMap<T, kSize> *map, uptr addr, bool remove = false);
+    Handle(AddrHashMap<T, kSize> *map, uptr addr);
+    Handle(AddrHashMap<T, kSize> *map, uptr addr, bool remove);
+    Handle(AddrHashMap<T, kSize> *map, uptr addr, bool remove, bool create);
+
     ~Handle();
-    T *operator -> ();
+    T *operator->();
     bool created() const;
     bool exists() const;
 
@@ -81,6 +85,7 @@ class AddrHashMap {
     uptr                   addidx_;
     bool                   created_;
     bool                   remove_;
+    bool                   create_;
   };
 
  private:
@@ -93,11 +98,31 @@ class AddrHashMap {
 };
 
 template<typename T, uptr kSize>
+AddrHashMap<T, kSize>::Handle::Handle(AddrHashMap<T, kSize> *map, uptr addr) {
+  map_ = map;
+  addr_ = addr;
+  remove_ = false;
+  create_ = true;
+  map_->acquire(this);
+}
+
+template<typename T, uptr kSize>
 AddrHashMap<T, kSize>::Handle::Handle(AddrHashMap<T, kSize> *map, uptr addr,
     bool remove) {
   map_ = map;
   addr_ = addr;
   remove_ = remove;
+  create_ = true;
+  map_->acquire(this);
+}
+
+template<typename T, uptr kSize>
+AddrHashMap<T, kSize>::Handle::Handle(AddrHashMap<T, kSize> *map, uptr addr,
+    bool remove, bool create) {
+  map_ = map;
+  addr_ = addr;
+  remove_ = remove;
+  create_ = create;
   map_->acquire(this);
 }
 
@@ -106,8 +131,8 @@ AddrHashMap<T, kSize>::Handle::~Handle() {
   map_->release(this);
 }
 
-template<typename T, uptr kSize>
-T *AddrHashMap<T, kSize>::Handle::operator -> () {
+template <typename T, uptr kSize>
+T *AddrHashMap<T, kSize>::Handle::operator->() {
   return &cell_->val;
 }
 
@@ -207,7 +232,7 @@ void AddrHashMap<T, kSize>::acquire(Handle *h) {
   }
 
   // The element does not exist, no need to create it if we want to remove.
-  if (h->remove_) {
+  if (h->remove_ || !h->create_) {
     b->mtx.Unlock();
     return;
   }
