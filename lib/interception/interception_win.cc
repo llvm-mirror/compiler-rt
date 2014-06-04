@@ -121,6 +121,7 @@ static size_t RoundUpToInstrBoundary(size_t size, char *code) {
     }
     switch (0x00FFFFFF & *(unsigned int*)(code + cursor)) {
       case 0x24448A:  // 8A 44 24 XX = mov eal, dword ptr [esp+XXh]
+      case 0x24448B:  // 8B 44 24 XX = mov eax, dword ptr [esp+XXh]
       case 0x244C8B:  // 8B 4C 24 XX = mov ecx, dword ptr [esp+XXh]
       case 0x24548B:  // 8B 54 24 XX = mov edx, dword ptr [esp+XXh]
       case 0x24748B:  // 8B 74 24 XX = mov esi, dword ptr [esp+XXh]
@@ -133,8 +134,9 @@ static size_t RoundUpToInstrBoundary(size_t size, char *code) {
     // FIXME: Unknown instruction failures might happen when we add a new
     // interceptor or a new compiler version. In either case, they should result
     // in visible and readable error messages. However, merely calling abort()
-    // or __debugbreak() leads to an infinite recursion in CheckFailed.
+    // leads to an infinite recursion in CheckFailed.
     // Do we have a good way to abort with an error message here?
+    __debugbreak();
     return 0;
   }
 

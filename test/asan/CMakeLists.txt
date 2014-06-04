@@ -9,6 +9,8 @@ if(CAN_TARGET_arm_android)
   get_filename_component(ASAN_TEST_LLVM_TOOLS_DIR ${CMAKE_C_COMPILER} PATH)
   set(ASAN_TEST_CONFIG_SUFFIX "-arm-android")
   set(ASAN_TEST_BITS "32")
+  set(ASAN_TEST_DYNAMIC True)
+  set(ASAN_TEST_TARGET_ARCH "arm-android")
   get_target_flags_for_arch(arm_android ASAN_TEST_TARGET_CFLAGS)
   configure_lit_site_cfg(
     ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.in
@@ -30,6 +32,21 @@ if(CAN_TARGET_arm)
     ${CMAKE_CURRENT_BINARY_DIR}/ARMLinuxConfig/lit.site.cfg
     )
   list(APPEND ASAN_TESTSUITES ${CMAKE_CURRENT_BINARY_DIR}/ARMLinuxConfig)
+endif()
+
+if(CAN_TARGET_aarch64)
+  # This is only true if we are cross-compiling.
+  # Build all tests with host compiler and use host tools.
+  set(ASAN_TEST_TARGET_CC ${COMPILER_RT_TEST_COMPILER})
+  set(ASAN_TEST_TARGET_CFLAGS ${COMPILER_RT_TEST_COMPILER_CFLAGS})
+  set(ASAN_TEST_CONFIG_SUFFIX "-aarch64-linux")
+  set(ASAN_TEST_BITS "64")
+  set(ASAN_TEST_DYNAMIC False)
+  configure_lit_site_cfg(
+    ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.in
+    ${CMAKE_CURRENT_BINARY_DIR}/AArch64LinuxConfig/lit.site.cfg
+    )
+  list(APPEND ASAN_TESTSUITES ${CMAKE_CURRENT_BINARY_DIR}/AArch64LinuxConfig)
 endif()
 
 if(CAN_TARGET_x86_64 OR CAN_TARGET_powerpc64)

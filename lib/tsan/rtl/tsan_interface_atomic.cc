@@ -274,10 +274,12 @@ static T NoTsanAtomicLoad(const volatile T *a, morder mo) {
   return atomic_load(to_atomic(a), to_mo(mo));
 }
 
+#if __TSAN_HAS_INT128
 static a128 NoTsanAtomicLoad(const volatile a128 *a, morder mo) {
   SpinMutexLock lock(&mutex128);
   return *a;
 }
+#endif
 
 template<typename T>
 static T AtomicLoad(ThreadState *thr, uptr pc, const volatile T *a,
@@ -289,7 +291,7 @@ static T AtomicLoad(ThreadState *thr, uptr pc, const volatile T *a,
     MemoryReadAtomic(thr, pc, (uptr)a, SizeLog<T>());
     return NoTsanAtomicLoad(a, mo);
   }
-  SyncVar *s = ctx->synctab.GetOrCreateAndLock(thr, pc, (uptr)a, false);
+  SyncVar *s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, false);
   AcquireImpl(thr, pc, &s->clock);
   T v = NoTsanAtomicLoad(a, mo);
   s->mtx.ReadUnlock();
@@ -302,10 +304,12 @@ static void NoTsanAtomicStore(volatile T *a, T v, morder mo) {
   atomic_store(to_atomic(a), v, to_mo(mo));
 }
 
+#if __TSAN_HAS_INT128
 static void NoTsanAtomicStore(volatile a128 *a, a128 v, morder mo) {
   SpinMutexLock lock(&mutex128);
   *a = v;
 }
+#endif
 
 template<typename T>
 static void AtomicStore(ThreadState *thr, uptr pc, volatile T *a, T v,
@@ -321,7 +325,7 @@ static void AtomicStore(ThreadState *thr, uptr pc, volatile T *a, T v,
     return;
   }
   __sync_synchronize();
-  SyncVar *s = ctx->synctab.GetOrCreateAndLock(thr, pc, (uptr)a, true);
+  SyncVar *s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, true);
   thr->fast_state.IncrementEpoch();
   // Can't increment epoch w/o writing to the trace as well.
   TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);
@@ -335,7 +339,7 @@ static T AtomicRMW(ThreadState *thr, uptr pc, volatile T *a, T v, morder mo) {
   MemoryWriteAtomic(thr, pc, (uptr)a, SizeLog<T>());
   SyncVar *s = 0;
   if (mo != mo_relaxed) {
-    s = ctx->synctab.GetOrCreateAndLock(thr, pc, (uptr)a, true);
+    s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, true);
     thr->fast_state.IncrementEpoch();
     // Can't increment epoch w/o writing to the trace as well.
     TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);
@@ -434,6 +438,7 @@ static bool NoTsanAtomicCAS(volatile T *a, T *c, T v, morder mo, morder fmo) {
   return atomic_compare_exchange_strong(to_atomic(a), c, v, to_mo(mo));
 }
 
+#if __TSAN_HAS_INT128
 static bool NoTsanAtomicCAS(volatile a128 *a, a128 *c, a128 v,
     morder mo, morder fmo) {
   a128 old = *c;
@@ -443,6 +448,7 @@ static bool NoTsanAtomicCAS(volatile a128 *a, a128 *c, a128 v,
   *c = cur;
   return false;
 }
+#endif
 
 template<typename T>
 static bool NoTsanAtomicCAS(volatile T *a, T c, T v, morder mo, morder fmo) {
@@ -457,7 +463,7 @@ static bool AtomicCAS(ThreadState *thr, uptr pc,
   SyncVar *s = 0;
   bool write_lock = mo != mo_acquire && mo != mo_consume;
   if (mo != mo_relaxed) {
-    s = ctx->synctab.GetOrCreateAndLock(thr, pc, (uptr)a, write_lock);
+    s = ctx->metamap.GetOrCreateAndLock(thr, pc, (uptr)a, write_lock);
     thr->fast_state.IncrementEpoch();
     // Can't increment epoch w/o writing to the trace as well.
     TraceAddEvent(thr, thr->fast_state, EventTypeMop, 0);

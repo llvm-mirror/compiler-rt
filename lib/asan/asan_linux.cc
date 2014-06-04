@@ -91,6 +91,10 @@ static int FindFirstDSOCallback(struct dl_phdr_info *info, size_t size,
   if (!info->dlpi_name || info->dlpi_name[0] == 0)
     return 0;
 
+  // Ignore vDSO
+  if (internal_strncmp(info->dlpi_name, "linux-", sizeof("linux-") - 1) == 0)
+    return 0;
+
   *(const char **)data = info->dlpi_name;
   return 1;
 }
@@ -188,6 +192,13 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
   *bp = ucontext->uc_mcontext.gregs[REG_EBP];
   *sp = ucontext->uc_mcontext.gregs[REG_ESP];
 # endif
+#elif defined(__powerpc__) || defined(__powerpc64__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.regs->nip;
+  *sp = ucontext->uc_mcontext.regs->gpr[PT_R1];
+  // The powerpc{,64}-linux ABIs do not specify r31 as the frame
+  // pointer, but GCC always uses r31 when we need a frame pointer.
+  *bp = ucontext->uc_mcontext.regs->gpr[PT_R31];
 #elif defined(__sparc__)
   ucontext_t *ucontext = (ucontext_t*)context;
   uptr *stk_ptr;

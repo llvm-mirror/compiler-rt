@@ -162,9 +162,10 @@ ScopedReport::~ScopedReport() {
   DestroyAndFree(rep_);
 }
 
-void ScopedReport::AddStack(const StackTrace *stack) {
+void ScopedReport::AddStack(const StackTrace *stack, bool suppressable) {
   ReportStack **rs = rep_->stacks.PushBack();
   *rs = SymbolizeStack(*stack);
+  (*rs)->suppressable = suppressable;
 }
 
 void ScopedReport::AddMemoryAccess(uptr addr, Shadow s,
@@ -178,6 +179,8 @@ void ScopedReport::AddMemoryAccess(uptr addr, Shadow s,
   mop->write = s.IsWrite();
   mop->atomic = s.IsAtomic();
   mop->stack = SymbolizeStack(*stack);
+  if (mop->stack)
+    mop->stack->suppressable = true;
   for (uptr i = 0; i < mset->Size(); i++) {
     MutexSet::Desc d = mset->Get(i);
     u64 mid = this->AddMutex(d.id);
@@ -190,7 +193,7 @@ void ScopedReport::AddUniqueTid(int unique_tid) {
   rep_->unique_tids.PushBack(unique_tid);
 }
 
-void ScopedReport::AddThread(const ThreadContext *tctx) {
+void ScopedReport::AddThread(const ThreadContext *tctx, bool suppressable) {
   for (uptr i = 0; i < rep_->threads.Size(); i++) {
     if ((u32)rep_->threads[i]->id == tctx->tid)
       return;
@@ -205,6 +208,8 @@ void ScopedReport::AddThread(const ThreadContext *tctx) {
   rt->parent_tid = tctx->parent_tid;
   rt->stack = 0;
   rt->stack = SymbolizeStackId(tctx->creation_stack_id);
+  if (rt->stack)
+    rt->stack->suppressable = suppressable;
 }
 
 #ifndef TSAN_GO
@@ -251,9 +256,9 @@ ThreadContext *IsThreadStackOrTls(uptr addr, bool *is_stack) {
 }
 #endif
 
-void ScopedReport::AddThread(int unique_tid) {
+void ScopedReport::AddThread(int unique_tid, bool suppressable) {
 #ifndef TSAN_GO
-  AddThread(FindThreadByUidLocked(unique_tid));
+  AddThread(FindThreadByUidLocked(unique_tid), suppressable);
 #endif
 }
 
@@ -275,7 +280,7 @@ u64 ScopedReport::AddMutex(u64 id) {
   u64 uid = 0;
   u64 mid = id;
   uptr addr = SyncVar::SplitId(id, &uid);
-  SyncVar *s = ctx->synctab.GetIfExistsAndLock(addr, false);
+  SyncVar *s = ctx->metamap.GetIfExistsAndLock(addr);
   // Check that the mutex is still alive.
   // Another mutex can be created at the same address,
   // so check uid as well.
@@ -286,7 +291,7 @@ u64 ScopedReport::AddMutex(u64 id) {
     AddDeadMutex(id);
   }
   if (s)
-    s->mtx.ReadUnlock();
+    s->mtx.Unlock();
   return mid;
 }
 
@@ -326,21 +331,26 @@ void ScopedReport::AddLocation(uptr addr, uptr size) {
     return;
   }
   MBlock *b = 0;
-  if (allocator()->PointerIsMine((void*)addr)
-      && (b = user_mblock(0, (void*)addr))) {
-    ThreadContext *tctx = FindThreadByTidLocked(b->Tid());
+  Allocator *a = allocator();
+  if (a->PointerIsMine((void*)addr)) {
+    void *block_begin = a->GetBlockBegin((void*)addr);
+    if (block_begin)
+      b = ctx->metamap.GetBlock((uptr)block_begin);
+  }
+  if (b != 0) {
+    ThreadContext *tctx = FindThreadByTidLocked(b->tid);
     void *mem = internal_alloc(MBlockReportLoc, sizeof(ReportLocation));
     ReportLocation *loc = new(mem) ReportLocation();
     rep_->locs.PushBack(loc);
     loc->type = ReportLocationHeap;
     loc->addr = (uptr)allocator()->GetBlockBegin((void*)addr);
-    loc->size = b->Size();
-    loc->tid = tctx ? tctx->tid : b->Tid();
+    loc->size = b->siz;
+    loc->tid = tctx ? tctx->tid : b->tid;
     loc->name = 0;
     loc->file = 0;
     loc->line = 0;
     loc->stack = 0;
-    loc->stack = SymbolizeStackId(b->StackId());
+    loc->stack = SymbolizeStackId(b->stk);
     if (tctx)
       AddThread(tctx);
     return;
@@ -356,6 +366,7 @@ void ScopedReport::AddLocation(uptr addr, uptr size) {
   }
   ReportLocation *loc = SymbolizeData(addr);
   if (loc) {
+    loc->suppressable = true;
     rep_->locs.PushBack(loc);
     return;
   }
@@ -495,25 +506,31 @@ static void AddRacyStacks(ThreadState *thr, const StackTrace (&traces)[2],
   }
 }
 
-bool OutputReport(Context *ctx,
-                  const ScopedReport &srep,
-                  const ReportStack *suppress_stack1,
-                  const ReportStack *suppress_stack2,
-                  const ReportLocation *suppress_loc) {
+bool OutputReport(ThreadState *thr, const ScopedReport &srep) {
   atomic_store(&ctx->last_symbolize_time_ns, NanoTime(), memory_order_relaxed);
   const ReportDesc *rep = srep.GetReport();
   Suppression *supp = 0;
-  uptr suppress_pc = IsSuppressed(rep->typ, suppress_stack1, &supp);
-  if (suppress_pc == 0)
-    suppress_pc = IsSuppressed(rep->typ, suppress_stack2, &supp);
-  if (suppress_pc == 0)
-    suppress_pc = IsSuppressed(rep->typ, suppress_loc, &supp);
+  uptr suppress_pc = 0;
+  for (uptr i = 0; suppress_pc == 0 && i < rep->mops.Size(); i++)
+    suppress_pc = IsSuppressed(rep->typ, rep->mops[i]->stack, &supp);
+  for (uptr i = 0; suppress_pc == 0 && i < rep->stacks.Size(); i++)
+    suppress_pc = IsSuppressed(rep->typ, rep->stacks[i], &supp);
+  for (uptr i = 0; suppress_pc == 0 && i < rep->threads.Size(); i++)
+    suppress_pc = IsSuppressed(rep->typ, rep->threads[i]->stack, &supp);
+  for (uptr i = 0; suppress_pc == 0 && i < rep->locs.Size(); i++)
+    suppress_pc = IsSuppressed(rep->typ, rep->locs[i], &supp);
   if (suppress_pc != 0) {
     FiredSuppression s = {srep.GetReport()->typ, suppress_pc, supp};
     ctx->fired_suppressions.push_back(s);
   }
-  if (OnReport(rep, suppress_pc != 0))
-    return false;
+  {
+    bool old_is_freeing = thr->is_freeing;
+    thr->is_freeing = false;
+    bool suppressed = OnReport(rep, suppress_pc != 0);
+    thr->is_freeing = old_is_freeing;
+    if (suppressed)
+      return false;
+  }
   PrintReport(rep);
   ctx->nreported++;
   if (flags()->halt_on_error)
@@ -611,6 +628,8 @@ static bool RaceBetweenAtomicAndFree(ThreadState *thr) {
 }
 
 void ReportRace(ThreadState *thr) {
+  CheckNoLocks(thr);
+
   // Symbolizer makes lots of intercepted calls. If we try to process them,
   // at best it will cause deadlocks on internal mutexes.
   ScopedIgnoreInterceptors ignore;
@@ -695,11 +714,7 @@ void ReportRace(ThreadState *thr) {
   }
 #endif
 
-  ReportLocation *suppress_loc = rep.GetReport()->locs.Size() ?
-                                 rep.GetReport()->locs[0] : 0;
-  if (!OutputReport(ctx, rep, rep.GetReport()->mops[0]->stack,
-                              rep.GetReport()->mops[1]->stack,
-                              suppress_loc))
+  if (!OutputReport(thr, rep))
     return;
 
   AddRacyStacks(thr, traces, addr_min, addr_max);

@@ -1,9 +1,13 @@
+// FIXME: https://code.google.com/p/address-sanitizer/issues/detail?id=316
+// XFAIL: android
+//
 // Check that asan_symbolize.py script works (for binaries, ASan RTL and
 // shared object files.
 
 // RUN: %clangxx_asan -O0 -DSHARED_LIB %s -fPIC -shared -o %t-so.so
 // RUN: %clangxx_asan -O0 %s -ldl -o %t
-// RUN: ASAN_OPTIONS=symbolize=0 not %run %t 2>&1 | %asan_symbolize | FileCheck %s
+// RUN: env ASAN_OPTIONS=symbolize=0 not %run %t 2>&1 | %asan_symbolize | FileCheck %s
+// XFAIL: arm
 
 #if !defined(SHARED_LIB)
 #include <dlfcn.h>
@@ -32,7 +36,7 @@ int main(int argc, char *argv[]) {
   inc2(array, -1);  // BOOM
   // CHECK: ERROR: AddressSanitizer: heap-buffer-overflow
   // CHECK: READ of size 4 at 0x{{.*}}
-  // CHECK: #0 {{.*}} in inc2 {{.*}}asan-symbolize-sanity-test.cc:56
+  // CHECK: #0 {{.*}} in inc2 {{.*}}asan-symbolize-sanity-test.cc:[[@LINE+21]]
   // CHECK: #1 {{.*}} in main {{.*}}asan-symbolize-sanity-test.cc:[[@LINE-4]]
   // CHECK: allocated by thread T{{.*}} here:
   // CHECK: #{{.*}} in {{(wrap_|__interceptor_)?}}malloc

@@ -28,7 +28,11 @@ struct StackTrace;
 const uptr kWordSize = SANITIZER_WORDSIZE / 8;
 const uptr kWordSizeInBits = 8 * kWordSize;
 
-const uptr kCacheLineSize = 64;
+#if defined(__powerpc__) || defined(__powerpc64__)
+  const uptr kCacheLineSize = 128;
+#else
+  const uptr kCacheLineSize = 64;
+#endif
 
 const uptr kMaxPathLength = 512;
 
@@ -161,6 +165,7 @@ uptr ReadFileToBuffer(const char *file_name, char **buff,
 // (or NULL if the mapping failes). Stores the size of mmaped region
 // in '*buff_size'.
 void *MapFileToMemory(const char *file_name, uptr *buff_size);
+void *MapWritableFileToMemory(void *addr, uptr size, uptr fd, uptr offset);
 
 // Error report formatting.
 const char *StripPathPrefix(const char *filepath,
@@ -186,6 +191,8 @@ void AdjustStackSize(void *attr);
 void PrepareForSandboxing(__sanitizer_sandbox_arguments *args);
 void CovPrepareForSandboxing(__sanitizer_sandbox_arguments *args);
 void SetSandboxingCallback(void (*f)());
+
+void CovUpdateMapping();
 
 void InitTlsSize();
 uptr GetTlsSize();
@@ -478,6 +485,10 @@ class LoadedModule {
 
   const char *full_name() const { return full_name_; }
   uptr base_address() const { return base_address_; }
+
+  uptr n_ranges() const { return n_ranges_; }
+  uptr address_range_start(int i) const { return ranges_[i].beg; }
+  uptr address_range_end(int i) const { return ranges_[i].end; }
 
  private:
   struct AddressRange {
