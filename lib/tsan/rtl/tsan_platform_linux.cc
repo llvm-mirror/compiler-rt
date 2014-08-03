@@ -14,7 +14,7 @@
 
 
 #include "sanitizer_common/sanitizer_platform.h"
-#if SANITIZER_LINUX
+#if SANITIZER_LINUX || SANITIZER_FREEBSD
 
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
@@ -32,7 +32,6 @@
 #include <string.h>
 #include <stdarg.h>
 #include <sys/mman.h>
-#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -43,9 +42,10 @@
 #include <errno.h>
 #include <sched.h>
 #include <dlfcn.h>
+#if SANITIZER_LINUX
 #define __need_res_state
 #include <resolv.h>
-#include <malloc.h>
+#endif
 
 #ifdef sa_handler
 # undef sa_handler
@@ -53,6 +53,11 @@
 
 #ifdef sa_sigaction
 # undef sa_sigaction
+#endif
+
+#if SANITIZER_FREEBSD
+extern "C" void *__libc_stack_end;
+void *__libc_stack_end = 0;
 #endif
 
 namespace __tsan {
@@ -104,20 +109,44 @@ void WriteMemoryProfile(char *buf, uptr buf_size, uptr nthread, uptr nlive) {
 }
 
 uptr GetRSS() {
-  uptr mem[7] = {};
-  __sanitizer::GetMemoryProfile(FillProfileCallback, mem, 7);
-  return mem[6];
+  uptr fd = OpenFile("/proc/self/statm", false);
+  if ((sptr)fd < 0)
+    return 0;
+  char buf[64];
+  uptr len = internal_read(fd, buf, sizeof(buf) - 1);
+  internal_close(fd);
+  if ((sptr)len <= 0)
+    return 0;
+  buf[len] = 0;
+  // The format of the file is:
+  // 1084 89 69 11 0 79 0
+  // We need the second number which is RSS in 4K units.
+  char *pos = buf;
+  // Skip the first number.
+  while (*pos >= '0' && *pos <= '9')
+    pos++;
+  // Skip whitespaces.
+  while (!(*pos >= '0' && *pos <= '9') && *pos != 0)
+    pos++;
+  // Read the number.
+  uptr rss = 0;
+  while (*pos >= '0' && *pos <= '9')
+    rss = rss * 10 + *pos++ - '0';
+  return rss * 4096;
 }
 
-
+#if SANITIZER_LINUX
 void FlushShadowMemoryCallback(
     const SuspendedThreadsList &suspended_threads_list,
     void *argument) {
   FlushUnneededShadowMemory(kLinuxShadowBeg, kLinuxShadowEnd - kLinuxShadowBeg);
 }
+#endif
 
 void FlushShadowMemory() {
+#if SANITIZER_LINUX
   StopTheWorld(FlushShadowMemoryCallback, 0);
+#endif
 }
 
 #ifndef TSAN_GO
@@ -199,6 +228,14 @@ void InitializeShadowMemory() {
                "to link with -pie (%p, %p).\n", shadow, kLinuxShadowBeg);
     Die();
   }
+  // This memory range is used for thread stacks and large user mmaps.
+  // Frequently a thread uses only a small part of stack and similarly
+  // a program uses a small part of large mmap. On some programs
+  // we see 20% memory usage reduction without huge pages for this range.
+#ifdef MADV_NOHUGEPAGE
+  madvise((void*)MemToShadow(0x7f0000000000ULL),
+      0x10000000000ULL * kShadowMultiplier, MADV_NOHUGEPAGE);
+#endif
   DPrintf("memory shadow: %zx-%zx (%zuGB)\n",
       kLinuxShadowBeg, kLinuxShadowEnd,
       (kLinuxShadowEnd - kLinuxShadowBeg) >> 30);
@@ -362,6 +399,7 @@ bool IsGlobalVar(uptr addr) {
 // This is required to properly "close" the fds, because we do not see internal
 // closes within glibc. The code is a pure hack.
 int ExtractResolvFDs(void *state, int *fds, int nfd) {
+#if SANITIZER_LINUX
   int cnt = 0;
   __res_state *statp = (__res_state*)state;
   for (int i = 0; i < MAXNS && cnt < nfd; i++) {
@@ -369,6 +407,9 @@ int ExtractResolvFDs(void *state, int *fds, int nfd) {
       fds[cnt++] = statp->_u._ext.nssocks[i];
   }
   return cnt;
+#else
+  return 0;
+#endif
 }
 
 // Extract file descriptors passed via UNIX domain sockets.

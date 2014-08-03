@@ -12,9 +12,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "ubsan_diag.h"
-#include "sanitizer_common/sanitizer_common.h"
-#include "sanitizer_common/sanitizer_flags.h"
-#include "sanitizer_common/sanitizer_libc.h"
+#include "ubsan_init.h"
+#include "ubsan_flags.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
@@ -22,20 +21,32 @@
 
 using namespace __ubsan;
 
-static void InitializeSanitizerCommon() {
-  static StaticSpinMutex init_mu;
-  SpinMutexLock l(&init_mu);
-  static bool initialized;
-  if (initialized)
-   return;
-  if (0 == internal_strcmp(SanitizerToolName, "SanitizerTool")) {
-    // UBSan is run in a standalone mode. Initialize it now.
-    SanitizerToolName = "UndefinedBehaviorSanitizer";
-    CommonFlags *cf = common_flags();
-    SetCommonFlagsDefaults(cf);
-    cf->print_summary = false;
-  }
-  initialized = true;
+void __ubsan::MaybePrintStackTrace(uptr pc, uptr bp) {
+  // We assume that flags are already parsed: InitIfNecessary
+  // will definitely be called when we print the first diagnostics message.
+  if (!flags()->print_stacktrace)
+    return;
+  // We can only use slow unwind, as we don't have any information about stack
+  // top/bottom.
+  // FIXME: It's better to respect "fast_unwind_on_fatal" runtime flag and
+  // fetch stack top/bottom information if we have it (e.g. if we're running
+  // under ASan).
+  if (StackTrace::WillUseFastUnwind(false))
+    return;
+  StackTrace stack;
+  stack.Unwind(kStackTraceMax, pc, bp, 0, 0, 0, false);
+  stack.Print();
+}
+
+namespace {
+class Decorator : public SanitizerCommonDecorator {
+ public:
+  Decorator() : SanitizerCommonDecorator() {}
+  const char *Highlight() const { return Green(); }
+  const char *EndHighlight() const { return Default(); }
+  const char *Note() const { return Black(); }
+  const char *EndNote() const { return Default(); }
+};
 }
 
 Location __ubsan::getCallerLocation(uptr CallerLoc) {
@@ -49,12 +60,11 @@ Location __ubsan::getCallerLocation(uptr CallerLoc) {
 Location __ubsan::getFunctionLocation(uptr Loc, const char **FName) {
   if (!Loc)
     return Location();
-  // FIXME: We may need to run initialization earlier.
-  InitializeSanitizerCommon();
+  InitIfNecessary();
 
   AddressInfo Info;
-  if (!Symbolizer::GetOrInit()->SymbolizePC(Loc, &Info, 1) ||
-      !Info.module || !*Info.module)
+  if (!Symbolizer::Get()->SymbolizePC(Loc, &Info, 1) || !Info.module ||
+      !*Info.module)
     return Location(Loc);
 
   if (FName && Info.function)
@@ -138,7 +148,7 @@ static void renderText(const char *Message, const Diag::Arg *Args) {
         Printf("%s", A.String);
         break;
       case Diag::AK_Mangled: {
-        Printf("'%s'", Symbolizer::GetOrInit()->Demangle(A.String));
+        Printf("'%s'", Symbolizer::Get()->Demangle(A.String));
         break;
       }
       case Diag::AK_SInt:
@@ -184,8 +194,7 @@ static Range *upperBound(MemoryLocation Loc, Range *Ranges,
 }
 
 /// Render a snippet of the address space near a location.
-static void renderMemorySnippet(const __sanitizer::AnsiColorDecorator &Decor,
-                                MemoryLocation Loc,
+static void renderMemorySnippet(const Decorator &Decor, MemoryLocation Loc,
                                 Range *Ranges, unsigned NumRanges,
                                 const Diag::Arg *Args) {
   const unsigned BytesToShow = 32;
@@ -212,7 +221,7 @@ static void renderMemorySnippet(const __sanitizer::AnsiColorDecorator &Decor,
   Printf("\n");
 
   // Emit highlights.
-  Printf(Decor.Green());
+  Printf(Decor.Highlight());
   Range *InRange = upperBound(Min, Ranges, NumRanges);
   for (uptr P = Min; P != Max; ++P) {
     char Pad = ' ', Byte = ' ';
@@ -227,7 +236,7 @@ static void renderMemorySnippet(const __sanitizer::AnsiColorDecorator &Decor,
     char Buffer[] = { Pad, Pad, P == Loc ? '^' : Byte, Byte, 0 };
     Printf((P % 8 == 0) ? Buffer : &Buffer[1]);
   }
-  Printf("%s\n", Decor.Default());
+  Printf("%s\n", Decor.EndHighlight());
 
   // Go over the line again, and print names for the ranges.
   InRange = 0;
@@ -265,8 +274,9 @@ static void renderMemorySnippet(const __sanitizer::AnsiColorDecorator &Decor,
 }
 
 Diag::~Diag() {
-  __sanitizer::AnsiColorDecorator Decor(PrintsToTty());
-  SpinMutexLock l(&CommonSanitizerReportMutex);
+  // All diagnostics should be printed under report mutex.
+  CommonSanitizerReportMutex.CheckLocked();
+  Decorator Decor;
   Printf(Decor.Bold());
 
   renderLocation(Loc);
@@ -274,11 +284,11 @@ Diag::~Diag() {
   switch (Level) {
   case DL_Error:
     Printf("%s runtime error: %s%s",
-           Decor.Red(), Decor.Default(), Decor.Bold());
+           Decor.Warning(), Decor.EndWarning(), Decor.Bold());
     break;
 
   case DL_Note:
-    Printf("%s note: %s", Decor.Black(), Decor.Default());
+    Printf("%s note: %s", Decor.Note(), Decor.EndNote());
     break;
   }
 
@@ -289,4 +299,16 @@ Diag::~Diag() {
   if (Loc.isMemoryLocation())
     renderMemorySnippet(Decor, Loc.getMemoryLocation(), Ranges,
                         NumRanges, Args);
+}
+
+ScopedReport::ScopedReport(bool DieAfterReport)
+    : DieAfterReport(DieAfterReport) {
+  InitIfNecessary();
+  CommonSanitizerReportMutex.Lock();
+}
+
+ScopedReport::~ScopedReport() {
+  CommonSanitizerReportMutex.Unlock();
+  if (DieAfterReport)
+    Die();
 }

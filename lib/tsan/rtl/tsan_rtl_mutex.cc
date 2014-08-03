@@ -52,6 +52,10 @@ void DDMutexInit(ThreadState *thr, uptr pc, SyncVar *s) {
 
 static void ReportMutexMisuse(ThreadState *thr, uptr pc, ReportType typ,
     uptr addr, u64 mid) {
+  // In Go, these misuses are either impossible, or detected by std lib,
+  // or false positives (e.g. unlock in a different thread).
+  if (kGoMode)
+    return;
   ThreadRegistryLock l(ctx->thread_registry);
   ScopedReport rep(typ);
   rep.AddMutex(mid);
@@ -168,7 +172,7 @@ void MutexLock(ThreadState *thr, uptr pc, uptr addr, int rec, bool try_lock) {
   }
   s->recursion += rec;
   thr->mset.Add(s->GetId(), true, thr->fast_state.epoch());
-  if (flags()->detect_deadlocks && s->recursion == 1) {
+  if (flags()->detect_deadlocks && (s->recursion - rec) == 0) {
     Callback cb(thr, pc);
     if (!try_lock)
       ctx->dd->MutexBeforeLock(&cb, &s->dd, true);
@@ -194,7 +198,7 @@ int MutexUnlock(ThreadState *thr, uptr pc, uptr addr, bool all) {
   TraceAddEvent(thr, thr->fast_state, EventTypeUnlock, s->GetId());
   int rec = 0;
   bool report_bad_unlock = false;
-  if (s->recursion == 0 || s->owner_tid != thr->tid) {
+  if (kCppMode && (s->recursion == 0 || s->owner_tid != thr->tid)) {
     if (flags()->report_mutex_bugs && !s->is_broken) {
       s->is_broken = true;
       report_bad_unlock = true;
@@ -211,7 +215,7 @@ int MutexUnlock(ThreadState *thr, uptr pc, uptr addr, bool all) {
     }
   }
   thr->mset.Del(s->GetId(), true);
-  if (flags()->detect_deadlocks && s->recursion == 0) {
+  if (flags()->detect_deadlocks && s->recursion == 0 && !report_bad_unlock) {
     Callback cb(thr, pc);
     ctx->dd->MutexBeforeUnlock(&cb, &s->dd, true);
   }
@@ -220,7 +224,7 @@ int MutexUnlock(ThreadState *thr, uptr pc, uptr addr, bool all) {
   // Can't touch s after this point.
   if (report_bad_unlock)
     ReportMutexMisuse(thr, pc, ReportTypeMutexBadUnlock, addr, mid);
-  if (flags()->detect_deadlocks) {
+  if (flags()->detect_deadlocks && !report_bad_unlock) {
     Callback cb(thr, pc);
     ReportDeadlock(thr, pc, ctx->dd->GetReport(&cb));
   }
@@ -467,7 +471,7 @@ void ReportDeadlock(ThreadState *thr, uptr pc, DDReport *r) {
     rep.AddUniqueTid((int)r->loop[i].thr_ctx);
     rep.AddThread((int)r->loop[i].thr_ctx);
   }
-  StackTrace stacks[2 * DDReport::kMaxLoopSize];
+  InternalScopedBuffer<StackTrace> stacks(2 * DDReport::kMaxLoopSize);
   uptr dummy_pc = 0x42;
   for (int i = 0; i < r->n; i++) {
     uptr size;

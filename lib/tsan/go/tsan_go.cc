@@ -191,21 +191,29 @@ void __tsan_finalizer_goroutine(ThreadState *thr) {
   AcquireGlobal(thr, 0);
 }
 
-void __tsan_mutex_before_lock(ThreadState *thr, uptr addr, bool write) {
+void __tsan_mutex_before_lock(ThreadState *thr, uptr addr, uptr write) {
 }
 
-void __tsan_mutex_after_lock(ThreadState *thr, uptr addr, bool write) {
+void __tsan_mutex_after_lock(ThreadState *thr, uptr addr, uptr write) {
   if (write)
     MutexLock(thr, 0, addr);
   else
     MutexReadLock(thr, 0, addr);
 }
 
-void __tsan_mutex_before_unlock(ThreadState *thr, uptr addr, bool write) {
+void __tsan_mutex_before_unlock(ThreadState *thr, uptr addr, uptr write) {
   if (write)
     MutexUnlock(thr, 0, addr);
   else
     MutexReadUnlock(thr, 0, addr);
+}
+
+void __tsan_go_ignore_sync_begin(ThreadState *thr) {
+  ThreadIgnoreSyncBegin(thr, 0);
+}
+
+void __tsan_go_ignore_sync_end(ThreadState *thr) {
+  ThreadIgnoreSyncEnd(thr, 0);
 }
 
 }  // extern "C"

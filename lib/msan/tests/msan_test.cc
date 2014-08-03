@@ -18,6 +18,7 @@
 
 #include "sanitizer_common/tests/sanitizer_test_utils.h"
 
+#include "sanitizer/allocator_interface.h"
 #include "sanitizer/msan_interface.h"
 #include "msandr_test_so.h"
 
@@ -145,6 +146,12 @@ T *GetPoisonedO(int i, U4 origin, T val = 0) {
   __msan_poison(&poisoned_array[i], sizeof(T));
   __msan_set_origin(&poisoned_array[i], sizeof(T), origin);
   return res;
+}
+
+template<typename T>
+T Poisoned(T v = 0, T s = (T)(-1)) {
+  __msan_partial_poison(&v, &s, sizeof(T));
+  return v;
 }
 
 template<class T> NOINLINE T ReturnPoisoned() { return *GetPoisoned<T>(); }
@@ -1285,33 +1292,56 @@ TEST(MemorySanitizer, memcpy) {
   EXPECT_POISONED(y[1]);
 }
 
-void TestUnalignedMemcpy(int left, int right, bool src_is_aligned) {
-  const int sz = 20;
+void TestUnalignedMemcpy(unsigned left, unsigned right, bool src_is_aligned,
+                         bool src_is_poisoned, bool dst_is_poisoned) {
+  fprintf(stderr, "%s(%d, %d, %d, %d, %d)\n", __func__, left, right,
+          src_is_aligned, src_is_poisoned, dst_is_poisoned);
+
+  const unsigned sz = 20;
+  U4 dst_origin, src_origin;
   char *dst = (char *)malloc(sz);
-  U4 origin = __msan_get_origin(dst);
+  if (dst_is_poisoned)
+    dst_origin = __msan_get_origin(dst);
+  else
+    memset(dst, 0, sz);
 
   char *src = (char *)malloc(sz);
-  memset(src, 0, sz);
+  if (src_is_poisoned)
+    src_origin = __msan_get_origin(src);
+  else
+    memset(src, 0, sz);
 
   memcpy(dst + left, src_is_aligned ? src + left : src, sz - left - right);
-  for (int i = 0; i < left; ++i)
-    EXPECT_POISONED_O(dst[i], origin);
-  for (int i = 0; i < right; ++i)
-    EXPECT_POISONED_O(dst[sz - i - 1], origin);
-  EXPECT_NOT_POISONED(dst[left]);
-  EXPECT_NOT_POISONED(dst[sz - right - 1]);
+
+  for (unsigned i = 0; i < (left & (~3U)); ++i)
+    if (dst_is_poisoned)
+      EXPECT_POISONED_O(dst[i], dst_origin);
+    else
+      EXPECT_NOT_POISONED(dst[i]);
+
+  for (unsigned i = 0; i < (right & (~3U)); ++i)
+    if (dst_is_poisoned)
+      EXPECT_POISONED_O(dst[sz - i - 1], dst_origin);
+    else
+      EXPECT_NOT_POISONED(dst[sz - i - 1]);
+
+  for (unsigned i = left; i < sz - right; ++i)
+    if (src_is_poisoned)
+      EXPECT_POISONED_O(dst[i], src_origin);
+    else
+      EXPECT_NOT_POISONED(dst[i]);
 
   free(dst);
   free(src);
 }
 
 TEST(MemorySanitizer, memcpy_unaligned) {
-  for (int i = 0; i < 10; ++i) {
-    for (int j = 0; j < 10; ++j) {
-      TestUnalignedMemcpy(i, j, true);
-      TestUnalignedMemcpy(i, j, false);
-    }
-  }
+  for (int i = 0; i < 10; ++i)
+    for (int j = 0; j < 10; ++j)
+      for (int aligned = 0; aligned < 2; ++aligned)
+        for (int srcp = 0; srcp < 2; ++srcp)
+          for (int dstp = 0; dstp < 2; ++dstp)
+            TestUnalignedMemcpy(i, j, aligned, srcp, dstp);
 }
 
 TEST(MemorySanitizer, memmove) {
@@ -1453,14 +1483,16 @@ TEST(MemorySanitizer, strcpy) {  // NOLINT
 
 TEST(MemorySanitizer, strncpy) {  // NOLINT
   char* x = new char[3];
-  char* y = new char[3];
+  char* y = new char[5];
   x[0] = 'a';
   x[1] = *GetPoisoned<char>(1, 1);
-  x[2] = 0;
-  strncpy(y, x, 2);  // NOLINT
+  x[2] = '\0';
+  strncpy(y, x, 4);  // NOLINT
   EXPECT_NOT_POISONED(y[0]);
   EXPECT_POISONED(y[1]);
-  EXPECT_POISONED(y[2]);
+  EXPECT_NOT_POISONED(y[2]);
+  EXPECT_NOT_POISONED(y[3]);
+  EXPECT_POISONED(y[4]);
 }
 
 TEST(MemorySanitizer, stpcpy) {  // NOLINT
@@ -1565,15 +1597,13 @@ TEST_STRTO_INT_LOC(strtoll_l)
 TEST_STRTO_INT_LOC(strtoul_l)
 TEST_STRTO_INT_LOC(strtoull_l)
 
-// https://code.google.com/p/memory-sanitizer/issues/detail?id=36
-TEST(MemorySanitizer, DISABLED_strtoimax) {
+TEST(MemorySanitizer, strtoimax) {
   char *e;
   ASSERT_EQ(1, strtoimax("1", &e, 10));
   EXPECT_NOT_POISONED((S8) e);
 }
 
-// https://code.google.com/p/memory-sanitizer/issues/detail?id=36
-TEST(MemorySanitizer, DISABLED_strtoumax) {
+TEST(MemorySanitizer, strtoumax) {
   char *e;
   ASSERT_EQ(1U, strtoumax("1", &e, 10));
   EXPECT_NOT_POISONED((S8) e);
@@ -2987,12 +3017,12 @@ TEST(MemorySanitizer, valloc) {
 TEST(MemorySanitizer, pvalloc) {
   void *p = pvalloc(kPageSize + 100);
   EXPECT_EQ(0U, (uintptr_t)p % kPageSize);
-  EXPECT_EQ(2 * kPageSize, __msan_get_allocated_size(p));
+  EXPECT_EQ(2 * kPageSize, __sanitizer_get_allocated_size(p));
   free(p);
 
   p = pvalloc(0);  // pvalloc(0) should allocate at least one page.
   EXPECT_EQ(0U, (uintptr_t)p % kPageSize);
-  EXPECT_EQ(kPageSize, __msan_get_allocated_size(p));
+  EXPECT_EQ(kPageSize, __sanitizer_get_allocated_size(p));
   free(p);
 }
 
@@ -3521,12 +3551,17 @@ TEST(MemorySanitizer, UnalignedStore64_precise2) {
   EXPECT_POISONED_O(x[11], originx3);
 }
 
+#if defined(__clang__)
 namespace {
+typedef U1 V16x8 __attribute__((__vector_size__(16)));
 typedef U2 V8x16 __attribute__((__vector_size__(16)));
 typedef U4 V4x32 __attribute__((__vector_size__(16)));
 typedef U8 V2x64 __attribute__((__vector_size__(16)));
 typedef U4 V8x32 __attribute__((__vector_size__(32)));
 typedef U8 V4x64 __attribute__((__vector_size__(32)));
+typedef U4 V2x32 __attribute__((__vector_size__(8)));
+typedef U2 V4x16 __attribute__((__vector_size__(8)));
+typedef U1 V8x8 __attribute__((__vector_size__(8)));
 
 
 V8x16 shift_sse2_left_scalar(V8x16 x, U4 y) {
@@ -3538,20 +3573,19 @@ V8x16 shift_sse2_left(V8x16 x, V8x16 y) {
 }
 
 TEST(VectorShiftTest, sse2_left_scalar) {
-  V8x16 v = {(U2)(*GetPoisoned<U2>() | 3), (U2)(*GetPoisoned<U2>() | 7), 2, 3,
-             4,                            5,                            6, 7};
+  V8x16 v = {Poisoned<U2>(0, 3), Poisoned<U2>(0, 7), 2, 3, 4, 5, 6, 7};
   V8x16 u = shift_sse2_left_scalar(v, 2);
   EXPECT_POISONED(u[0]);
   EXPECT_POISONED(u[1]);
-  EXPECT_NOT_POISONED(u[0] | (~7U));
-  EXPECT_NOT_POISONED(u[1] | (~31U));
+  EXPECT_NOT_POISONED(u[0] | (3U << 2));
+  EXPECT_NOT_POISONED(u[1] | (7U << 2));
   u[0] = u[1] = 0;
   EXPECT_NOT_POISONED(u);
 }
 
 TEST(VectorShiftTest, sse2_left_scalar_by_uninit) {
   V8x16 v = {0, 1, 2, 3, 4, 5, 6, 7};
-  V8x16 u = shift_sse2_left_scalar(v, *GetPoisoned<U4>());
+  V8x16 u = shift_sse2_left_scalar(v, Poisoned<U4>());
   EXPECT_POISONED(u[0]);
   EXPECT_POISONED(u[1]);
   EXPECT_POISONED(u[2]);
@@ -3563,23 +3597,21 @@ TEST(VectorShiftTest, sse2_left_scalar_by_uninit) {
 }
 
 TEST(VectorShiftTest, sse2_left) {
-  V8x16 v = {(U2)(*GetPoisoned<U2>() | 3), (U2)(*GetPoisoned<U2>() | 7), 2, 3,
-             4,                            5,                            6, 7};
+  V8x16 v = {Poisoned<U2>(0, 3), Poisoned<U2>(0, 7), 2, 3, 4, 5, 6, 7};
   // Top 64 bits of shift count don't affect the result.
-  V2x64 s = {2, *GetPoisoned<U8>()};
+  V2x64 s = {2, Poisoned<U8>()};
   V8x16 u = shift_sse2_left(v, s);
   EXPECT_POISONED(u[0]);
   EXPECT_POISONED(u[1]);
-  EXPECT_NOT_POISONED(u[0] | (~7U));
-  EXPECT_NOT_POISONED(u[1] | (~31U));
+  EXPECT_NOT_POISONED(u[0] | (3U << 2));
+  EXPECT_NOT_POISONED(u[1] | (7U << 2));
   u[0] = u[1] = 0;
   EXPECT_NOT_POISONED(u);
 }
 
 TEST(VectorShiftTest, sse2_left_by_uninit) {
-  V8x16 v = {(U2)(*GetPoisoned<U2>() | 3), (U2)(*GetPoisoned<U2>() | 7), 2, 3,
-             4,                            5,                            6, 7};
-  V2x64 s = {*GetPoisoned<U8>(), *GetPoisoned<U8>()};
+  V8x16 v = {Poisoned<U2>(0, 3), Poisoned<U2>(0, 7), 2, 3, 4, 5, 6, 7};
+  V2x64 s = {Poisoned<U8>(), Poisoned<U8>()};
   V8x16 u = shift_sse2_left(v, s);
   EXPECT_POISONED(u[0]);
   EXPECT_POISONED(u[1]);
@@ -3598,8 +3630,8 @@ V4x32 shift_avx2_left(V4x32 x, V4x32 y) {
 // This is variable vector shift that's only available starting with AVX2.
 // V4x32 shift_avx2_left(V4x32 x, V4x32 y) {
 TEST(VectorShiftTest, avx2_left) {
-  V4x32 v = {(U2)(*GetPoisoned<U2>() | 3), (U2)(*GetPoisoned<U2>() | 7), 2, 3};
-  V4x32 s = {2, *GetPoisoned<U4>(), 3, *GetPoisoned<U4>()};
+  V4x32 v = {Poisoned<U2>(0, 3), Poisoned<U2>(0, 7), 2, 3};
+  V4x32 s = {2, Poisoned<U4>(), 3, Poisoned<U4>()};
   V4x32 u = shift_avx2_left(v, s);
   EXPECT_POISONED(u[0]);
   EXPECT_NOT_POISONED(u[0] | (~7U));
@@ -3614,11 +3646,13 @@ TEST(VectorShiftTest, avx2_left) {
 
 TEST(VectorPackTest, sse2_packssdw_128) {
   const unsigned S2_max = (1 << 15) - 1;
-  V4x32 a = {*GetPoisoned<U4>() & 0xFF0000U, *GetPoisoned<U4>() & 0xFFFF0000,
+  V4x32 a = {Poisoned<U4>(0, 0xFF0000), Poisoned<U4>(0, 0xFFFF0000),
              S2_max + 100, 4};
-  V4x32 b = {*GetPoisoned<U4>() & 0xFF, S2_max + 10000,
-             *GetPoisoned<U4>() & 0xFF00, S2_max};
+  V4x32 b = {Poisoned<U4>(0, 0xFF), S2_max + 10000, Poisoned<U4>(0, 0xFF00),
+             S2_max};
+
   V8x16 c = _mm_packs_epi32(a, b);
+
   EXPECT_POISONED(c[0]);
   EXPECT_POISONED(c[1]);
   EXPECT_NOT_POISONED(c[2]);
@@ -3633,6 +3667,52 @@ TEST(VectorPackTest, sse2_packssdw_128) {
   EXPECT_EQ(c[5], S2_max);
   EXPECT_EQ(c[7], S2_max);
 }
+
+TEST(VectorPackTest, mmx_packuswb) {
+  const unsigned U1_max = (1 << 8) - 1;
+  V4x16 a = {Poisoned<U2>(0, 0xFF00), Poisoned<U2>(0, 0xF000U), U1_max + 100,
+             4};
+  V4x16 b = {Poisoned<U2>(0, 0xFF), U1_max - 1, Poisoned<U2>(0, 0xF), U1_max};
+  V8x8 c = _mm_packs_pu16(a, b);
+
+  EXPECT_POISONED(c[0]);
+  EXPECT_POISONED(c[1]);
+  EXPECT_NOT_POISONED(c[2]);
+  EXPECT_NOT_POISONED(c[3]);
+  EXPECT_POISONED(c[4]);
+  EXPECT_NOT_POISONED(c[5]);
+  EXPECT_POISONED(c[6]);
+  EXPECT_NOT_POISONED(c[7]);
+
+  EXPECT_EQ(c[2], U1_max);
+  EXPECT_EQ(c[3], 4);
+  EXPECT_EQ(c[5], U1_max - 1);
+  EXPECT_EQ(c[7], U1_max);
+}
+
+TEST(VectorSadTest, sse2_psad_bw) {
+  V16x8 a = {Poisoned<U1>(), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  V16x8 b = {100, 101, 102, 103, 104, 105, 106, 107,
+             108, 109, 110, 111, 112, 113, 114, 115};
+  V2x64 c = _mm_sad_epu8(a, b);
+
+  EXPECT_POISONED(c[0]);
+  EXPECT_NOT_POISONED(c[1]);
+
+  EXPECT_EQ(800U, c[1]);
+}
+
+TEST(VectorMaddTest, mmx_pmadd_wd) {
+  V4x16 a = {Poisoned<U2>(), 1, 2, 3};
+  V4x16 b = {100, 101, 102, 103};
+  V2x32 c = _mm_madd_pi16(a, b);
+
+  EXPECT_POISONED(c[0]);
+  EXPECT_NOT_POISONED(c[1]);
+
+  EXPECT_EQ((unsigned)(2 * 102 + 3 * 103), c[1]);
+}
+#endif  // defined(__clang__)
 
 TEST(MemorySanitizerDr, StoreInDSOTest) {
   if (!__msan_has_dynamic_component()) return;
@@ -3991,7 +4071,7 @@ TEST(MemorySanitizerStress, DISABLED_MallocStackTrace) {
 TEST(MemorySanitizerAllocator, get_estimated_allocated_size) {
   size_t sizes[] = {0, 20, 5000, 1<<20};
   for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); ++i) {
-    size_t alloc_size = __msan_get_estimated_allocated_size(sizes[i]);
+    size_t alloc_size = __sanitizer_get_estimated_allocated_size(sizes[i]);
     EXPECT_EQ(alloc_size, sizes[i]);
   }
 }
@@ -4000,26 +4080,26 @@ TEST(MemorySanitizerAllocator, get_allocated_size_and_ownership) {
   char *array = reinterpret_cast<char*>(malloc(100));
   int *int_ptr = new int;
 
-  EXPECT_TRUE(__msan_get_ownership(array));
-  EXPECT_EQ(100U, __msan_get_allocated_size(array));
+  EXPECT_TRUE(__sanitizer_get_ownership(array));
+  EXPECT_EQ(100U, __sanitizer_get_allocated_size(array));
 
-  EXPECT_TRUE(__msan_get_ownership(int_ptr));
-  EXPECT_EQ(sizeof(*int_ptr), __msan_get_allocated_size(int_ptr));
+  EXPECT_TRUE(__sanitizer_get_ownership(int_ptr));
+  EXPECT_EQ(sizeof(*int_ptr), __sanitizer_get_allocated_size(int_ptr));
 
   void *wild_addr = reinterpret_cast<void*>(0x1);
-  EXPECT_FALSE(__msan_get_ownership(wild_addr));
-  EXPECT_EQ(0U, __msan_get_allocated_size(wild_addr));
+  EXPECT_FALSE(__sanitizer_get_ownership(wild_addr));
+  EXPECT_EQ(0U, __sanitizer_get_allocated_size(wild_addr));
 
-  EXPECT_FALSE(__msan_get_ownership(array + 50));
-  EXPECT_EQ(0U, __msan_get_allocated_size(array + 50));
+  EXPECT_FALSE(__sanitizer_get_ownership(array + 50));
+  EXPECT_EQ(0U, __sanitizer_get_allocated_size(array + 50));
 
-  // NULL is a valid argument for GetAllocatedSize but is not owned.                                                  
-  EXPECT_FALSE(__msan_get_ownership(NULL));
-  EXPECT_EQ(0U, __msan_get_allocated_size(NULL));
- 
+  // NULL is a valid argument for GetAllocatedSize but is not owned.
+  EXPECT_FALSE(__sanitizer_get_ownership(NULL));
+  EXPECT_EQ(0U, __sanitizer_get_allocated_size(NULL));
+
   free(array);
-  EXPECT_FALSE(__msan_get_ownership(array));
-  EXPECT_EQ(0U, __msan_get_allocated_size(array));
+  EXPECT_FALSE(__sanitizer_get_ownership(array));
+  EXPECT_EQ(0U, __sanitizer_get_allocated_size(array));
 
   delete int_ptr;
 }

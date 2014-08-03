@@ -15,13 +15,13 @@
 // REQUIRES: x86_64-supported-target,i386-supported-target
 
 // RUN: %clangxx_asan -O0 -DSHARED_LIB %s -fPIC -shared -o %t-so.so
-// RUN: %clangxx_asan -O0 %s -ldl -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_asan -O0 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_asan -O1 -DSHARED_LIB %s -fPIC -shared -o %t-so.so
-// RUN: %clangxx_asan -O1 %s -ldl -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_asan -O1 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_asan -O2 -DSHARED_LIB %s -fPIC -shared -o %t-so.so
-// RUN: %clangxx_asan -O2 %s -ldl -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_asan -O2 %s -o %t && %run %t 2>&1 | FileCheck %s
 // RUN: %clangxx_asan -O3 -DSHARED_LIB %s -fPIC -shared -o %t-so.so
-// RUN: %clangxx_asan -O3 %s -ldl -o %t && %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_asan -O3 %s -o %t && %run %t 2>&1 | FileCheck %s
 
 #if !defined(SHARED_LIB)
 #include <assert.h>
@@ -66,7 +66,7 @@ int main(int argc, char *argv[]) {
   size_t page_beg = ((size_t)addr) & ~(PageSize - 1);
   void *res = mmap((void*)(page_beg), PageSize,
                    PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANON | MAP_FIXED | MAP_NORESERVE, 0, 0);
+                   MAP_PRIVATE | MAP_ANON | MAP_FIXED | MAP_NORESERVE, -1, 0);
   if (res == (char*)-1L) {
     printf("failed to mmap\n");
     return 1;

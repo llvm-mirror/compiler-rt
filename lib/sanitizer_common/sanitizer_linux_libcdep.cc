@@ -17,6 +17,7 @@
 
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
+#include "sanitizer_freebsd.h"
 #include "sanitizer_linux.h"
 #include "sanitizer_placement_new.h"
 #include "sanitizer_procmaps.h"
@@ -35,6 +36,7 @@
 
 #if SANITIZER_FREEBSD
 #include <pthread_np.h>
+#include <osreldate.h>
 #define pthread_getattr_np pthread_attr_get_np
 #endif
 
@@ -302,11 +304,11 @@ void InitTlsSize() {
 static atomic_uintptr_t kThreadDescriptorSize;
 
 uptr ThreadDescriptorSize() {
-  char buf[64];
   uptr val = atomic_load(&kThreadDescriptorSize, memory_order_relaxed);
   if (val)
     return val;
 #ifdef _CS_GNU_LIBC_VERSION
+  char buf[64];
   uptr len = confstr(_CS_GNU_LIBC_VERSION, buf, sizeof(buf));
   if (len < sizeof(buf) && internal_strncmp(buf, "glibc 2.", 8) == 0) {
     char *end;
@@ -471,6 +473,10 @@ uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
 #else  // SANITIZER_ANDROID
 # if !SANITIZER_FREEBSD
 typedef ElfW(Phdr) Elf_Phdr;
+# elif SANITIZER_WORDSIZE == 32 && __FreeBSD_version <= 902001  // v9.2
+#  define Elf_Phdr XElf32_Phdr
+#  define dl_phdr_info xdl_phdr_info
+#  define dl_iterate_phdr(c, b) xdl_iterate_phdr((c), (b))
 # endif
 
 struct DlIteratePhdrData {
@@ -507,7 +513,8 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
     if (phdr->p_type == PT_LOAD) {
       uptr cur_beg = info->dlpi_addr + phdr->p_vaddr;
       uptr cur_end = cur_beg + phdr->p_memsz;
-      cur_module->addAddressRange(cur_beg, cur_end);
+      bool executable = phdr->p_flags & PF_X;
+      cur_module->addAddressRange(cur_beg, cur_end, executable);
     }
   }
   return 0;

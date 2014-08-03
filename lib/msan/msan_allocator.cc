@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_common/sanitizer_allocator.h"
+#include "sanitizer_common/sanitizer_allocator_interface.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
 #include "msan.h"
 #include "msan_allocator.h"
@@ -116,7 +117,7 @@ void MsanDeallocate(StackTrace *stack, void *p) {
   CHECK(p);
   Init();
   MSAN_FREE_HOOK(p);
-  Metadata *meta = reinterpret_cast<Metadata*>(allocator.GetMetaData(p));
+  Metadata *meta = reinterpret_cast<Metadata *>(allocator.GetMetaData(p));
   uptr size = meta->requested_size;
   meta->requested_size = 0;
   // This memory will not be reused by anyone else, so we are free to keep it
@@ -128,7 +129,7 @@ void MsanDeallocate(StackTrace *stack, void *p) {
       CHECK(stack_id);
       u32 id;
       ChainedOriginDepotPut(stack_id, Origin::kHeapRoot, &id);
-      __msan_set_origin(p, size,  Origin(id, 1).raw_id());
+      __msan_set_origin(p, size, Origin(id, 1).raw_id());
     }
   }
   MsanThread *t = GetCurrentThread();
@@ -171,12 +172,10 @@ void *MsanReallocate(StackTrace *stack, void *old_p, uptr new_size,
 }
 
 static uptr AllocationSize(const void *p) {
-  if (p == 0)
-    return 0;
+  if (p == 0) return 0;
   const void *beg = allocator.GetBlockBegin(p);
-  if (beg != p)
-    return 0;
-  Metadata *b = (Metadata*)allocator.GetMetaData(p);
+  if (beg != p) return 0;
+  Metadata *b = (Metadata *)allocator.GetMetaData(p);
   return b->requested_size;
 }
 
@@ -184,34 +183,45 @@ static uptr AllocationSize(const void *p) {
 
 using namespace __msan;
 
-uptr __msan_get_current_allocated_bytes() {
+uptr __sanitizer_get_current_allocated_bytes() {
   uptr stats[AllocatorStatCount];
   allocator.GetStats(stats);
   return stats[AllocatorStatAllocated];
 }
+uptr __msan_get_current_allocated_bytes() {
+  return __sanitizer_get_current_allocated_bytes();
+}
 
-uptr __msan_get_heap_size() {
+uptr __sanitizer_get_heap_size() {
   uptr stats[AllocatorStatCount];
   allocator.GetStats(stats);
   return stats[AllocatorStatMapped];
 }
+uptr __msan_get_heap_size() {
+  return __sanitizer_get_heap_size();
+}
 
+uptr __sanitizer_get_free_bytes() { return 1; }
 uptr __msan_get_free_bytes() {
-  return 1;
+  return __sanitizer_get_free_bytes();
 }
 
+uptr __sanitizer_get_unmapped_bytes() { return 1; }
 uptr __msan_get_unmapped_bytes() {
-  return 1;
+  return __sanitizer_get_unmapped_bytes();
 }
 
+uptr __sanitizer_get_estimated_allocated_size(uptr size) { return size; }
 uptr __msan_get_estimated_allocated_size(uptr size) {
-  return size;
+  return __sanitizer_get_estimated_allocated_size(size);
 }
 
+int __sanitizer_get_ownership(const void *p) { return AllocationSize(p) != 0; }
 int __msan_get_ownership(const void *p) {
-  return AllocationSize(p) != 0;
+  return __sanitizer_get_ownership(p);
 }
 
+uptr __sanitizer_get_allocated_size(const void *p) { return AllocationSize(p); }
 uptr __msan_get_allocated_size(const void *p) {
-  return AllocationSize(p);
+  return __sanitizer_get_allocated_size(p);
 }

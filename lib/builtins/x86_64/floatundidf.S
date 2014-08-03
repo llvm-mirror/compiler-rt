@@ -20,15 +20,20 @@
 #if defined(__APPLE__)
 	.const
 #elif defined(__ELF__)
-	.rodata
+	.section .rodata
 #else
 	.section .rdata,"rd"
 #endif
-	.balign 4
+
+	.balign 16
 twop52:
 	.quad 0x4330000000000000
+
+	.balign 16
 twop84_plus_twop52:
 	.quad 0x4530000000100000
+
+	.balign 16
 twop84:
 	.quad 0x4530000000000000
 

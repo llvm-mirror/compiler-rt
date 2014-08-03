@@ -14,6 +14,7 @@
 #define UBSAN_DIAG_H
 
 #include "ubsan_value.h"
+#include "sanitizer_common/sanitizer_stacktrace.h"
 
 namespace __ubsan {
 
@@ -201,6 +202,20 @@ public:
   Diag &operator<<(const TypeDescriptor &V);
   Diag &operator<<(const Value &V);
   Diag &operator<<(const Range &R) { return AddRange(R); }
+};
+
+void MaybePrintStackTrace(uptr pc, uptr bp);
+
+/// \brief Instantiate this class before printing diagnostics in the error
+/// report. This class ensures that reports from different threads and from
+/// different sanitizers won't be mixed. If DieAfterReport is specified, it
+/// will terminate the program in the destructor.
+class ScopedReport {
+  bool DieAfterReport;
+
+public:
+  ScopedReport(bool DieAfterReport);
+  ~ScopedReport();
 };
 
 } // namespace __ubsan

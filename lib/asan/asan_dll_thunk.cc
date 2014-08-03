@@ -20,6 +20,7 @@
 // Using #ifdef rather than relying on Makefiles etc.
 // simplifies the build procedure.
 #ifdef ASAN_DLL_THUNK
+#include "asan_init_version.h"
 #include "sanitizer_common/sanitizer_interception.h"
 
 // ---------- Function interception helper functions and macros ----------- {{{1
@@ -203,13 +204,13 @@ extern "C" {
 
   // Manually wrap __asan_init as we need to initialize
   // __asan_option_detect_stack_use_after_return afterwards.
-  void __asan_init_v3() {
+  void __asan_init() {
     typedef void (*fntype)();
     static fntype fn = 0;
-    // __asan_init_v3 is expected to be called by only one thread.
+    // __asan_init is expected to be called by only one thread.
     if (fn) return;
 
-    fn = (fntype)getRealProcAddressOrDie("__asan_init_v3");
+    fn = (fntype)getRealProcAddressOrDie(__asan_init_name);
     fn();
     __asan_option_detect_stack_use_after_return =
         (__asan_should_detect_stack_use_after_return() != 0);
@@ -249,6 +250,9 @@ INTERFACE_FUNCTION(__asan_unpoison_stack_memory)
 
 INTERFACE_FUNCTION(__asan_poison_memory_region)
 INTERFACE_FUNCTION(__asan_unpoison_memory_region)
+
+INTERFACE_FUNCTION(__asan_address_is_poisoned)
+INTERFACE_FUNCTION(__asan_region_is_poisoned)
 
 INTERFACE_FUNCTION(__asan_get_current_fake_stack)
 INTERFACE_FUNCTION(__asan_addr_is_in_fake_stack)
@@ -306,6 +310,7 @@ WRAP_W_W(_expand_dbg)
 
 INTERCEPT_LIBRARY_FUNCTION(atoi);
 INTERCEPT_LIBRARY_FUNCTION(atol);
+INTERCEPT_LIBRARY_FUNCTION(_except_handler3);
 INTERCEPT_LIBRARY_FUNCTION(frexp);
 INTERCEPT_LIBRARY_FUNCTION(longjmp);
 INTERCEPT_LIBRARY_FUNCTION(memchr);
@@ -339,7 +344,7 @@ void InterceptHooks() {
 // In DLLs, the callbacks are expected to return 0,
 // otherwise CRT initialization fails.
 static int call_asan_init() {
-  __asan_init_v3();
+  __asan_init();
   return 0;
 }
 #pragma section(".CRT$XIB", long, read)  // NOLINT

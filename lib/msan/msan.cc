@@ -144,6 +144,9 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
   ParseFlag(str, &f->report_umrs, "report_umrs", "");
   ParseFlag(str, &f->wrap_signals, "wrap_signals", "");
   ParseFlag(str, &f->print_stats, "print_stats", "");
+  ParseFlag(str, &f->atexit, "atexit", "");
+  ParseFlag(str, &f->store_context_size, "store_context_size", "");
+  if (f->store_context_size < 1) f->store_context_size = 1;
 
   // keep_going is an old name for halt_on_error,
   // and it has inverse meaning.
@@ -161,6 +164,7 @@ static void InitializeFlags(Flags *f, const char *options) {
   cf->handle_ioctl = true;
   // FIXME: test and enable.
   cf->check_printf = false;
+  cf->intercept_tls_get_addr = true;
 
   internal_memset(f, 0, sizeof(*f));
   f->poison_heap_with_zeroes = false;
@@ -173,7 +177,9 @@ static void InitializeFlags(Flags *f, const char *options) {
   f->report_umrs = true;
   f->wrap_signals = true;
   f->print_stats = false;
+  f->atexit = false;
   f->halt_on_error = !&__msan_keep_going;
+  f->store_context_size = 20;
 
   // Override from user-specified string.
   if (__msan_default_options)
@@ -197,10 +203,6 @@ void PrintWarning(uptr pc, uptr bp) {
   PrintWarningWithOrigin(pc, bp, __msan_origin_tls);
 }
 
-bool OriginIsValid(u32 origin) {
-  return origin != 0 && origin != (u32)-1;
-}
-
 void PrintWarningWithOrigin(uptr pc, uptr bp, u32 origin) {
   if (msan_expect_umr) {
     // Printf("Expected UMR\n");
@@ -214,10 +216,10 @@ void PrintWarningWithOrigin(uptr pc, uptr bp, u32 origin) {
   GET_FATAL_STACK_TRACE_PC_BP(pc, bp);
 
   u32 report_origin =
-    (__msan_get_track_origins() && OriginIsValid(origin)) ? origin : 0;
+    (__msan_get_track_origins() && Origin(origin).isValid()) ? origin : 0;
   ReportUMR(&stack, report_origin);
 
-  if (__msan_get_track_origins() && !OriginIsValid(origin)) {
+  if (__msan_get_track_origins() && !Origin(origin).isValid()) {
     Printf(
         "  ORIGIN: invalid (%x). Might be a bug in MemorySanitizer origin "
         "tracking.\n    This could still be a bug in your code, too!\n",
@@ -318,7 +320,15 @@ MSAN_MAYBE_WARNING(u64, 8)
 
 #define MSAN_MAYBE_STORE_ORIGIN(type, size)                       \
   void __msan_maybe_store_origin_##size(type s, void *p, u32 o) { \
-    if (UNLIKELY(s)) *(u32 *)MEM_TO_ORIGIN((uptr)p &~3UL) = o;    \
+    if (UNLIKELY(s)) {                                            \
+      if (__msan_get_track_origins() > 1) {                       \
+        GET_CALLER_PC_BP_SP;                                      \
+        (void) sp;                                                \
+        GET_STORE_STACK_TRACE_PC_BP(pc, bp);                      \
+        o = ChainOrigin(o, &stack);                               \
+      }                                                           \
+      *(u32 *)MEM_TO_ORIGIN((uptr)p & ~3UL) = o;                  \
+    }                                                             \
   }
 
 MSAN_MAYBE_STORE_ORIGIN(u8, 1)
@@ -391,8 +401,7 @@ void __msan_init() {
     Die();
   }
 
-  Symbolizer::Init(common_flags()->external_symbolizer_path);
-  Symbolizer::Get()->AddHooks(EnterSymbolizer, ExitSymbolizer);
+  Symbolizer::GetOrInit()->AddHooks(EnterSymbolizer, ExitSymbolizer);
 
   MsanTSDInit(MsanTSDDtor);
 
@@ -444,7 +453,11 @@ void __msan_dump_shadow(const void *x, uptr size) {
 
   unsigned char *s = (unsigned char*)MEM_TO_SHADOW(x);
   for (uptr i = 0; i < size; i++) {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    Printf("%x%x ", s[i] & 0xf, s[i] >> 4);
+#else
     Printf("%x%x ", s[i] >> 4, s[i] & 0xf);
+#endif
   }
   Printf("\n");
 }
@@ -571,7 +584,7 @@ void __msan_set_alloca_origin4(void *a, uptr size, const char *descr, uptr pc) {
   }
   if (print)
     Printf("__msan_set_alloca_origin: descr=%s id=%x\n", descr + 4, id);
-  __msan_set_origin(a, size, id);
+  __msan_set_origin(a, size, Origin(id, 1).raw_id());
 }
 
 u32 __msan_chain_origin(u32 id) {

@@ -41,55 +41,12 @@ extern "C" const char *WEAK __tsan_default_suppressions() {
 
 namespace __tsan {
 
-static SuppressionContext* g_ctx;
-
-static char *ReadFile(const char *filename) {
-  if (filename == 0 || filename[0] == 0)
-    return 0;
-  InternalScopedBuffer<char> tmp(4*1024);
-  if (filename[0] == '/' || GetPwd() == 0)
-    internal_snprintf(tmp.data(), tmp.size(), "%s", filename);
-  else
-    internal_snprintf(tmp.data(), tmp.size(), "%s/%s", GetPwd(), filename);
-  uptr openrv = OpenFile(tmp.data(), false);
-  if (internal_iserror(openrv)) {
-    Printf("ThreadSanitizer: failed to open suppressions file '%s'\n",
-               tmp.data());
-    Die();
-  }
-  fd_t fd = openrv;
-  const uptr fsize = internal_filesize(fd);
-  if (fsize == (uptr)-1) {
-    Printf("ThreadSanitizer: failed to stat suppressions file '%s'\n",
-               tmp.data());
-    Die();
-  }
-  char *buf = (char*)internal_alloc(MBlockSuppression, fsize + 1);
-  if (fsize != internal_read(fd, buf, fsize)) {
-    Printf("ThreadSanitizer: failed to read suppressions file '%s'\n",
-               tmp.data());
-    Die();
-  }
-  internal_close(fd);
-  buf[fsize] = 0;
-  return buf;
-}
-
 void InitializeSuppressions() {
-  ALIGNED(64) static char placeholder_[sizeof(SuppressionContext)];
-  g_ctx = new(placeholder_) SuppressionContext;
-  const char *supp = ReadFile(flags()->suppressions);
-  g_ctx->Parse(supp);
+  SuppressionContext::Init();
 #ifndef TSAN_GO
-  supp = __tsan_default_suppressions();
-  g_ctx->Parse(supp);
-  g_ctx->Parse(std_suppressions);
+  SuppressionContext::Get()->Parse(__tsan_default_suppressions());
+  SuppressionContext::Get()->Parse(std_suppressions);
 #endif
-}
-
-SuppressionContext *GetSuppressionContext() {
-  CHECK_NE(g_ctx, 0);
-  return g_ctx;
 }
 
 SuppressionType conv(ReportType typ) {
@@ -122,17 +79,17 @@ SuppressionType conv(ReportType typ) {
 }
 
 uptr IsSuppressed(ReportType typ, const ReportStack *stack, Suppression **sp) {
-  CHECK(g_ctx);
-  if (!g_ctx->SuppressionCount() || stack == 0 || !stack->suppressable)
+  if (!SuppressionContext::Get()->SuppressionCount() || stack == 0 ||
+      !stack->suppressable)
     return 0;
   SuppressionType stype = conv(typ);
   if (stype == SuppressionNone)
     return 0;
   Suppression *s;
   for (const ReportStack *frame = stack; frame; frame = frame->next) {
-    if (g_ctx->Match(frame->func, stype, &s) ||
-        g_ctx->Match(frame->file, stype, &s) ||
-        g_ctx->Match(frame->module, stype, &s)) {
+    if (SuppressionContext::Get()->Match(frame->func, stype, &s) ||
+        SuppressionContext::Get()->Match(frame->file, stype, &s) ||
+        SuppressionContext::Get()->Match(frame->module, stype, &s)) {
       DPrintf("ThreadSanitizer: matched suppression '%s'\n", s->templ);
       s->hit_count++;
       *sp = s;
@@ -143,17 +100,16 @@ uptr IsSuppressed(ReportType typ, const ReportStack *stack, Suppression **sp) {
 }
 
 uptr IsSuppressed(ReportType typ, const ReportLocation *loc, Suppression **sp) {
-  CHECK(g_ctx);
-  if (!g_ctx->SuppressionCount() || loc == 0 ||
+  if (!SuppressionContext::Get()->SuppressionCount() || loc == 0 ||
       loc->type != ReportLocationGlobal || !loc->suppressable)
     return 0;
   SuppressionType stype = conv(typ);
   if (stype == SuppressionNone)
     return 0;
   Suppression *s;
-  if (g_ctx->Match(loc->name, stype, &s) ||
-      g_ctx->Match(loc->file, stype, &s) ||
-      g_ctx->Match(loc->module, stype, &s)) {
+  if (SuppressionContext::Get()->Match(loc->name, stype, &s) ||
+      SuppressionContext::Get()->Match(loc->file, stype, &s) ||
+      SuppressionContext::Get()->Match(loc->module, stype, &s)) {
       DPrintf("ThreadSanitizer: matched suppression '%s'\n", s->templ);
       s->hit_count++;
       *sp = s;
@@ -163,9 +119,8 @@ uptr IsSuppressed(ReportType typ, const ReportLocation *loc, Suppression **sp) {
 }
 
 void PrintMatchedSuppressions() {
-  CHECK(g_ctx);
   InternalMmapVector<Suppression *> matched(1);
-  g_ctx->GetMatched(&matched);
+  SuppressionContext::Get()->GetMatched(&matched);
   if (!matched.size())
     return;
   int hit_count = 0;

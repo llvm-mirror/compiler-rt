@@ -10,6 +10,7 @@ endif()
 set(ASAN_SOURCES
   asan_allocator2.cc
   asan_activation.cc
+  asan_debugging.cc
   asan_fake_stack.cc
   asan_globals.cc
   asan_interceptors.cc
@@ -60,12 +61,6 @@ append_if(COMPILER_RT_HAS_FTLS_MODEL_INITIAL_EXEC
 set(ASAN_DYNAMIC_LIBS stdc++ m c)
 append_if(COMPILER_RT_HAS_LIBPTHREAD pthread ASAN_DYNAMIC_LIBS)
 append_if(COMPILER_RT_HAS_LIBDL dl ASAN_DYNAMIC_LIBS)
-
-if (NOT MSVC)
-  set(ASAN_ASM_SOURCES asan_asm_instrumentation.S)
-  set_source_files_properties(${ASAN_ASM_SOURCES} PROPERTIES LANGUAGE C)
-  list(APPEND ASAN_SOURCES ${ASAN_ASM_SOURCES})
-endif()
 
 # Compile ASan sources into an object library.
 if(APPLE)
@@ -127,6 +122,9 @@ elseif(ANDROID)
     COMPILE_DEFINITIONS ${ASAN_COMMON_DEFINITIONS})
   target_link_libraries(clang_rt.asan-arm-android dl log)
   add_dependencies(asan clang_rt.asan-arm-android)
+  install(TARGETS clang_rt.asan-arm-android
+          ARCHIVE DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR}
+          LIBRARY DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
 else()
   # Build separate libraries for each target.
   foreach(arch ${ASAN_SUPPORTED_ARCH})

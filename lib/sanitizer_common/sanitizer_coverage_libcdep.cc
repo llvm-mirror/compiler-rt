@@ -59,6 +59,8 @@ namespace __sanitizer {
 class CoverageData {
  public:
   void Init();
+  void BeforeFork();
+  void AfterFork(int child_pid);
   void Extend(uptr npcs);
   void Add(uptr pc);
 
@@ -85,12 +87,13 @@ class CoverageData {
   int pc_fd;
   StaticSpinMutex mu;
 
-  void DirectInit();
+  void DirectOpen();
+  void ReInit();
 };
 
 static CoverageData coverage_data;
 
-void CoverageData::DirectInit() {
+void CoverageData::DirectOpen() {
   InternalScopedString path(1024);
   internal_snprintf((char *)path.data(), path.size(), "%s/%zd.sancov.raw",
                     common_flags()->coverage_dir, internal_getpid());
@@ -100,29 +103,54 @@ void CoverageData::DirectInit() {
     Die();
   }
 
-  atomic_store(&pc_array_size, 0, memory_order_relaxed);
   pc_array_mapped_size = 0;
-
   CovUpdateMapping();
 }
 
 void CoverageData::Init() {
   pc_array = reinterpret_cast<uptr *>(
       MmapNoReserveOrDie(sizeof(uptr) * kPcArrayMaxSize, "CovInit"));
+  pc_fd = kInvalidFd;
   if (common_flags()->coverage_direct) {
-    DirectInit();
+    atomic_store(&pc_array_size, 0, memory_order_relaxed);
+    atomic_store(&pc_array_index, 0, memory_order_relaxed);
   } else {
-    pc_fd = 0;
     atomic_store(&pc_array_size, kPcArrayMaxSize, memory_order_relaxed);
+    atomic_store(&pc_array_index, 0, memory_order_relaxed);
   }
+}
+
+void CoverageData::ReInit() {
+  internal_munmap(pc_array, sizeof(uptr) * kPcArrayMaxSize);
+  if (pc_fd != kInvalidFd) internal_close(pc_fd);
+  if (common_flags()->coverage_direct) {
+    // In memory-mapped mode we must extend the new file to the known array
+    // size.
+    uptr size = atomic_load(&pc_array_size, memory_order_relaxed);
+    Init();
+    if (size) Extend(size);
+  } else {
+    Init();
+  }
+}
+
+void CoverageData::BeforeFork() {
+  mu.Lock();
+}
+
+void CoverageData::AfterFork(int child_pid) {
+  // We are single-threaded so it's OK to release the lock early.
+  mu.Unlock();
+  if (child_pid == 0) ReInit();
 }
 
 // Extend coverage PC array to fit additional npcs elements.
 void CoverageData::Extend(uptr npcs) {
-  // If pc_fd=0, pc array is a huge anonymous mapping that does not need to be
-  // resized.
-  if (!pc_fd) return;
+  if (!common_flags()->coverage_direct) return;
   SpinMutexLock l(&mu);
+
+  if (pc_fd == kInvalidFd) DirectOpen();
+  CHECK_NE(pc_fd, kInvalidFd);
 
   uptr size = atomic_load(&pc_array_size, memory_order_relaxed);
   size += npcs * sizeof(uptr);
@@ -317,6 +345,15 @@ int MaybeOpenCovFile(const char *name) {
   if (!common_flags()->coverage) return -1;
   return CovOpenFile(true /* packed */, name);
 }
+
+void CovBeforeFork() {
+  coverage_data.BeforeFork();
+}
+
+void CovAfterFork(int child_pid) {
+  coverage_data.AfterFork(child_pid);
+}
+
 }  // namespace __sanitizer
 
 extern "C" {
@@ -328,6 +365,12 @@ SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov_init() {
   coverage_data.Init();
 }
 SANITIZER_INTERFACE_ATTRIBUTE void __sanitizer_cov_module_init(uptr npcs) {
+  if (!common_flags()->coverage || !common_flags()->coverage_direct) return;
+  if (SANITIZER_ANDROID) {
+    // dlopen/dlclose interceptors do not work on Android, so we rely on
+    // Extend() calls to update .sancov.map.
+    CovUpdateMapping(GET_CALLER_PC());
+  }
   coverage_data.Extend(npcs);
 }
 SANITIZER_INTERFACE_ATTRIBUTE

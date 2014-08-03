@@ -10,10 +10,12 @@
 #if defined(__APPLE__)
 	.literal4
 #elif defined(__ELF__)
-	.rodata
+	.section .rodata
 #else
 	.section .rdata,"rd"
 #endif
+
+	.balign 16
 two:
 	.single 2.0
 
