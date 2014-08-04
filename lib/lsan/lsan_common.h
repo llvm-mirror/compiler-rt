@@ -21,7 +21,7 @@
 #include "sanitizer_common/sanitizer_platform.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 
-#if SANITIZER_LINUX && defined(__x86_64__)
+#if SANITIZER_LINUX && defined(__x86_64__) && (SANITIZER_WORDSIZE == 64)
 #define CAN_SANITIZE_LEAKS 1
 #else
 #define CAN_SANITIZE_LEAKS 0
@@ -51,10 +51,6 @@ struct Flags {
   int max_leaks;
   // If nonzero kill the process with this exit code upon finding leaks.
   int exitcode;
-  // Print matched suppressions after leak checking.
-  bool print_suppressions;
-  // Suppressions file name.
-  const char* suppressions;
 
   // Flags controlling the root set of reachable memory.
   // Global variables (.data and .bss).

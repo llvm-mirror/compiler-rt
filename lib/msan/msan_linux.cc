@@ -90,10 +90,11 @@ void MsanDie() {
 }
 
 static void MsanAtExit(void) {
+  if (flags()->print_stats && (flags()->atexit || msan_report_count > 0))
+    ReportStats();
   if (msan_report_count > 0) {
     ReportAtExitStatistics();
-    if (flags()->exit_code)
-      _exit(flags()->exit_code);
+    if (flags()->exit_code) _exit(flags()->exit_code);
   }
 }
 

@@ -13,6 +13,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "msan.h"
+#include "msan_chained_origin_depot.h"
+#include "msan_origin.h"
 #include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flags.h"
@@ -25,9 +27,9 @@ using namespace __sanitizer;
 
 namespace __msan {
 
-class Decorator: private __sanitizer::AnsiColorDecorator {
+class Decorator: public __sanitizer::SanitizerCommonDecorator {
  public:
-  Decorator() : __sanitizer::AnsiColorDecorator(PrintsToTtyCached()) { }
+  Decorator() : SanitizerCommonDecorator() { }
   const char *Warning()    { return Red(); }
   const char *Origin()     { return Magenta(); }
   const char *Name()   { return Green(); }
@@ -44,8 +46,8 @@ static void DescribeStackOrigin(const char *so, uptr pc) {
   Printf(
       "  %sUninitialized value was created by an allocation of '%s%s%s'"
       " in the stack frame of function '%s%s%s'%s\n",
-      d.Origin(), d.Name(), s, d.Origin(), d.Name(),
-      Symbolizer::Get()->Demangle(sep + 1), d.Origin(), d.End());
+      d.Origin(), d.Name(), s, d.Origin(), d.Name(), sep + 1, d.Origin(),
+      d.End());
   InternalFree(s);
 
   if (pc) {
@@ -56,30 +58,40 @@ static void DescribeStackOrigin(const char *so, uptr pc) {
   }
 }
 
-static void DescribeOrigin(u32 origin) {
-  VPrintf(1, "  raw origin id: %d\n", origin);
-  uptr pc;
+static void DescribeOrigin(u32 id) {
+  VPrintf(1, "  raw origin id: %d\n", id);
+  Decorator d;
   while (true) {
-    if (const char *so = GetOriginDescrIfStack(origin, &pc)) {
-      DescribeStackOrigin(so, pc);
+    Origin o(id);
+    if (!o.isValid()) {
+      Printf("  %sinvalid origin id(%d)%s\n", d.Warning(), id, d.End());
       break;
     }
-    Decorator d;
-    uptr size = 0;
-    const uptr *trace = StackDepotGet(origin, &size);
-    CHECK_GT(size, 0);
-    if (TRACE_IS_CHAINED(trace[size - 1])) {
-      // Linked origin.
-      // FIXME: copied? modified? passed through? observed?
-      Printf("  %sUninitialized value was stored to memory at%s\n", d.Origin(),
-             d.End());
-      StackTrace::PrintStack(trace, size - 1);
-      origin = TRACE_TO_CHAINED_ID(trace[size - 1]);
-    } else {
+    u32 prev_id;
+    u32 stack_id = ChainedOriginDepotGet(o.id(), &prev_id);
+    Origin prev_o(prev_id);
+
+    if (prev_o.isStackRoot()) {
+      uptr pc;
+      const char *so = GetStackOriginDescr(stack_id, &pc);
+      DescribeStackOrigin(so, pc);
+      break;
+    } else if (prev_o.isHeapRoot()) {
+      uptr size = 0;
+      const uptr *trace = StackDepotGet(stack_id, &size);
       Printf("  %sUninitialized value was created by a heap allocation%s\n",
              d.Origin(), d.End());
       StackTrace::PrintStack(trace, size);
       break;
+    } else {
+      // chained origin
+      uptr size = 0;
+      const uptr *trace = StackDepotGet(stack_id, &size);
+      // FIXME: copied? modified? passed through? observed?
+      Printf("  %sUninitialized value was stored to memory at%s\n", d.Origin(),
+             d.End());
+      StackTrace::PrintStack(trace, size);
+      id = prev_id;
     }
   }
 }
@@ -107,6 +119,24 @@ void ReportExpectedUMRNotFound(StackTrace *stack) {
   stack->Print();
 }
 
+void ReportStats() {
+  SpinMutexLock l(&CommonSanitizerReportMutex);
+
+  if (__msan_get_track_origins() > 0) {
+    StackDepotStats *stack_depot_stats = StackDepotGetStats();
+    // FIXME: we want this at normal exit, too!
+    // FIXME: but only with verbosity=1 or something
+    Printf("Unique heap origins: %zu\n", stack_depot_stats->n_uniq_ids);
+    Printf("Stack depot allocated bytes: %zu\n", stack_depot_stats->allocated);
+
+    StackDepotStats *chained_origin_depot_stats = ChainedOriginDepotGetStats();
+    Printf("Unique origin histories: %zu\n",
+           chained_origin_depot_stats->n_uniq_ids);
+    Printf("History depot allocated bytes: %zu\n",
+           chained_origin_depot_stats->allocated);
+  }
+}
+
 void ReportAtExitStatistics() {
   SpinMutexLock l(&CommonSanitizerReportMutex);
 
@@ -116,12 +146,6 @@ void ReportAtExitStatistics() {
     Printf("MemorySanitizer: %d warnings reported.\n", msan_report_count);
     Printf("%s", d.End());
   }
-
-  StackDepotStats *stack_depot_stats = StackDepotGetStats();
-  // FIXME: we want this at normal exit, too!
-  // FIXME: but only with verbosity=1 or something
-  Printf("Unique heap origins: %zu\n", stack_depot_stats->n_uniq_ids);
-  Printf("Stack depot mapped bytes: %zu\n", stack_depot_stats->mapped);
 }
 
 class OriginSet {
@@ -197,7 +221,11 @@ void DescribeMemoryRange(const void *x, uptr size) {
     } else {
       unsigned char v = *(unsigned char *)s;
       if (v) last_quad_poisoned = true;
-      Printf("%02x", v);
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+      Printf("%x%x", v & 0xf, v >> 4);
+#else
+      Printf("%x%x", v >> 4, v & 0xf);
+#endif
     }
     // Group end.
     if (pos % 4 == 3 && with_origins) {

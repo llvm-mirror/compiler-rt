@@ -116,7 +116,8 @@ TEST(AddressSanitizer, CallocReturnsZeroMem) {
   }
 }
 
-#if !defined(_WIN32)  // No valloc on Windows.
+// No valloc on Windows or Android.
+#if !defined(_WIN32) && !defined(ANDROID) && !defined(__ANDROID__)
 TEST(AddressSanitizer, VallocTest) {
   void *a = valloc(100);
   EXPECT_EQ(0U, (uintptr_t)a % kPageSize);
@@ -183,8 +184,8 @@ TEST(AddressSanitizer, UAF_char) {
 TEST(AddressSanitizer, UAF_long_double) {
   if (sizeof(long double) == sizeof(double)) return;
   long double *p = Ident(new long double[10]);
-  EXPECT_DEATH(Ident(p)[12] = 0, "WRITE of size 1[06]");
-  EXPECT_DEATH(Ident(p)[0] = Ident(p)[12], "READ of size 1[06]");
+  EXPECT_DEATH(Ident(p)[12] = 0, "WRITE of size 1[026]");
+  EXPECT_DEATH(Ident(p)[0] = Ident(p)[12], "READ of size 1[026]");
   delete [] Ident(p);
 }
 

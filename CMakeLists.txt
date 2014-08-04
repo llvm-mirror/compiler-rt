@@ -9,7 +9,7 @@
 
 # Check if compiler-rt is built as a standalone project.
 if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-  project(CompilerRT)
+  project(CompilerRT C CXX)
   set(COMPILER_RT_STANDALONE_BUILD TRUE)
 else()
   set(COMPILER_RT_STANDALONE_BUILD FALSE)
@@ -61,12 +61,8 @@ if (NOT COMPILER_RT_STANDALONE_BUILD)
   # Windows where we need to use clang-cl instead.
   if(NOT MSVC)
     set(COMPILER_RT_TEST_COMPILER ${LLVM_RUNTIME_OUTPUT_INTDIR}/clang)
-    set(COMPILER_RT_TEST_COMPILER_EXE "-o")
-    set(COMPILER_RT_TEST_COMPILER_OBJ "-o")
   else()
-    set(COMPILER_RT_TEST_COMPILER ${LLVM_RUNTIME_OUTPUT_INTDIR}/clang-cl.exe)
-    set(COMPILER_RT_TEST_COMPILER_EXE "-Fe")
-    set(COMPILER_RT_TEST_COMPILER_OBJ "-Fo")
+    set(COMPILER_RT_TEST_COMPILER ${LLVM_RUNTIME_OUTPUT_INTDIR}/clang.exe)
   endif()
 else()
   # Take output dir and install path from the user.
@@ -80,8 +76,6 @@ else()
   option(COMPILER_RT_ENABLE_WERROR "Fail and stop if warning is triggered" OFF)
   # Use a host compiler to compile/link tests.
   set(COMPILER_RT_TEST_COMPILER ${CMAKE_C_COMPILER} CACHE PATH "Compiler to use for testing")
-  set(COMPILER_RT_TEST_COMPILER_EXE "-o")
-  set(COMPILER_RT_TEST_COMPILER_OBJ "-o")
 
   if (NOT LLVM_CONFIG_PATH)
     find_program(LLVM_CONFIG_PATH "llvm-config"
@@ -131,10 +125,22 @@ endif()
 
 if("${COMPILER_RT_TEST_COMPILER}" MATCHES "clang[+]*$")
   set(COMPILER_RT_TEST_COMPILER_ID Clang)
-elseif("${COMPILER_RT_TEST_COMPILER}" MATCHES "clang-cl.exe$")
+elseif("${COMPILER_RT_TEST_COMPILER}" MATCHES "clang.*.exe$")
   set(COMPILER_RT_TEST_COMPILER_ID Clang)
 else()
   set(COMPILER_RT_TEST_COMPILER_ID GNU)
+endif()
+
+# Tests using XFAIL use the first value in COMPILER_RT_TEST_TARGET_TRIPLE
+set(COMPILER_RT_TEST_TARGET_TRIPLE ${TARGET_TRIPLE} CACHE STRING
+    "Default triple for cross-compiled executables")
+string(REPLACE "-" ";" TARGET_TRIPLE_LIST ${COMPILER_RT_TEST_TARGET_TRIPLE})
+list(GET TARGET_TRIPLE_LIST 0 COMPILER_RT_TEST_TARGET_ARCH)
+list(GET TARGET_TRIPLE_LIST 1 COMPILER_RT_TEST_TARGET_OS)
+list(GET TARGET_TRIPLE_LIST 2 COMPILER_RT_TEST_TARGET_ABI)
+
+if ("${COMPILER_RT_TEST_TARGET_ABI}" STREQUAL "androideabi")
+  set(ANDROID 1)
 endif()
 
 string(TOLOWER ${CMAKE_SYSTEM_NAME} COMPILER_RT_OS_DIR)
@@ -199,14 +205,19 @@ macro(test_target_arch arch)
   set(TARGET_${arch}_CFLAGS ${ARGN})
   try_compile(CAN_TARGET_${arch} ${CMAKE_BINARY_DIR} ${SIMPLE_SOURCE}
               COMPILE_DEFINITIONS "${TARGET_${arch}_CFLAGS}"
+              OUTPUT_VARIABLE TARGET_${arch}_OUTPUT
               CMAKE_FLAGS "-DCMAKE_EXE_LINKER_FLAGS:STRING=${TARGET_${arch}_CFLAGS}")
   if(${CAN_TARGET_${arch}})
     list(APPEND COMPILER_RT_SUPPORTED_ARCH ${arch})
+  elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "${arch}" OR
+         "${arch}" STREQUAL "arm_android")
+    # Bail out if we cannot target the architecture we plan to test.
+    message(FATAL_ERROR "Cannot compile for ${arch}:\n${TARGET_${arch}_OUTPUT}")
   endif()
 endmacro()
 
-if(ANDROID_COMMON_FLAGS)
-  test_target_arch(arm_android "${ANDROID_COMMON_FLAGS}")
+if(ANDROID)
+  test_target_arch(arm_android "")
 else()
   if("${LLVM_NATIVE_ARCH}" STREQUAL "X86")
     if (NOT MSVC)
@@ -215,8 +226,14 @@ else()
     test_target_arch(i386 ${TARGET_32_BIT_CFLAGS})
   elseif("${LLVM_NATIVE_ARCH}" STREQUAL "PowerPC")
     test_target_arch(powerpc64 ${TARGET_64_BIT_CFLAGS})
-  elseif("${LLVM_NATIVE_ARCH}" STREQUAL "ARM")
-    test_target_arch(arm "")
+  elseif("${LLVM_NATIVE_ARCH}" STREQUAL "Mips")
+    test_target_arch(mips "")
+  endif()
+
+  # Build ARM libraries if we are configured to test on ARM
+  if("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "arm|aarch64")
+    test_target_arch(arm "-march=armv7-a")
+    test_target_arch(aarch64 "-march=armv8-a")
   endif()
 endif()
 
@@ -347,14 +364,14 @@ endif()
 # Architectures supported by Sanitizer runtimes. Specific sanitizers may
 # support only subset of these (e.g. TSan works on x86_64 only).
 filter_available_targets(SANITIZER_COMMON_SUPPORTED_ARCH
-  x86_64 i386 powerpc64 arm)
-filter_available_targets(ASAN_SUPPORTED_ARCH x86_64 i386 powerpc64)
+  x86_64 i386 powerpc64 arm aarch64 mips)
+filter_available_targets(ASAN_SUPPORTED_ARCH x86_64 i386 powerpc64 arm mips)
 filter_available_targets(DFSAN_SUPPORTED_ARCH x86_64)
 filter_available_targets(LSAN_SUPPORTED_ARCH x86_64)
 filter_available_targets(MSAN_SUPPORTED_ARCH x86_64)
-filter_available_targets(PROFILE_SUPPORTED_ARCH x86_64 i386 arm)
+filter_available_targets(PROFILE_SUPPORTED_ARCH x86_64 i386 arm aarch64)
 filter_available_targets(TSAN_SUPPORTED_ARCH x86_64)
-filter_available_targets(UBSAN_SUPPORTED_ARCH x86_64 i386)
+filter_available_targets(UBSAN_SUPPORTED_ARCH x86_64 i386 arm aarch64)
 
 add_subdirectory(include)
 

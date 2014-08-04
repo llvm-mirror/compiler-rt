@@ -127,14 +127,24 @@ const interpose_substitution substitution_##func_name[] \
 #  define WRAPPER_NAME(x) #x
 #  define INTERCEPTOR_ATTRIBUTE
 # else  // Static CRT
-#  define WRAP(x) wrap_##x
-#  define WRAPPER_NAME(x) "wrap_"#x
-#  define INTERCEPTOR_ATTRIBUTE
+#  define WRAP(x) __asan_wrap_##x
+#  define WRAPPER_NAME(x) "__asan_wrap_"#x
+#  define INTERCEPTOR_ATTRIBUTE __declspec(dllexport)
 # endif
 # define DECLARE_WRAPPER(ret_type, func, ...) \
     extern "C" ret_type func(__VA_ARGS__);
 # define DECLARE_WRAPPER_WINAPI(ret_type, func, ...) \
     extern "C" __declspec(dllimport) ret_type __stdcall func(__VA_ARGS__);
+#elif defined(__FreeBSD__)
+# define WRAP(x) __interceptor_ ## x
+# define WRAPPER_NAME(x) "__interceptor_" #x
+# define INTERCEPTOR_ATTRIBUTE __attribute__((visibility("default")))
+// FreeBSD's dynamic linker (incompliantly) gives non-weak symbols higher
+// priority than weak ones so weak aliases won't work for indirect calls
+// in position-independent (-fPIC / -fPIE) mode.
+# define DECLARE_WRAPPER(ret_type, func, ...) \
+     extern "C" ret_type func(__VA_ARGS__) \
+     __attribute__((alias("__interceptor_" #func), visibility("default")));
 #else
 # define WRAP(x) __interceptor_ ## x
 # define WRAPPER_NAME(x) "__interceptor_" #x

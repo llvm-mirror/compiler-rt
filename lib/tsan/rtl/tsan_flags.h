@@ -28,9 +28,6 @@ struct Flags : CommonFlags, DDFlags {
   // Suppress a race report if we've already output another race report
   // on the same address.
   bool suppress_equal_addresses;
-  // Suppress weird race reports that can be seen if JVM is embed
-  // into the process.
-  bool suppress_java;
   // Turns off bug reporting entirely (useful for benchmarking).
   bool report_bugs;
   // Report thread leaks at exit?
@@ -47,10 +44,6 @@ struct Flags : CommonFlags, DDFlags {
   // If set, all atomics are effectively sequentially consistent (seq_cst),
   // regardless of what user actually specified.
   bool force_seq_cst_atomics;
-  // Suppressions filename.
-  const char *suppressions;
-  // Print matched suppressions at exit.
-  bool print_suppressions;
   // Print matched "benign" races at exit.
   bool print_benign;
   // Override exit status if something was reported.

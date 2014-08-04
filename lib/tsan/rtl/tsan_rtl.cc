@@ -25,6 +25,16 @@
 #include "tsan_suppressions.h"
 #include "tsan_symbolize.h"
 
+#ifdef __SSE3__
+// <emmintrin.h> transitively includes <stdlib.h>,
+// and it's prohibited to include std headers into tsan runtime.
+// So we do this dirty trick.
+#define _MM_MALLOC_H_INCLUDED
+#define __MM_MALLOC_H
+#include <emmintrin.h>
+typedef __m128i m128;
+#endif
+
 volatile int __tsan_resumed = 0;
 
 extern "C" void __tsan_resume() {
@@ -112,10 +122,7 @@ static void MemoryProfiler(Context *ctx, fd_t fd, int i) {
   uptr n_running_threads;
   ctx->thread_registry->GetNumberOfThreads(&n_threads, &n_running_threads);
   InternalScopedBuffer<char> buf(4096);
-  internal_snprintf(buf.data(), buf.size(), "%d: nthr=%d nlive=%d\n",
-      i, n_threads, n_running_threads);
-  internal_write(fd, buf.data(), internal_strlen(buf.data()));
-  WriteMemoryProfile(buf.data(), buf.size());
+  WriteMemoryProfile(buf.data(), buf.size(), n_threads, n_running_threads);
   internal_write(fd, buf.data(), internal_strlen(buf.data()));
 }
 
@@ -131,15 +138,21 @@ static void BackgroundThread(void *arg) {
 
   fd_t mprof_fd = kInvalidFd;
   if (flags()->profile_memory && flags()->profile_memory[0]) {
-    InternalScopedBuffer<char> filename(4096);
-    internal_snprintf(filename.data(), filename.size(), "%s.%d",
-        flags()->profile_memory, (int)internal_getpid());
-    uptr openrv = OpenFile(filename.data(), true);
-    if (internal_iserror(openrv)) {
-      Printf("ThreadSanitizer: failed to open memory profile file '%s'\n",
-          &filename[0]);
+    if (internal_strcmp(flags()->profile_memory, "stdout") == 0) {
+      mprof_fd = 1;
+    } else if (internal_strcmp(flags()->profile_memory, "stderr") == 0) {
+      mprof_fd = 2;
     } else {
-      mprof_fd = openrv;
+      InternalScopedBuffer<char> filename(4096);
+      internal_snprintf(filename.data(), filename.size(), "%s.%d",
+          flags()->profile_memory, (int)internal_getpid());
+      uptr openrv = OpenFile(filename.data(), true);
+      if (internal_iserror(openrv)) {
+        Printf("ThreadSanitizer: failed to open memory profile file '%s'\n",
+            &filename[0]);
+      } else {
+        mprof_fd = openrv;
+      }
     }
   }
 
@@ -160,6 +173,7 @@ static void BackgroundThread(void *arg) {
         last_flush = NanoTime();
       }
     }
+    // GetRSS can be expensive on huge programs, so don't do it every 100ms.
     if (flags()->memory_limit_mb > 0) {
       uptr rss = GetRSS();
       uptr limit = uptr(flags()->memory_limit_mb) << 20;
@@ -203,11 +217,13 @@ static void StartBackgroundThread() {
   ctx->background_thread = internal_start_thread(&BackgroundThread, 0);
 }
 
+#ifndef TSAN_GO
 static void StopBackgroundThread() {
   atomic_store(&ctx->stop_background_thread, 1, memory_order_relaxed);
   internal_join_thread(ctx->background_thread);
   ctx->background_thread = 0;
 }
+#endif
 
 void DontNeedShadowFor(uptr addr, uptr size) {
   uptr shadow_beg = MemToShadow(addr);
@@ -220,6 +236,32 @@ void MapShadow(uptr addr, uptr size) {
   // so we can get away with unaligned mapping.
   // CHECK_EQ(addr, addr & ~((64 << 10) - 1));  // windows wants 64K alignment
   MmapFixedNoReserve(MemToShadow(addr), size * kShadowMultiplier);
+
+  // Meta shadow is 2:1, so tread carefully.
+  static bool data_mapped = false;
+  static uptr mapped_meta_end = 0;
+  uptr meta_begin = (uptr)MemToMeta(addr);
+  uptr meta_end = (uptr)MemToMeta(addr + size);
+  meta_begin = RoundDownTo(meta_begin, 64 << 10);
+  meta_end = RoundUpTo(meta_end, 64 << 10);
+  if (!data_mapped) {
+    // First call maps data+bss.
+    data_mapped = true;
+    MmapFixedNoReserve(meta_begin, meta_end - meta_begin);
+  } else {
+    // Mapping continous heap.
+    // Windows wants 64K alignment.
+    meta_begin = RoundDownTo(meta_begin, 64 << 10);
+    meta_end = RoundUpTo(meta_end, 64 << 10);
+    if (meta_end <= mapped_meta_end)
+      return;
+    if (meta_begin < mapped_meta_end)
+      meta_begin = mapped_meta_end;
+    MmapFixedNoReserve(meta_begin, meta_end - meta_begin);
+    mapped_meta_end = meta_end;
+  }
+  VPrintf(2, "mapped meta shadow for (%p-%p) at (%p-%p)\n",
+      addr, addr+size, meta_begin, meta_end);
 }
 
 void MapThreadTrace(uptr addr, uptr size) {
@@ -264,11 +306,12 @@ void Initialize(ThreadState *thr) {
   InitializeSuppressions();
 #ifndef TSAN_GO
   InitializeLibIgnore();
-  Symbolizer::Init(common_flags()->external_symbolizer_path);
-  Symbolizer::Get()->AddHooks(EnterSymbolizer, ExitSymbolizer);
+  Symbolizer::GetOrInit()->AddHooks(EnterSymbolizer, ExitSymbolizer);
 #endif
   StartBackgroundThread();
+#ifndef TSAN_GO
   SetSandboxingCallback(StopBackgroundThread);
+#endif
   if (flags()->detect_deadlocks)
     ctx->dd = DDetector::Create(flags());
 
@@ -374,16 +417,37 @@ void ForkChildAfter(ThreadState *thr, uptr pc) {
 }
 #endif
 
+#ifdef TSAN_GO
+NOINLINE
+void GrowShadowStack(ThreadState *thr) {
+  const int sz = thr->shadow_stack_end - thr->shadow_stack;
+  const int newsz = 2 * sz;
+  uptr *newstack = (uptr*)internal_alloc(MBlockShadowStack,
+      newsz * sizeof(uptr));
+  internal_memcpy(newstack, thr->shadow_stack, sz * sizeof(uptr));
+  internal_free(thr->shadow_stack);
+  thr->shadow_stack = newstack;
+  thr->shadow_stack_pos = newstack + sz;
+  thr->shadow_stack_end = newstack + newsz;
+}
+#endif
+
 u32 CurrentStackId(ThreadState *thr, uptr pc) {
   if (thr->shadow_stack_pos == 0)  // May happen during bootstrap.
     return 0;
-  if (pc) {
+  if (pc != 0) {
+#ifndef TSAN_GO
+    DCHECK_LT(thr->shadow_stack_pos, thr->shadow_stack_end);
+#else
+    if (thr->shadow_stack_pos == thr->shadow_stack_end)
+      GrowShadowStack(thr);
+#endif
     thr->shadow_stack_pos[0] = pc;
     thr->shadow_stack_pos++;
   }
   u32 id = StackDepotPut(thr->shadow_stack,
                          thr->shadow_stack_pos - thr->shadow_stack);
-  if (pc)
+  if (pc != 0)
     thr->shadow_stack_pos--;
   return id;
 }
@@ -445,7 +509,8 @@ void StoreIfNotYetStored(u64 *sp, u64 *s) {
   *s = 0;
 }
 
-static inline void HandleRace(ThreadState *thr, u64 *shadow_mem,
+ALWAYS_INLINE
+void HandleRace(ThreadState *thr, u64 *shadow_mem,
                               Shadow cur, Shadow old) {
   thr->racy_state[0] = cur.raw();
   thr->racy_state[1] = old.raw();
@@ -457,16 +522,12 @@ static inline void HandleRace(ThreadState *thr, u64 *shadow_mem,
 #endif
 }
 
-static inline bool OldIsInSameSynchEpoch(Shadow old, ThreadState *thr) {
-  return old.epoch() >= thr->fast_synch_epoch;
-}
-
 static inline bool HappensBefore(Shadow old, ThreadState *thr) {
   return thr->clock.get(old.TidWithIgnore()) >= old.epoch();
 }
 
-ALWAYS_INLINE USED
-void MemoryAccessImpl(ThreadState *thr, uptr addr,
+ALWAYS_INLINE
+void MemoryAccessImpl1(ThreadState *thr, uptr addr,
     int kAccessSizeLog, bool kAccessIsWrite, bool kIsAtomic,
     u64 *shadow_mem, Shadow cur) {
   StatInc(thr, StatMop);
@@ -560,6 +621,90 @@ void UnalignedMemoryAccess(ThreadState *thr, uptr pc, uptr addr,
   }
 }
 
+ALWAYS_INLINE
+bool ContainsSameAccessSlow(u64 *s, u64 a, u64 sync_epoch, bool is_write) {
+  Shadow cur(a);
+  for (uptr i = 0; i < kShadowCnt; i++) {
+    Shadow old(LoadShadow(&s[i]));
+    if (Shadow::Addr0AndSizeAreEqual(cur, old) &&
+        old.TidWithIgnore() == cur.TidWithIgnore() &&
+        old.epoch() > sync_epoch &&
+        old.IsAtomic() == cur.IsAtomic() &&
+        old.IsRead() <= cur.IsRead())
+      return true;
+  }
+  return false;
+}
+
+#if defined(__SSE3__) && TSAN_SHADOW_COUNT == 4
+#define SHUF(v0, v1, i0, i1, i2, i3) _mm_castps_si128(_mm_shuffle_ps( \
+    _mm_castsi128_ps(v0), _mm_castsi128_ps(v1), \
+    (i0)*1 + (i1)*4 + (i2)*16 + (i3)*64))
+ALWAYS_INLINE
+bool ContainsSameAccessFast(u64 *s, u64 a, u64 sync_epoch, bool is_write) {
+  // This is an optimized version of ContainsSameAccessSlow.
+  // load current access into access[0:63]
+  const m128 access     = _mm_cvtsi64_si128(a);
+  // duplicate high part of access in addr0:
+  // addr0[0:31]        = access[32:63]
+  // addr0[32:63]       = access[32:63]
+  // addr0[64:95]       = access[32:63]
+  // addr0[96:127]      = access[32:63]
+  const m128 addr0      = SHUF(access, access, 1, 1, 1, 1);
+  // load 4 shadow slots
+  const m128 shadow0    = _mm_load_si128((__m128i*)s);
+  const m128 shadow1    = _mm_load_si128((__m128i*)s + 1);
+  // load high parts of 4 shadow slots into addr_vect:
+  // addr_vect[0:31]    = shadow0[32:63]
+  // addr_vect[32:63]   = shadow0[96:127]
+  // addr_vect[64:95]   = shadow1[32:63]
+  // addr_vect[96:127]  = shadow1[96:127]
+  m128 addr_vect        = SHUF(shadow0, shadow1, 1, 3, 1, 3);
+  if (!is_write) {
+    // set IsRead bit in addr_vect
+    const m128 rw_mask1 = _mm_cvtsi64_si128(1<<15);
+    const m128 rw_mask  = SHUF(rw_mask1, rw_mask1, 0, 0, 0, 0);
+    addr_vect           = _mm_or_si128(addr_vect, rw_mask);
+  }
+  // addr0 == addr_vect?
+  const m128 addr_res   = _mm_cmpeq_epi32(addr0, addr_vect);
+  // epoch1[0:63]       = sync_epoch
+  const m128 epoch1     = _mm_cvtsi64_si128(sync_epoch);
+  // epoch[0:31]        = sync_epoch[0:31]
+  // epoch[32:63]       = sync_epoch[0:31]
+  // epoch[64:95]       = sync_epoch[0:31]
+  // epoch[96:127]      = sync_epoch[0:31]
+  const m128 epoch      = SHUF(epoch1, epoch1, 0, 0, 0, 0);
+  // load low parts of shadow cell epochs into epoch_vect:
+  // epoch_vect[0:31]   = shadow0[0:31]
+  // epoch_vect[32:63]  = shadow0[64:95]
+  // epoch_vect[64:95]  = shadow1[0:31]
+  // epoch_vect[96:127] = shadow1[64:95]
+  const m128 epoch_vect = SHUF(shadow0, shadow1, 0, 2, 0, 2);
+  // epoch_vect >= sync_epoch?
+  const m128 epoch_res  = _mm_cmpgt_epi32(epoch_vect, epoch);
+  // addr_res & epoch_res
+  const m128 res        = _mm_and_si128(addr_res, epoch_res);
+  // mask[0] = res[7]
+  // mask[1] = res[15]
+  // ...
+  // mask[15] = res[127]
+  const int mask        = _mm_movemask_epi8(res);
+  return mask != 0;
+}
+#endif
+
+ALWAYS_INLINE
+bool ContainsSameAccess(u64 *s, u64 a, u64 sync_epoch, bool is_write) {
+#if defined(__SSE3__) && TSAN_SHADOW_COUNT == 4
+  bool res = ContainsSameAccessFast(s, a, sync_epoch, is_write);
+  DCHECK_EQ(res, ContainsSameAccessSlow(s, a, sync_epoch, is_write));
+  return res;
+#else
+  return ContainsSameAccessSlow(s, a, sync_epoch, is_write);
+#endif
+}
+
 ALWAYS_INLINE USED
 void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
     int kAccessSizeLog, bool kAccessIsWrite, bool kIsAtomic) {
@@ -581,7 +726,7 @@ void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
   }
 #endif
 
-  if (*shadow_mem == kShadowRodata) {
+  if (kCppMode && *shadow_mem == kShadowRodata) {
     // Access to .rodata section, no races here.
     // Measurements show that it can be 10-20% of all memory accesses.
     StatInc(thr, StatMop);
@@ -592,14 +737,12 @@ void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
   }
 
   FastState fast_state = thr->fast_state;
-  if (fast_state.GetIgnoreBit())
+  if (fast_state.GetIgnoreBit()) {
+    StatInc(thr, StatMop);
+    StatInc(thr, kAccessIsWrite ? StatMopWrite : StatMopRead);
+    StatInc(thr, (StatType)(StatMop1 + kAccessSizeLog));
+    StatInc(thr, StatMopIgnored);
     return;
-  if (kCollectHistory) {
-    fast_state.IncrementEpoch();
-    thr->fast_state = fast_state;
-    // We must not store to the trace if we do not store to the shadow.
-    // That is, this call must be moved somewhere below.
-    TraceAddEvent(thr, fast_state, EventTypeMop, pc);
   }
 
   Shadow cur(fast_state);
@@ -607,7 +750,41 @@ void MemoryAccess(ThreadState *thr, uptr pc, uptr addr,
   cur.SetWrite(kAccessIsWrite);
   cur.SetAtomic(kIsAtomic);
 
-  MemoryAccessImpl(thr, addr, kAccessSizeLog, kAccessIsWrite, kIsAtomic,
+  if (LIKELY(ContainsSameAccess(shadow_mem, cur.raw(),
+      thr->fast_synch_epoch, kAccessIsWrite))) {
+    StatInc(thr, StatMop);
+    StatInc(thr, kAccessIsWrite ? StatMopWrite : StatMopRead);
+    StatInc(thr, (StatType)(StatMop1 + kAccessSizeLog));
+    StatInc(thr, StatMopSame);
+    return;
+  }
+
+  if (kCollectHistory) {
+    fast_state.IncrementEpoch();
+    thr->fast_state = fast_state;
+    TraceAddEvent(thr, fast_state, EventTypeMop, pc);
+    cur.IncrementEpoch();
+  }
+
+  MemoryAccessImpl1(thr, addr, kAccessSizeLog, kAccessIsWrite, kIsAtomic,
+      shadow_mem, cur);
+}
+
+// Called by MemoryAccessRange in tsan_rtl_thread.cc
+ALWAYS_INLINE USED
+void MemoryAccessImpl(ThreadState *thr, uptr addr,
+    int kAccessSizeLog, bool kAccessIsWrite, bool kIsAtomic,
+    u64 *shadow_mem, Shadow cur) {
+  if (LIKELY(ContainsSameAccess(shadow_mem, cur.raw(),
+      thr->fast_synch_epoch, kAccessIsWrite))) {
+    StatInc(thr, StatMop);
+    StatInc(thr, kAccessIsWrite ? StatMopWrite : StatMopRead);
+    StatInc(thr, (StatType)(StatMop1 + kAccessSizeLog));
+    StatInc(thr, StatMopSame);
+    return;
+  }
+
+  MemoryAccessImpl1(thr, addr, kAccessSizeLog, kAccessIsWrite, kIsAtomic,
       shadow_mem, cur);
 }
 
@@ -725,17 +902,8 @@ void FuncEntry(ThreadState *thr, uptr pc) {
 #ifndef TSAN_GO
   DCHECK_LT(thr->shadow_stack_pos, thr->shadow_stack_end);
 #else
-  if (thr->shadow_stack_pos == thr->shadow_stack_end) {
-    const int sz = thr->shadow_stack_end - thr->shadow_stack;
-    const int newsz = 2 * sz;
-    uptr *newstack = (uptr*)internal_alloc(MBlockShadowStack,
-        newsz * sizeof(uptr));
-    internal_memcpy(newstack, thr->shadow_stack, sz * sizeof(uptr));
-    internal_free(thr->shadow_stack);
-    thr->shadow_stack = newstack;
-    thr->shadow_stack_pos = newstack + sz;
-    thr->shadow_stack_end = newstack + newsz;
-  }
+  if (thr->shadow_stack_pos == thr->shadow_stack_end)
+    GrowShadowStack(thr);
 #endif
   thr->shadow_stack_pos[0] = pc;
   thr->shadow_stack_pos++;

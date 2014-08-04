@@ -4,7 +4,6 @@
 set(SANITIZER_SOURCES
   sanitizer_allocator.cc
   sanitizer_common.cc
-  sanitizer_coverage.cc
   sanitizer_deadlock_detector1.cc
   sanitizer_deadlock_detector2.cc
   sanitizer_flags.cc
@@ -12,6 +11,7 @@ set(SANITIZER_SOURCES
   sanitizer_libignore.cc
   sanitizer_linux.cc
   sanitizer_mac.cc
+  sanitizer_persistent_allocator.cc
   sanitizer_platform_limits_linux.cc
   sanitizer_platform_limits_posix.cc
   sanitizer_posix.cc
@@ -30,6 +30,8 @@ set(SANITIZER_SOURCES
 
 set(SANITIZER_LIBCDEP_SOURCES
   sanitizer_common_libcdep.cc
+  sanitizer_coverage_libcdep.cc
+  sanitizer_coverage_mapping_libcdep.cc
   sanitizer_linux_libcdep.cc
   sanitizer_posix_libcdep.cc
   sanitizer_stacktrace_libcdep.cc
@@ -43,6 +45,7 @@ set(SANITIZER_LIBCDEP_SOURCES
 set(SANITIZER_HEADERS
   sanitizer_addrhashmap.h
   sanitizer_allocator.h
+  sanitizer_allocator_interface.h
   sanitizer_allocator_internal.h
   sanitizer_atomic.h
   sanitizer_atomic_clang.h
@@ -65,6 +68,7 @@ set(SANITIZER_HEADERS
   sanitizer_list.h
   sanitizer_mac.h
   sanitizer_mutex.h
+  sanitizer_persistent_allocator.h
   sanitizer_placement_new.h
   sanitizer_platform.h
   sanitizer_platform_interceptors.h
@@ -73,6 +77,7 @@ set(SANITIZER_HEADERS
   sanitizer_quarantine.h
   sanitizer_report_decorator.h
   sanitizer_stackdepot.h
+  sanitizer_stackdepotbase.h
   sanitizer_stacktrace.h
   sanitizer_stoptheworld.h
   sanitizer_suppressions.h
@@ -95,7 +100,10 @@ endif()
 set(SANITIZER_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 append_no_rtti_flag(SANITIZER_CFLAGS)
 
-append_if(COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG -Wframe-larger-than=512 SANITIZER_CFLAGS)
+# Stack frames on PowerPC are much larger than anticipated.
+if(NOT ${LLVM_NATIVE_ARCH} STREQUAL "PowerPC")
+  append_if(COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG -Wframe-larger-than=512 SANITIZER_CFLAGS)
+endif()
 append_if(COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG -Wglobal-constructors SANITIZER_CFLAGS)
 
 add_custom_target(sanitizer_common)

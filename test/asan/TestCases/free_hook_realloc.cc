@@ -1,13 +1,18 @@
 // Check that free hook doesn't conflict with Realloc.
 // RUN: %clangxx_asan -O2 %s -o %t
 // RUN: %run %t 2>&1 | FileCheck %s
+
+// Malloc/free hooks are not supported on Windows.
+// XFAIL: win32
+
 #include <stdlib.h>
 #include <unistd.h>
+#include <sanitizer/allocator_interface.h>
 
 static void *glob_ptr;
 
 extern "C" {
-void __asan_free_hook(void *ptr) {
+void __sanitizer_free_hook(const volatile void *ptr) {
   if (ptr == glob_ptr) {
     *(int*)ptr = 0;
     write(1, "FreeHook\n", sizeof("FreeHook\n"));

@@ -134,6 +134,7 @@ void ThreadContext::OnFinished() {
     ctx->dd->DestroyPhysicalThread(thr->dd_pt);
     ctx->dd->DestroyLogicalThread(thr->dd_lt);
   }
+  ctx->metamap.OnThreadIdle(thr);
 #ifndef TSAN_GO
   AllocatorThreadFinish(thr);
 #endif
@@ -205,9 +206,9 @@ void ThreadFinalize(ThreadState *thr) {
       MaybeReportThreadLeak, &leaks);
   for (uptr i = 0; i < leaks.Size(); i++) {
     ScopedReport rep(ReportTypeThreadLeak);
-    rep.AddThread(leaks[i].tctx);
+    rep.AddThread(leaks[i].tctx, true);
     rep.SetCount(leaks[i].count);
-    OutputReport(ctx, rep, rep.GetReport()->threads[0]->stack);
+    OutputReport(thr, rep);
   }
 #endif
 }

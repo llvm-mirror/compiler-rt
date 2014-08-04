@@ -43,8 +43,6 @@ static void InitializeFlags() {
   f->resolution = 0;
   f->max_leaks = 0;
   f->exitcode = 23;
-  f->print_suppressions = true;
-  f->suppressions="";
   f->use_registers = true;
   f->use_globals = true;
   f->use_stacks = true;
@@ -72,8 +70,6 @@ static void InitializeFlags() {
     ParseFlag(options, &f->log_pointers, "log_pointers", "");
     ParseFlag(options, &f->log_threads, "log_threads", "");
     ParseFlag(options, &f->exitcode, "exitcode", "");
-    ParseFlag(options, &f->print_suppressions, "print_suppressions", "");
-    ParseFlag(options, &f->suppressions, "suppressions", "");
   }
 }
 
@@ -87,24 +83,10 @@ static void InitializeFlags() {
     if (flags()->log_threads) Report(__VA_ARGS__); \
   } while (0);
 
-SuppressionContext *suppression_ctx;
-
 void InitializeSuppressions() {
-  CHECK(!suppression_ctx);
-  ALIGNED(64) static char placeholder[sizeof(SuppressionContext)];
-  suppression_ctx = new(placeholder) SuppressionContext;
-  char *suppressions_from_file;
-  uptr buffer_size;
-  if (ReadFileToBuffer(flags()->suppressions, &suppressions_from_file,
-                       &buffer_size, 1 << 26 /* max_len */))
-    suppression_ctx->Parse(suppressions_from_file);
-  if (flags()->suppressions[0] && !buffer_size) {
-    Printf("LeakSanitizer: failed to read suppressions file '%s'\n",
-           flags()->suppressions);
-    Die();
-  }
+  SuppressionContext::Init();
   if (&__lsan_default_suppressions)
-    suppression_ctx->Parse(__lsan_default_suppressions());
+    SuppressionContext::Get()->Parse(__lsan_default_suppressions());
 }
 
 struct RootRegion {
@@ -131,9 +113,9 @@ void InitCommonLsan() {
   }
 }
 
-class Decorator: private __sanitizer::AnsiColorDecorator {
+class Decorator: public __sanitizer::SanitizerCommonDecorator {
  public:
-  Decorator() : __sanitizer::AnsiColorDecorator(PrintsToTtyCached()) { }
+  Decorator() : SanitizerCommonDecorator() { }
   const char *Error() { return Red(); }
   const char *Leak() { return Blue(); }
   const char *End() { return Default(); }
@@ -389,7 +371,7 @@ static void CollectLeaksCb(uptr chunk, void *arg) {
 
 static void PrintMatchedSuppressions() {
   InternalMmapVector<Suppression *> matched(1);
-  suppression_ctx->GetMatched(&matched);
+  SuppressionContext::Get()->GetMatched(&matched);
   if (!matched.size())
     return;
   const char *line = "-----------------------------------------------------";
@@ -450,7 +432,7 @@ void DoLeakCheck() {
     Printf("%s", d.End());
     param.leak_report.ReportTopLeaks(flags()->max_leaks);
   }
-  if (flags()->print_suppressions)
+  if (common_flags()->print_suppressions)
     PrintMatchedSuppressions();
   if (unsuppressed_count > 0) {
     param.leak_report.PrintSummary();
@@ -467,7 +449,7 @@ static Suppression *GetSuppressionForAddr(uptr addr) {
   uptr module_offset;
   if (Symbolizer::Get()->GetModuleNameAndOffsetForPC(addr, &module_name,
                                                      &module_offset) &&
-      suppression_ctx->Match(module_name, SuppressionLeak, &s))
+      SuppressionContext::Get()->Match(module_name, SuppressionLeak, &s))
     return s;
 
   // Suppress by file or function name.
@@ -477,8 +459,10 @@ static Suppression *GetSuppressionForAddr(uptr addr) {
   uptr addr_frames_num = Symbolizer::Get()->SymbolizePC(
       addr, addr_frames.data(), kMaxAddrFrames);
   for (uptr i = 0; i < addr_frames_num; i++) {
-    if (suppression_ctx->Match(addr_frames[i].function, SuppressionLeak, &s) ||
-        suppression_ctx->Match(addr_frames[i].file, SuppressionLeak, &s))
+    if (SuppressionContext::Get()->Match(addr_frames[i].function,
+                                         SuppressionLeak, &s) ||
+        SuppressionContext::Get()->Match(addr_frames[i].file, SuppressionLeak,
+                                         &s))
       return s;
   }
   return 0;

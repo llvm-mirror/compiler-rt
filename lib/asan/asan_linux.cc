@@ -19,6 +19,7 @@
 #include "asan_internal.h"
 #include "asan_thread.h"
 #include "sanitizer_common/sanitizer_flags.h"
+#include "sanitizer_common/sanitizer_freebsd.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_procmaps.h"
 
@@ -27,6 +28,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -42,19 +44,14 @@
 extern "C" void* _DYNAMIC;
 #else
 #include <sys/ucontext.h>
-#include <dlfcn.h>
 #include <link.h>
 #endif
 
-// x86_64 FreeBSD 9.2 and older define 64-bit register names in both 64-bit
-// and 32-bit modes.
-#if SANITIZER_FREEBSD
-#include <sys/param.h>
-# if __FreeBSD_version <= 902001  // v9.2
-#  define mc_eip mc_rip
-#  define mc_ebp mc_rbp
-#  define mc_esp mc_rsp
-# endif
+// x86-64 FreeBSD 9.2 and older define 'ucontext_t' incorrectly in
+// 32-bit mode.
+#if SANITIZER_FREEBSD && (SANITIZER_WORDSIZE == 32) && \
+  __FreeBSD_version <= 902001  // v9.2
+#define ucontext_t xucontext_t
 #endif
 
 typedef enum {
@@ -89,6 +86,10 @@ static int FindFirstDSOCallback(struct dl_phdr_info *info, size_t size,
                                 void *data) {
   // Continue until the first dynamic library is found
   if (!info->dlpi_name || info->dlpi_name[0] == 0)
+    return 0;
+
+  // Ignore vDSO
+  if (internal_strncmp(info->dlpi_name, "linux-", sizeof("linux-") - 1) == 0)
     return 0;
 
   *(const char **)data = info->dlpi_name;
@@ -188,6 +189,13 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
   *bp = ucontext->uc_mcontext.gregs[REG_EBP];
   *sp = ucontext->uc_mcontext.gregs[REG_ESP];
 # endif
+#elif defined(__powerpc__) || defined(__powerpc64__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.regs->nip;
+  *sp = ucontext->uc_mcontext.regs->gpr[PT_R1];
+  // The powerpc{,64}-linux ABIs do not specify r31 as the frame
+  // pointer, but GCC always uses r31 when we need a frame pointer.
+  *bp = ucontext->uc_mcontext.regs->gpr[PT_R31];
 #elif defined(__sparc__)
   ucontext_t *ucontext = (ucontext_t*)context;
   uptr *stk_ptr;
@@ -231,6 +239,10 @@ void ReadContextStack(void *context, uptr *stack, uptr *ssize) {
   UNIMPLEMENTED();
 }
 #endif
+
+void *AsanDlSymNext(const char *sym) {
+  return dlsym(RTLD_NEXT, sym);
+}
 
 }  // namespace __asan
 

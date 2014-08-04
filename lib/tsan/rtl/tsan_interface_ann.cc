@@ -40,6 +40,7 @@ class ScopedAnnotation {
 
   ~ScopedAnnotation() {
     FuncExit(thr_);
+    CheckNoLocks(thr_);
   }
  private:
   ThreadState *const thr_;
@@ -125,8 +126,6 @@ static ExpectRace *FindRace(ExpectRace *list, uptr addr, uptr size) {
 
 static bool CheckContains(ExpectRace *list, uptr addr, uptr size) {
   ExpectRace *race = FindRace(list, addr, size);
-  if (race == 0 && AlternativeAddress(addr))
-    race = FindRace(list, AlternativeAddress(addr), size);
   if (race == 0)
     return false;
   DPrintf("Hit expected/benign race: %s addr=%zx:%d %s:%d\n",

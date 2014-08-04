@@ -45,10 +45,6 @@
 # endif
 #endif
 
-#ifndef ASAN_USE_PREINIT_ARRAY
-# define ASAN_USE_PREINIT_ARRAY (SANITIZER_LINUX && !SANITIZER_ANDROID)
-#endif
-
 #ifndef ASAN_DYNAMIC
 # ifdef PIC
 #  define ASAN_DYNAMIC 1
@@ -98,6 +94,8 @@ void AppendToErrorMessageBuffer(const char *buffer);
 
 void ParseExtraActivationFlags();
 
+void *AsanDlSymNext(const char *sym);
+
 // Platform-specific options.
 #if SANITIZER_MAC
 bool PlatformHasDifferentMemcpyAndMemmove();
@@ -110,9 +108,11 @@ bool PlatformHasDifferentMemcpyAndMemmove();
 // Add convenient macro for interface functions that may be represented as
 // weak hooks.
 #define ASAN_MALLOC_HOOK(ptr, size) \
-  if (&__asan_malloc_hook) __asan_malloc_hook(ptr, size)
+  if (&__asan_malloc_hook) __asan_malloc_hook(ptr, size); \
+  if (&__sanitizer_malloc_hook) __sanitizer_malloc_hook(ptr, size)
 #define ASAN_FREE_HOOK(ptr) \
-  if (&__asan_free_hook) __asan_free_hook(ptr)
+  if (&__asan_free_hook) __asan_free_hook(ptr); \
+  if (&__sanitizer_free_hook) __sanitizer_free_hook(ptr)
 #define ASAN_ON_ERROR() \
   if (&__asan_on_error) __asan_on_error()
 

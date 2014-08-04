@@ -34,9 +34,13 @@
 # define SANITIZER_SUPPORTS_WEAK_HOOKS 0
 #endif
 
-// If set, the tool will install its own SEGV signal handler.
-#ifndef SANITIZER_NEEDS_SEGV
-# define SANITIZER_NEEDS_SEGV 1
+// We can use .preinit_array section on Linux to call sanitizer initialization
+// functions very early in the process startup (unless PIC macro is defined).
+// FIXME: do we have anything like this on Mac?
+#if SANITIZER_LINUX && !SANITIZER_ANDROID && !defined(PIC)
+# define SANITIZER_CAN_USE_PREINIT_ARRAY 1
+#else
+# define SANITIZER_CAN_USE_PREINIT_ARRAY 0
 #endif
 
 // GCC does not understand __has_feature
@@ -57,6 +61,13 @@ typedef signed   long long sptr;  // NOLINT
 typedef unsigned long uptr;  // NOLINT
 typedef signed   long sptr;  // NOLINT
 #endif  // defined(_WIN64)
+#if defined(__x86_64__)
+// Since x32 uses ILP32 data model in 64-bit hardware mode, we must use
+// 64-bit pointer to unwind stack frame.
+typedef unsigned long long uhwptr;  // NOLINT
+#else
+typedef uptr uhwptr;   // NOLINT
+#endif
 typedef unsigned char u8;
 typedef unsigned short u16;  // NOLINT
 typedef unsigned int u32;

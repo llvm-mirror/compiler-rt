@@ -15,7 +15,9 @@
 
 #include "sanitizer_allocator_internal.h"
 #include "sanitizer_common.h"
+#include "sanitizer_flags.h"
 #include "sanitizer_libc.h"
+#include "sanitizer_placement_new.h"
 
 namespace __sanitizer {
 
@@ -63,6 +65,32 @@ bool TemplateMatch(char *templ, const char *str) {
     asterisk = false;
   }
   return true;
+}
+
+ALIGNED(64) static char placeholder[sizeof(SuppressionContext)];
+static SuppressionContext *suppression_ctx = 0;
+
+SuppressionContext *SuppressionContext::Get() {
+  CHECK(suppression_ctx);
+  return suppression_ctx;
+}
+
+void SuppressionContext::Init() {
+  CHECK(!suppression_ctx);
+  suppression_ctx = new(placeholder) SuppressionContext;
+  if (common_flags()->suppressions[0] == '\0')
+    return;
+  char *suppressions_from_file;
+  uptr buffer_size;
+  uptr contents_size =
+      ReadFileToBuffer(common_flags()->suppressions, &suppressions_from_file,
+                       &buffer_size, 1 << 26 /* max_len */);
+  if (contents_size == 0) {
+    Printf("%s: failed to read suppressions file '%s'\n", SanitizerToolName,
+           common_flags()->suppressions);
+    Die();
+  }
+  suppression_ctx->Parse(suppressions_from_file);
 }
 
 bool SuppressionContext::Match(const char *str, SuppressionType type,

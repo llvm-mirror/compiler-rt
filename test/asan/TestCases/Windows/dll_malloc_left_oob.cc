@@ -1,7 +1,6 @@
-// RUN: %clangxx_asan -O0 %p/dll_host.cc -Fe%t
-// RUN: %clangxx_asan -LD -O0 %s -Fe%t.dll
-// FIXME: 'cat' is needed due to PR19744.
-// RUN: not %run %t %t.dll 2>&1 | cat | FileCheck %s
+// RUN: %clang_cl_asan -O0 %p/dll_host.cc -Fe%t
+// RUN: %clang_cl_asan -LD -O0 %s -Fe%t.dll
+// RUN: not %run %t %t.dll 2>&1 | FileCheck %s
 
 #include <malloc.h>
 extern "C" __declspec(dllexport)
@@ -15,8 +14,8 @@ int test_function() {
 //
 // CHECK: [[ADDR]] is located 1 bytes to the left of 42-byte region
 // CHECK-LABEL: allocated by thread T0 here:
-// CHECK:        malloc
-// CHECK:        test_function {{.*}}dll_malloc_left_oob.cc:[[@LINE-10]]
+// CHECK-NEXT:   malloc
+// CHECK-NEXT:   test_function {{.*}}dll_malloc_left_oob.cc:[[@LINE-10]]
 // CHECK-NEXT:   main {{.*}}dll_host.cc
 // CHECK-LABEL: SUMMARY
   free(buffer);

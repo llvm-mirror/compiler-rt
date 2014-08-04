@@ -28,7 +28,11 @@ struct StackTrace;
 const uptr kWordSize = SANITIZER_WORDSIZE / 8;
 const uptr kWordSizeInBits = 8 * kWordSize;
 
-const uptr kCacheLineSize = 64;
+#if defined(__powerpc__) || defined(__powerpc64__)
+  const uptr kCacheLineSize = 128;
+#else
+  const uptr kCacheLineSize = 64;
+#endif
 
 const uptr kMaxPathLength = 512;
 
@@ -161,6 +165,7 @@ uptr ReadFileToBuffer(const char *file_name, char **buff,
 // (or NULL if the mapping failes). Stores the size of mmaped region
 // in '*buff_size'.
 void *MapFileToMemory(const char *file_name, uptr *buff_size);
+void *MapWritableFileToMemory(void *addr, uptr size, uptr fd, uptr offset);
 
 // Error report formatting.
 const char *StripPathPrefix(const char *filepath,
@@ -186,6 +191,10 @@ void AdjustStackSize(void *attr);
 void PrepareForSandboxing(__sanitizer_sandbox_arguments *args);
 void CovPrepareForSandboxing(__sanitizer_sandbox_arguments *args);
 void SetSandboxingCallback(void (*f)());
+
+void CovUpdateMapping(uptr caller_pc = 0);
+void CovBeforeFork();
+void CovAfterFork(int child_pid);
 
 void InitTlsSize();
 uptr GetTlsSize();
@@ -473,11 +482,16 @@ uptr InternalBinarySearch(const Container &v, uptr first, uptr last,
 class LoadedModule {
  public:
   LoadedModule(const char *module_name, uptr base_address);
-  void addAddressRange(uptr beg, uptr end);
+  void addAddressRange(uptr beg, uptr end, bool executable);
   bool containsAddress(uptr address) const;
 
   const char *full_name() const { return full_name_; }
   uptr base_address() const { return base_address_; }
+
+  uptr n_ranges() const { return n_ranges_; }
+  uptr address_range_start(int i) const { return ranges_[i].beg; }
+  uptr address_range_end(int i) const { return ranges_[i].end; }
+  bool address_range_executable(int i) const { return exec_[i]; }
 
  private:
   struct AddressRange {
@@ -488,6 +502,7 @@ class LoadedModule {
   uptr base_address_;
   static const uptr kMaxNumberOfAddressRanges = 6;
   AddressRange ranges_[kMaxNumberOfAddressRanges];
+  bool exec_[kMaxNumberOfAddressRanges];
   uptr n_ranges_;
 };
 
@@ -541,5 +556,10 @@ inline void *operator new(__sanitizer::operator_new_size_type size,
                           __sanitizer::LowLevelAllocator &alloc) {
   return alloc.Allocate(size);
 }
+
+struct StackDepotStats {
+  uptr n_uniq_ids;
+  uptr allocated;
+};
 
 #endif  // SANITIZER_COMMON_H

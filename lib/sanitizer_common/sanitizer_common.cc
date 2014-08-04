@@ -218,10 +218,11 @@ LoadedModule::LoadedModule(const char *module_name, uptr base_address) {
   n_ranges_ = 0;
 }
 
-void LoadedModule::addAddressRange(uptr beg, uptr end) {
+void LoadedModule::addAddressRange(uptr beg, uptr end, bool executable) {
   CHECK_LT(n_ranges_, kMaxNumberOfAddressRanges);
   ranges_[n_ranges_].beg = beg;
   ranges_[n_ranges_].end = end;
+  exec_[n_ranges_] = executable;
   n_ranges_++;
 }
 
@@ -263,11 +264,6 @@ void DecreaseTotalMmap(uptr size) {
   atomic_fetch_sub(&g_total_mmaped, size, memory_order_relaxed);
 }
 
-static void (*sandboxing_callback)();
-void SetSandboxingCallback(void (*f)()) {
-  sandboxing_callback = f;
-}
-
 }  // namespace __sanitizer
 
 using namespace __sanitizer;  // NOLINT
@@ -298,13 +294,6 @@ void __sanitizer_set_report_path(const char *path) {
     report_path_prefix[len] = '\0';
     log_to_file = true;
   }
-}
-
-void NOINLINE
-__sanitizer_sandbox_on_notify(__sanitizer_sandbox_arguments *args) {
-  PrepareForSandboxing(args);
-  if (sandboxing_callback)
-    sandboxing_callback();
 }
 
 void __sanitizer_report_error_summary(const char *error_summary) {

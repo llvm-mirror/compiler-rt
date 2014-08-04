@@ -198,6 +198,10 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
 
   ParseFlag(str, &f->alloc_dealloc_mismatch, "alloc_dealloc_mismatch",
       "Report errors on malloc/delete, new/free, new/delete[], etc.");
+
+  ParseFlag(str, &f->new_delete_type_mismatch, "new_delete_type_mismatch",
+      "Report errors on mismatch betwen size of new and delete.");
+
   ParseFlag(str, &f->strict_memcmp, "strict_memcmp",
       "If true, assume that memcmp(p1, p2, n) always reads n bytes before "
       "comparing p1 and p2.");
@@ -274,11 +278,13 @@ void InitializeFlags(Flags *f, const char *env) {
   // https://code.google.com/p/address-sanitizer/issues/detail?id=309
   // TODO(glider,timurrrr): Fix known issues and enable this back.
   f->alloc_dealloc_mismatch = (SANITIZER_MAC == 0) && (SANITIZER_WINDOWS == 0);
+  f->new_delete_type_mismatch = true;
   f->strict_memcmp = true;
   f->strict_init_order = false;
   f->start_deactivated = false;
   f->detect_invalid_pointer_pairs = 0;
   f->detect_container_overflow = true;
+  f->detect_odr_violation = 2;
 
   // Override from compile definition.
   ParseFlagsFromString(f, MaybeUseAsanDefaultOptionsCompileDefinition());
@@ -603,7 +609,8 @@ static void AsanInitInternal() {
   bool full_shadow_is_available =
       MemoryRangeIsAvailable(shadow_start, kHighShadowEnd);
 
-#if SANITIZER_LINUX && defined(__x86_64__) && !ASAN_FIXED_MAPPING
+#if SANITIZER_LINUX && defined(__x86_64__) && defined(_LP64) &&                \
+    !ASAN_FIXED_MAPPING
   if (!full_shadow_is_available) {
     kMidMemBeg = kLowMemEnd < 0x3000000000ULL ? 0x3000000000ULL : 0;
     kMidMemEnd = kLowMemEnd < 0x3000000000ULL ? 0x4fffffffffULL : 0;
@@ -654,7 +661,7 @@ static void AsanInitInternal() {
   // fork() on Mac locks the allocator.
   InitializeAllocator();
 
-  Symbolizer::Init(common_flags()->external_symbolizer_path);
+  Symbolizer::GetOrInit();
 
   // On Linux AsanThread::ThreadStart() calls malloc() that's why asan_inited
   // should be set to 1 prior to initializing the threads.

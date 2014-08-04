@@ -17,9 +17,10 @@
 
 #define WIN32_LEAN_AND_MEAN
 #define NOGDI
-#include <stdlib.h>
-#include <io.h>
 #include <windows.h>
+#include <dbghelp.h>
+#include <io.h>
+#include <stdlib.h>
 
 #include "sanitizer_common.h"
 #include "sanitizer_libc.h"
@@ -134,6 +135,10 @@ bool MemoryRangeIsAvailable(uptr range_start, uptr range_end) {
 }
 
 void *MapFileToMemory(const char *file_name, uptr *buff_size) {
+  UNIMPLEMENTED();
+}
+
+void *MapWritableFileToMemory(void *addr, uptr size, uptr fd, uptr offset) {
   UNIMPLEMENTED();
 }
 
@@ -352,6 +357,14 @@ void internal__exit(int exitcode) {
   ExitProcess(exitcode);
 }
 
+uptr internal_ftruncate(fd_t fd, uptr size) {
+  UNIMPLEMENTED();
+}
+
+uptr internal_rename(const char *oldpath, const char *newpath) {
+  UNIMPLEMENTED();
+}
+
 // ---------------------- BlockingMutex ---------------- {{{1
 const uptr LOCK_UNINITIALIZED = 0;
 const uptr LOCK_READY = (uptr)-1;
@@ -437,7 +450,30 @@ void StackTrace::SlowUnwindStack(uptr pc, uptr max_depth) {
 
 void StackTrace::SlowUnwindStackWithContext(uptr pc, void *context,
                                             uptr max_depth) {
-  UNREACHABLE("no signal context on windows");
+  CONTEXT ctx = *(CONTEXT *)context;
+  STACKFRAME64 stack_frame;
+  memset(&stack_frame, 0, sizeof(stack_frame));
+  size = 0;
+#if defined(_WIN64)
+  int machine_type = IMAGE_FILE_MACHINE_AMD64;
+  stack_frame.AddrPC.Offset = ctx.Rip;
+  stack_frame.AddrFrame.Offset = ctx.Rbp;
+  stack_frame.AddrStack.Offset = ctx.Rsp;
+#else
+  int machine_type = IMAGE_FILE_MACHINE_I386;
+  stack_frame.AddrPC.Offset = ctx.Eip;
+  stack_frame.AddrFrame.Offset = ctx.Ebp;
+  stack_frame.AddrStack.Offset = ctx.Esp;
+#endif
+  stack_frame.AddrPC.Mode = AddrModeFlat;
+  stack_frame.AddrFrame.Mode = AddrModeFlat;
+  stack_frame.AddrStack.Mode = AddrModeFlat;
+  while (StackWalk64(machine_type, GetCurrentProcess(), GetCurrentThread(),
+                     &stack_frame, &ctx, NULL, &SymFunctionTableAccess64,
+                     &SymGetModuleBase64, NULL) &&
+         size < Min(max_depth, kStackTraceMax)) {
+    trace[size++] = (uptr)stack_frame.AddrPC.Offset;
+  }
 }
 
 void MaybeOpenReportFile() {

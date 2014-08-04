@@ -1,4 +1,4 @@
-// RUN: %clangxx_tsan -O1 %s -o %t && not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_tsan -O1 %s -o %t && %deflake %run %t | FileCheck %s
 #include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -13,12 +13,13 @@ void *Thread1(void *x) {
 }
 
 void *Thread2(void *x) {
-  pthread_mutex_t mtx;
-  pthread_mutex_init(&mtx, 0);
-  pthread_mutex_lock(&mtx);
+  pthread_mutex_t *mtx = new pthread_mutex_t;
+  pthread_mutex_init(mtx, 0);
+  pthread_mutex_lock(mtx);
   Global--;
-  pthread_mutex_unlock(&mtx);
-  pthread_mutex_destroy(&mtx);
+  pthread_mutex_unlock(mtx);
+  pthread_mutex_destroy(mtx);
+  delete mtx;
   return NULL;
 }
 
