@@ -1542,8 +1542,14 @@ INTERCEPTOR_WITH_SUFFIX(int, wait, int *status) {
     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, status, sizeof(*status));
   return res;
 }
+// On FreeBSD id_t is always 64-bit wide.
+#if SANITIZER_FREEBSD && (SANITIZER_WORDSIZE == 32)
+INTERCEPTOR_WITH_SUFFIX(int, waitid, int idtype, long long id, void *infop,
+                        int options) {
+#else
 INTERCEPTOR_WITH_SUFFIX(int, waitid, int idtype, int id, void *infop,
                         int options) {
+#endif
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, waitid, idtype, id, infop, options);
   // FIXME: under ASan the call below may write to freed memory and corrupt
@@ -4651,6 +4657,34 @@ INTERCEPTOR(char *, getpass, const char *prompt) {
 #define INIT_GETPASS
 #endif
 
+#if SANITIZER_INTERCEPT_TIMERFD
+INTERCEPTOR(int, timerfd_settime, int fd, int flags, void *new_value,
+            void *old_value) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, timerfd_settime, fd, flags, new_value,
+                           old_value);
+  COMMON_INTERCEPTOR_READ_RANGE(ctx, new_value, struct_itimerspec_sz);
+  int res = REAL(timerfd_settime)(fd, flags, new_value, old_value);
+  if (res != -1 && old_value)
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, old_value, struct_itimerspec_sz);
+  return res;
+}
+
+INTERCEPTOR(int, timerfd_gettime, int fd, void *curr_value) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, timerfd_gettime, fd, curr_value);
+  int res = REAL(timerfd_gettime)(fd, curr_value);
+  if (res != -1 && curr_value)
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, curr_value, struct_itimerspec_sz);
+  return res;
+}
+#define INIT_TIMERFD                          \
+  COMMON_INTERCEPT_FUNCTION(timerfd_settime); \
+  COMMON_INTERCEPT_FUNCTION(timerfd_gettime);
+#else
+#define INIT_TIMERFD
+#endif
+
 static void InitializeCommonInterceptors() {
   static u64 metadata_mem[sizeof(MetadataHashMap) / sizeof(u64) + 1];
   interceptor_metadata_map = new((void *)&metadata_mem) MetadataHashMap();
@@ -4810,4 +4844,5 @@ static void InitializeCommonInterceptors() {
   INIT_FCLOSE;
   INIT_DLOPEN_DLCLOSE;
   INIT_GETPASS;
+  INIT_TIMERFD;
 }
