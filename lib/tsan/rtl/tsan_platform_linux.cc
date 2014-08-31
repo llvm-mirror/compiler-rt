@@ -332,26 +332,8 @@ static void InitDataSeg() {
 
 #endif  // #ifndef TSAN_GO
 
-static rlim_t getlim(int res) {
-  rlimit rlim;
-  CHECK_EQ(0, getrlimit(res, &rlim));
-  return rlim.rlim_cur;
-}
-
-static void setlim(int res, rlim_t lim) {
-  // The following magic is to prevent clang from replacing it with memset.
-  volatile rlimit rlim;
-  rlim.rlim_cur = lim;
-  rlim.rlim_max = lim;
-  setrlimit(res, (rlimit*)&rlim);
-}
-
-const char *InitializePlatform() {
-  void *p = 0;
-  if (sizeof(p) == 8) {
-    // Disable core dumps, dumping of 16TB usually takes a bit long.
-    setlim(RLIMIT_CORE, 0);
-  }
+void InitializePlatform() {
+  DisableCoreDumperIfNecessary();
 
   // Go maps shadow memory lazily and works fine with limited address space.
   // Unlimited stack is not a problem as well, because the executable
@@ -361,7 +343,7 @@ const char *InitializePlatform() {
     // TSan doesn't play well with unlimited stack size (as stack
     // overlaps with shadow memory). If we detect unlimited stack size,
     // we re-exec the program with limited stack size as a best effort.
-    if (getlim(RLIMIT_STACK) == (rlim_t)-1) {
+    if (StackSizeIsUnlimited()) {
       const uptr kMaxStackSize = 32 * 1024 * 1024;
       VReport(1, "Program is run with unlimited stack size, which wouldn't "
                  "work with ThreadSanitizer.\n"
@@ -371,11 +353,11 @@ const char *InitializePlatform() {
       reexec = true;
     }
 
-    if (getlim(RLIMIT_AS) != (rlim_t)-1) {
+    if (!AddressSpaceIsUnlimited()) {
       Report("WARNING: Program is run with limited virtual address space,"
              " which wouldn't work with ThreadSanitizer.\n");
       Report("Re-execing with unlimited virtual address space.\n");
-      setlim(RLIMIT_AS, -1);
+      SetAddressSpaceUnlimited();
       reexec = true;
     }
     if (reexec)
@@ -387,7 +369,6 @@ const char *InitializePlatform() {
   InitTlsSize();
   InitDataSeg();
 #endif
-  return GetEnv(kTsanOptionsEnv);
 }
 
 bool IsGlobalVar(uptr addr) {

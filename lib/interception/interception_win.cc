@@ -19,20 +19,6 @@
 
 namespace __interception {
 
-bool GetRealFunctionAddress(const char *func_name, uptr *func_addr) {
-  const char *DLLS[] = {
-    "msvcr80.dll",
-    "msvcr90.dll",
-    "kernel32.dll",
-    NULL
-  };
-  *func_addr = 0;
-  for (size_t i = 0; *func_addr == 0 && DLLS[i]; ++i) {
-    *func_addr = (uptr)GetProcAddress(GetModuleHandleA(DLLS[i]), func_name);
-  }
-  return (*func_addr != 0);
-}
-
 // FIXME: internal_str* and internal_mem* functions should be moved from the
 // ASan sources into interception/.
 
@@ -110,6 +96,7 @@ static size_t RoundUpToInstrBoundary(size_t size, char *code) {
       case 0x458B:  // 8B 45 XX = mov eax, dword ptr [ebp+XXh]
       case 0x5D8B:  // 8B 5D XX = mov ebx, dword ptr [ebp+XXh]
       case 0xEC83:  // 83 EC XX = sub esp, XX
+      case 0x75FF:  // FF 75 XX = push dword ptr [ebp+XXh]
         cursor += 3;
         continue;
       case 0xC1F7:  // F7 C1 XX YY ZZ WW = test ecx, WWZZYYXX
@@ -192,6 +179,33 @@ bool OverrideFunction(uptr old_func, uptr new_func, uptr *orig_old_func) {
     return false;  // not clear if this failure bothers us.
 
   return true;
+}
+
+static const void **InterestingDLLsAvailable() {
+  const char *InterestingDLLs[] = { "kernel32.dll", "msvcr120.dll", NULL };
+  static void *result[ARRAY_SIZE(InterestingDLLs)] = { 0 };
+  if (!result[0]) {
+    for (size_t i = 0, j = 0; InterestingDLLs[i]; ++i) {
+      if (HMODULE h = GetModuleHandleA(InterestingDLLs[i]))
+        result[j++] = (void *)h;
+    }
+  }
+  return (const void **)&result[0];
+}
+
+static bool GetFunctionAddressInDLLs(const char *func_name, uptr *func_addr) {
+  *func_addr = 0;
+  const void **DLLs = InterestingDLLsAvailable();
+  for (size_t i = 0; *func_addr == 0 && DLLs[i]; ++i)
+    *func_addr = (uptr)GetProcAddress((HMODULE)DLLs[i], func_name);
+  return (*func_addr != 0);
+}
+
+bool OverrideFunction(const char *name, uptr new_func, uptr *orig_old_func) {
+  uptr orig_func;
+  if (!GetFunctionAddressInDLLs(name, &orig_func))
+    return false;
+  return OverrideFunction(orig_func, new_func, orig_old_func);
 }
 
 }  // namespace __interception
