@@ -289,18 +289,19 @@ void Initialize(ThreadState *thr) {
   // Install tool-specific callbacks in sanitizer_common.
   SetCheckFailedCallback(TsanCheckFailed);
 
+  ctx = new(ctx_placeholder) Context;
+  const char *options = GetEnv(kTsanOptionsEnv);
+  InitializeFlags(&ctx->flags, options);
 #ifndef TSAN_GO
   InitializeAllocator();
 #endif
   InitializeInterceptors();
-  const char *env = InitializePlatform();
+  InitializePlatform();
   InitializeMutex();
   InitializeDynamicAnnotations();
-  ctx = new(ctx_placeholder) Context;
 #ifndef TSAN_GO
   InitializeShadowMemory();
 #endif
-  InitializeFlags(&ctx->flags, env);
   // Setup correct file descriptor for error reports.
   __sanitizer_set_report_path(flags()->log_path);
   InitializeSuppressions();
@@ -336,7 +337,6 @@ void Initialize(ThreadState *thr) {
 }
 
 int Finalize(ThreadState *thr) {
-  Context *ctx = __tsan::ctx;
   bool failed = false;
 
   if (flags()->atexit_sleep_ms > 0 && ThreadCount(thr) > 1)
@@ -605,13 +605,13 @@ void UnalignedMemoryAccess(ThreadState *thr, uptr pc, uptr addr,
   while (size) {
     int size1 = 1;
     int kAccessSizeLog = kSizeLog1;
-    if (size >= 8 && (addr & ~7) == ((addr + 8) & ~7)) {
+    if (size >= 8 && (addr & ~7) == ((addr + 7) & ~7)) {
       size1 = 8;
       kAccessSizeLog = kSizeLog8;
-    } else if (size >= 4 && (addr & ~7) == ((addr + 4) & ~7)) {
+    } else if (size >= 4 && (addr & ~7) == ((addr + 3) & ~7)) {
       size1 = 4;
       kAccessSizeLog = kSizeLog4;
-    } else if (size >= 2 && (addr & ~7) == ((addr + 2) & ~7)) {
+    } else if (size >= 2 && (addr & ~7) == ((addr + 1) & ~7)) {
       size1 = 2;
       kAccessSizeLog = kSizeLog2;
     }

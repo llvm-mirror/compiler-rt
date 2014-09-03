@@ -73,18 +73,8 @@ void InitializeShadowMemory() {
 }
 #endif
 
-const char *InitializePlatform() {
-  void *p = 0;
-  if (sizeof(p) == 8) {
-    // Disable core dumps, dumping of 16TB usually takes a bit long.
-    // The following magic is to prevent clang from replacing it with memset.
-    volatile rlimit lim;
-    lim.rlim_cur = 0;
-    lim.rlim_max = 0;
-    setrlimit(RLIMIT_CORE, (rlimit*)&lim);
-  }
-
-  return GetEnv(kTsanOptionsEnv);
+void InitializePlatform() {
+  DisableCoreDumperIfNecessary();
 }
 
 void FinalizePlatform() {
