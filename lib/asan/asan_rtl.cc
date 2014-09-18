@@ -592,6 +592,11 @@ static void AsanInitInternal() {
 
   InitializeAsanInterceptors();
 
+  // Enable system log ("adb logcat") on Android.
+  // Doing this before interceptors are initialized crashes in:
+  // AsanInitInternal -> android_log_write -> __interceptor_strcmp
+  AndroidLogInit();
+
   ReplaceSystemMalloc();
 
   uptr shadow_start = kLowShadowBeg;
@@ -646,11 +651,7 @@ static void AsanInitInternal() {
   AsanTSDInit(PlatformTSDDtor);
   InstallDeadlySignalHandlers(AsanOnSIGSEGV);
 
-  // Allocator should be initialized before starting external symbolizer, as
-  // fork() on Mac locks the allocator.
   InitializeAllocator();
-
-  Symbolizer::GetOrInit();
 
   // On Linux AsanThread::ThreadStart() calls malloc() that's why asan_inited
   // should be set to 1 prior to initializing the threads.
