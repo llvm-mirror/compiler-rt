@@ -107,8 +107,8 @@ elif [[ -f "$HERE/$ASAN_RT" ]]; then
     ASAN_RT_PATH="$HERE"
 elif [[ $(basename "$HERE") == "bin" ]]; then
     # We could be in the toolchain's base directory.
-    # Consider ../lib, ../lib/asan and ../lib/clang/$VERSION/lib/linux.
-    P=$(ls "$HERE"/../lib/"$ASAN_RT" "$HERE"/../lib/asan/"$ASAN_RT" "$HERE"/../lib/clang/*/lib/linux/"$ASAN_RT" 2>/dev/null | sort | tail -1)
+    # Consider ../lib, ../lib/asan, ../lib/linux and ../lib/clang/$VERSION/lib/linux.
+    P=$(ls "$HERE"/../lib/"$ASAN_RT" "$HERE"/../lib/asan/"$ASAN_RT" "$HERE"/../lib/linux/"$ASAN_RT" "$HERE"/../lib/clang/*/lib/linux/"$ASAN_RT" 2>/dev/null | sort | tail -1)
     if [[ -n "$P" ]]; then
         ASAN_RT_PATH="$(dirname "$P")"
     fi
@@ -128,6 +128,12 @@ echo '>> Remounting /system rw'
 $ADB root
 $ADB wait-for-device
 $ADB remount
+
+RELEASE=$($ADB shell getprop ro.build.version.release)
+PRE_L=0
+if echo "$RELEASE" | grep '^4\.' >&/dev/null; then
+    PRE_L=1
+fi
 
 if ! $ADB shell readlink /system/bin/app_process | grep 'app_process' >&/dev/null; then
 
@@ -160,13 +166,19 @@ cp "$ASAN_RT_PATH/$ASAN_RT" "$TMPDIR/"
 # FIXME: alloc_dealloc_mismatch=0 prevents a failure in libdvm startup,
 # which may or may not be a real bug (probably not).
 ASAN_OPTIONS=start_deactivated=1,alloc_dealloc_mismatch=0
+
+# On Android-L not allowing user segv handler breaks some applications.
+if $ADB shell 'echo $LD_PRELOAD' | grep libsigchain.so >&/dev/null; then
+    ASAN_OPTIONS="$ASAN_OPTIONS,allow_user_segv_handler=1"
+fi
+
 if [[ x$extra_options != x ]] ; then
     ASAN_OPTIONS="$ASAN_OPTIONS,$extra_options"
 fi
 
 # Zygote wrapper.
 cat <<EOF >"$TMPDIR/app_process.wrap"
-#!/system/bin/sh
+#!/system/bin/sh-from-zygote
 ASAN_OPTIONS=$ASAN_OPTIONS \\
 LD_PRELOAD=\$LD_PRELOAD:libclang_rt.asan-arm-android.so \\
 exec /system/bin/app_process32 \$@
@@ -200,6 +212,32 @@ if ! ( cd "$TMPDIRBASE" && diff -qr old/ new/ ) ; then
     $ADB shell chmod 755 \
         /system/bin/app_process.wrap \
         /system/bin/asanwrapper
+
+    # Make SELinux happy by keeping app_process wrapper and the shell
+    # it runs on in zygote domain.
+    ENFORCING=0
+    if $ADB shell getenforce | grep Enforcing >/dev/null; then
+        # Sometimes shell is not allowed to change file contexts.
+        # Temporarily switch to permissive.
+        ENFORCING=1
+        $ADB shell setenforce 0
+    fi
+
+    $ADB shell cp /system/bin/sh /system/bin/sh-from-zygote
+
+    if [[ PRE_L -eq 1 ]]; then
+        CTX=u:object_r:system_file:s0
+    else
+        CTX=u:object_r:zygote_exec:s0
+    fi
+    $ADB shell chcon $CTX \
+        /system/bin/sh-from-zygote \
+        /system/bin/app_process.wrap \
+        /system/bin/app_process32
+
+    if [ $ENFORCING == 1 ]; then
+        $ADB shell setenforce 1
+    fi
 
     echo '>> Restarting shell (asynchronous)'
     $ADB shell stop

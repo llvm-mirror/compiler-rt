@@ -472,7 +472,7 @@ namespace __sanitizer {
   typedef long __sanitizer___kernel_off_t;
 #endif
 
-#if defined(__powerpc__) || defined(__aarch64__) || defined(__mips__)
+#if defined(__powerpc__) || defined(__mips__)
   typedef unsigned int __sanitizer___kernel_old_uid_t;
   typedef unsigned int __sanitizer___kernel_old_gid_t;
 #else
@@ -861,7 +861,7 @@ struct __sanitizer_obstack {
 
   // A special value to mark ioctls that are not present on the target platform,
   // when it can not be determined without including any system headers.
-  extern unsigned IOCTL_NOT_PRESENT;
+  extern const unsigned IOCTL_NOT_PRESENT;
 
   extern unsigned IOCTL_FIOASYNC;
   extern unsigned IOCTL_FIOCLEX;
