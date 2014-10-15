@@ -341,16 +341,15 @@ const char *ThreadNameWithParenthesis(u32 tid, char buff[],
   return ThreadNameWithParenthesis(t, buff, buff_len);
 }
 
-void PrintAccessAndVarIntersection(const char *var_name,
-                                   uptr var_beg, uptr var_size,
-                                   uptr addr, uptr access_size,
-                                   uptr prev_var_end, uptr next_var_beg) {
-  uptr var_end = var_beg + var_size;
+static void PrintAccessAndVarIntersection(const StackVarDescr &var, uptr addr,
+                                          uptr access_size, uptr prev_var_end,
+                                          uptr next_var_beg) {
+  uptr var_end = var.beg + var.size;
   uptr addr_end = addr + access_size;
   const char *pos_descr = 0;
-  // If the variable [var_beg, var_end) is the nearest variable to the
+  // If the variable [var.beg, var_end) is the nearest variable to the
   // current memory access, indicate it in the log.
-  if (addr >= var_beg) {
+  if (addr >= var.beg) {
     if (addr_end <= var_end)
       pos_descr = "is inside";  // May happen if this is a use-after-return.
     else if (addr < var_end)
@@ -359,14 +358,20 @@ void PrintAccessAndVarIntersection(const char *var_name,
              next_var_beg - addr_end >= addr - var_end)
       pos_descr = "overflows";
   } else {
-    if (addr_end > var_beg)
+    if (addr_end > var.beg)
       pos_descr = "partially underflows";
     else if (addr >= prev_var_end &&
-             addr - prev_var_end >= var_beg - addr_end)
+             addr - prev_var_end >= var.beg - addr_end)
       pos_descr = "underflows";
   }
   InternalScopedString str(1024);
-  str.append("    [%zd, %zd) '%s'", var_beg, var_beg + var_size, var_name);
+  str.append("    [%zd, %zd)", var.beg, var_end);
+  // Render variable name.
+  str.append(" '");
+  for (uptr i = 0; i < var.name_len; ++i) {
+    str.append("%c", var.name_pos[i]);
+  }
+  str.append("'");
   if (pos_descr) {
     Decorator d;
     // FIXME: we may want to also print the size of the access here,
@@ -381,9 +386,14 @@ void PrintAccessAndVarIntersection(const char *var_name,
 
 bool ParseFrameDescription(const char *frame_descr,
                            InternalMmapVector<StackVarDescr> *vars) {
+  CHECK(frame_descr);
   char *p;
+  // This string is created by the compiler and has the following form:
+  // "n alloc_1 alloc_2 ... alloc_n"
+  // where alloc_i looks like "offset size len ObjectName".
   uptr n_objects = (uptr)internal_simple_strtoll(frame_descr, &p, 10);
-  CHECK_GT(n_objects, 0);
+  if (n_objects == 0)
+    return false;
 
   for (uptr i = 0; i < n_objects; i++) {
     uptr beg  = (uptr)internal_simple_strtoll(p, &p, 10);
@@ -404,31 +414,21 @@ bool ParseFrameDescription(const char *frame_descr,
 bool DescribeAddressIfStack(uptr addr, uptr access_size) {
   AsanThread *t = FindThreadByStackAddress(addr);
   if (!t) return false;
-  const uptr kBufSize = 4095;
-  char buf[kBufSize];
-  uptr offset = 0;
-  uptr frame_pc = 0;
-  char tname[128];
-  const char *frame_descr = t->GetFrameNameByAddr(addr, &offset, &frame_pc);
 
-#ifdef __powerpc64__
-  // On PowerPC64, the address of a function actually points to a
-  // three-doubleword data structure with the first field containing
-  // the address of the function's code.
-  frame_pc = *reinterpret_cast<uptr *>(frame_pc);
-#endif
-
-  // This string is created by the compiler and has the following form:
-  // "n alloc_1 alloc_2 ... alloc_n"
-  // where alloc_i looks like "offset size len ObjectName ".
-  CHECK(frame_descr);
   Decorator d;
+  char tname[128];
   Printf("%s", d.Location());
-  Printf("Address %p is located in stack of thread T%d%s "
-         "at offset %zu in frame\n",
-         addr, t->tid(),
-         ThreadNameWithParenthesis(t->tid(), tname, sizeof(tname)),
-         offset);
+  Printf("Address %p is located in stack of thread T%d%s", addr, t->tid(),
+         ThreadNameWithParenthesis(t->tid(), tname, sizeof(tname)));
+
+  // Try to fetch precise stack frame for this access.
+  AsanThread::StackFrameAccess access;
+  if (!t->GetStackFrameAccessByAddr(addr, &access)) {
+    Printf("%s\n", d.EndLocation());
+    return true;
+  }
+  Printf(" at offset %zu in frame%s\n", access.offset, d.EndLocation());
+
   // Now we print the frame where the alloca has happened.
   // We print this frame as a stack trace with one element.
   // The symbolizer may print more than one frame if inlining was involved.
@@ -437,15 +437,21 @@ bool DescribeAddressIfStack(uptr addr, uptr access_size) {
   // especially given that the alloca may be from entirely different place
   // (e.g. use-after-scope, or different thread's stack).
   StackTrace alloca_stack;
-  alloca_stack.trace[0] = frame_pc + 16;
+#ifdef __powerpc64__
+  // On PowerPC64, the address of a function actually points to a
+  // three-doubleword data structure with the first field containing
+  // the address of the function's code.
+  access.frame_pc = *reinterpret_cast<uptr *>(access.frame_pc);
+#endif
+  alloca_stack.trace[0] = access.frame_pc + 16;
   alloca_stack.size = 1;
   Printf("%s", d.EndLocation());
   alloca_stack.Print();
 
   InternalMmapVector<StackVarDescr> vars(16);
-  if (!ParseFrameDescription(frame_descr, &vars)) {
+  if (!ParseFrameDescription(access.frame_descr, &vars)) {
     Printf("AddressSanitizer can't parse the stack frame "
-           "descriptor: |%s|\n", frame_descr);
+           "descriptor: |%s|\n", access.frame_descr);
     // 'addr' is a stack address, so return true even if we can't parse frame
     return true;
   }
@@ -455,13 +461,9 @@ bool DescribeAddressIfStack(uptr addr, uptr access_size) {
 
   // Report all objects in this frame.
   for (uptr i = 0; i < n_objects; i++) {
-    buf[0] = 0;
-    internal_strncat(buf, vars[i].name_pos,
-                     static_cast<uptr>(Min(kBufSize, vars[i].name_len)));
     uptr prev_var_end = i ? vars[i - 1].beg + vars[i - 1].size : 0;
     uptr next_var_beg = i + 1 < n_objects ? vars[i + 1].beg : ~(0UL);
-    PrintAccessAndVarIntersection(buf, vars[i].beg, vars[i].size,
-                                  offset, access_size,
+    PrintAccessAndVarIntersection(vars[i], access.offset, access_size,
                                   prev_var_end, next_var_beg);
   }
   Printf("HINT: this may be a false positive if your program uses "
