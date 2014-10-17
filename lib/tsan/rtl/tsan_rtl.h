@@ -308,6 +308,9 @@ struct SignalContext;
 struct JmpBuf {
   uptr sp;
   uptr mangled_sp;
+  int int_signal_send;
+  bool in_blocking_func;
+  uptr in_signal_handler;
   uptr *shadow_stack_pos;
 };
 
@@ -356,7 +359,7 @@ struct ThreadState {
   const int unique_id;
   bool in_symbolizer;
   bool in_ignored_lib;
-  bool is_alive;
+  bool is_dead;
   bool is_freeing;
   bool is_vptr_access;
   const uptr stk_addr;
@@ -369,7 +372,7 @@ struct ThreadState {
   DDPhysicalThread *dd_pt;
   DDLogicalThread *dd_lt;
 
-  bool in_signal_handler;
+  atomic_uintptr_t in_signal_handler;
   SignalContext *signal_ctx;
 
   DenseSlabAllocCache block_cache;

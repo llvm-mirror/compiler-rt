@@ -107,7 +107,7 @@ void ThreadContext::OnStarted(void *arg) {
 #ifndef TSAN_GO
   AllocatorThreadStart(thr);
 #endif
-  if (flags()->detect_deadlocks) {
+  if (common_flags()->detect_deadlocks) {
     thr->dd_pt = ctx->dd->CreatePhysicalThread();
     thr->dd_lt = ctx->dd->CreateLogicalThread(unique_id);
   }
@@ -123,7 +123,6 @@ void ThreadContext::OnStarted(void *arg) {
           "tls_addr=%zx tls_size=%zx\n",
           tid, (uptr)epoch0, args->stk_addr, args->stk_size,
           args->tls_addr, args->tls_size);
-  thr->is_alive = true;
 }
 
 void ThreadContext::OnFinished() {
@@ -135,7 +134,7 @@ void ThreadContext::OnFinished() {
   }
   epoch1 = thr->fast_state.epoch();
 
-  if (flags()->detect_deadlocks) {
+  if (common_flags()->detect_deadlocks) {
     ctx->dd->DestroyPhysicalThread(thr->dd_pt);
     ctx->dd->DestroyLogicalThread(thr->dd_lt);
   }
@@ -284,7 +283,7 @@ void ThreadFinish(ThreadState *thr) {
     DontNeedShadowFor(thr->stk_addr, thr->stk_size);
   if (thr->tls_addr && thr->tls_size)
     DontNeedShadowFor(thr->tls_addr, thr->tls_size);
-  thr->is_alive = false;
+  thr->is_dead = true;
   ctx->thread_registry->FinishThread(thr->tid);
 }
 

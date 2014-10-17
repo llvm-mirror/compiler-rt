@@ -69,7 +69,7 @@ void DisableCoreDumperIfNecessary() {
 
 bool StackSizeIsUnlimited() {
   rlim_t stack_size = getlim(RLIMIT_STACK);
-  return (stack_size == (rlim_t)-1);
+  return (stack_size == RLIM_INFINITY);
 }
 
 void SetStackSizeLimitInBytes(uptr limit) {
@@ -79,11 +79,11 @@ void SetStackSizeLimitInBytes(uptr limit) {
 
 bool AddressSpaceIsUnlimited() {
   rlim_t as_size = getlim(RLIMIT_AS);
-  return (as_size == (rlim_t)-1);
+  return (as_size == RLIM_INFINITY);
 }
 
 void SetAddressSpaceUnlimited() {
-  setlim(RLIMIT_AS, -1);
+  setlim(RLIMIT_AS, RLIM_INFINITY);
   CHECK(AddressSpaceIsUnlimited());
 }
 
@@ -148,7 +148,9 @@ static void MaybeInstallSigaction(int signum,
   struct sigaction sigact;
   internal_memset(&sigact, 0, sizeof(sigact));
   sigact.sa_sigaction = (sa_sigaction_t)handler;
-  sigact.sa_flags = SA_SIGINFO;
+  // Do not block the signal from being received in that signal's handler.
+  // Clients are responsible for handling this correctly.
+  sigact.sa_flags = SA_SIGINFO | SA_NODEFER;
   if (common_flags()->use_sigaltstack) sigact.sa_flags |= SA_ONSTACK;
   CHECK_EQ(0, internal_sigaction(signum, &sigact, 0));
   VReport(1, "Installed the sigaction for signal %d\n", signum);
@@ -163,6 +165,28 @@ void InstallDeadlySignalHandlers(SignalHandlerType handler) {
   MaybeInstallSigaction(SIGBUS, handler);
 }
 #endif  // SANITIZER_GO
+
+bool IsAccessibleMemoryRange(uptr beg, uptr size) {
+  uptr page_size = GetPageSizeCached();
+  // Checking too large memory ranges is slow.
+  CHECK_LT(size, page_size * 10);
+  int sock_pair[2];
+  if (pipe(sock_pair))
+    return false;
+  uptr bytes_written =
+      internal_write(sock_pair[1], reinterpret_cast<void *>(beg), size);
+  int write_errno;
+  bool result;
+  if (internal_iserror(bytes_written, &write_errno)) {
+    CHECK_EQ(EFAULT, write_errno);
+    result = false;
+  } else {
+    result = (bytes_written == size);
+  }
+  internal_close(sock_pair[0]);
+  internal_close(sock_pair[1]);
+  return result;
+}
 
 }  // namespace __sanitizer
 

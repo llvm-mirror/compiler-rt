@@ -91,6 +91,28 @@ extern "C" {
   void __asan_describe_address(uptr addr);
 
   SANITIZER_INTERFACE_ATTRIBUTE
+  int __asan_report_present();
+
+  SANITIZER_INTERFACE_ATTRIBUTE
+  uptr __asan_get_report_pc();
+  SANITIZER_INTERFACE_ATTRIBUTE
+  uptr __asan_get_report_bp();
+  SANITIZER_INTERFACE_ATTRIBUTE
+  uptr __asan_get_report_sp();
+  SANITIZER_INTERFACE_ATTRIBUTE
+  uptr __asan_get_report_address();
+  SANITIZER_INTERFACE_ATTRIBUTE
+  int __asan_get_report_access_type();
+  SANITIZER_INTERFACE_ATTRIBUTE
+  uptr __asan_get_report_access_size();
+  SANITIZER_INTERFACE_ATTRIBUTE
+  const char * __asan_get_report_description();
+
+  SANITIZER_INTERFACE_ATTRIBUTE
+  const char * __asan_locate_address(uptr addr, char *name, uptr name_size,
+                                     uptr *region_address, uptr *region_size);
+
+  SANITIZER_INTERFACE_ATTRIBUTE
   uptr __asan_get_alloc_stack(uptr addr, uptr *trace, uptr size,
                               u32 *thread_id);
 
@@ -149,6 +171,8 @@ extern "C" {
 
   SANITIZER_INTERFACE_ATTRIBUTE
   void __asan_poison_cxx_array_cookie(uptr p);
+  SANITIZER_INTERFACE_ATTRIBUTE
+  uptr __asan_load_cxx_array_cookie(uptr *p);
 }  // extern "C"
 
 #endif  // ASAN_INTERFACE_INTERNAL_H
