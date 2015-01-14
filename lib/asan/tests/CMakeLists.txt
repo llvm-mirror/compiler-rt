@@ -31,7 +31,7 @@ set(ASAN_UNITTEST_COMMON_CFLAGS
   -O2
   -Wno-format
   -Werror=sign-compare)
-append_list_if(COMPILER_RT_HAS_WNO_VARIADIC_MACROS_FLAG -Wno-variadic-macros ASAN_UNITTEST_COMMON_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WVARIADIC_MACROS_FLAG -Wno-variadic-macros ASAN_UNITTEST_COMMON_CFLAGS)
 
 # -gline-tables-only must be enough for ASan, so use it if possible.
 if(COMPILER_RT_TEST_COMPILER_ID MATCHES "Clang")
@@ -51,8 +51,10 @@ set(ASAN_UNITTEST_INSTRUMENTED_CFLAGS
   ${ASAN_UNITTEST_COMMON_CFLAGS}
   -fsanitize=address
   "-fsanitize-blacklist=${ASAN_BLACKLIST_FILE}"
-  -mllvm -asan-instrument-assembly
 )
+if(CAN_TARGET_x86_64 OR CAN_TARGET_i386)
+  list(APPEND ASAN_UNITTEST_INSTRUMENTED_CFLAGS -mllvm -asan-instrument-assembly)
+endif()
 
 if(NOT MSVC)
   list(APPEND ASAN_UNITTEST_COMMON_LINKFLAGS --driver-mode=g++)

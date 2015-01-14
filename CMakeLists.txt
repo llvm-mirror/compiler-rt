@@ -160,10 +160,7 @@ include(CompilerRTUtils)
 set(COMPILER_RT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(COMPILER_RT_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 # Setup custom SDK sysroots.
-set(COMPILER_RT_DARWIN_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/darwin)
 set(COMPILER_RT_LINUX_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/linux)
-
-set(COMPILER_RT_EXTRA_ANDROID_HEADERS ${COMPILER_RT_SOURCE_DIR}/android/include)
 
 # Detect whether the current target platform is 32-bit or 64-bit, and setup
 # the correct commandline flags needed to attempt to target 32-bit and 64-bit.
@@ -246,10 +243,15 @@ if(MSVC)
   # Replace the /MD[d] flags with /MT.
   # FIXME: In fact, sanitizers should support both /MT and /MD, see PR20214.
   if(COMPILER_RT_HAS_MT_FLAG)
-    string(REPLACE "/MDd" "/MT" CMAKE_CXX_FLAGS_DEBUG
-           "${CMAKE_CXX_FLAGS_DEBUG}")
-    string(REPLACE "/MD" "/MT" CMAKE_CXX_FLAGS_RELEASE
-           "${CMAKE_CXX_FLAGS_RELEASE}")
+    foreach(flag_var
+      CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
+      CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO)
+      if(${flag_var} MATCHES "/MD")
+        string(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
+      elseif(${flag_var} MATCHES "/MDd")
+        string(REGEX REPLACE "/MDd" "/MT" ${flag_var} "${${flag_var}}")
+      endif()
+    endforeach()
   endif()
   append_list_if(COMPILER_RT_HAS_Oy_FLAG /Oy- SANITIZER_COMMON_CFLAGS)
   append_list_if(COMPILER_RT_HAS_GS_FLAG /GS- SANITIZER_COMMON_CFLAGS)
@@ -271,13 +273,15 @@ elseif(COMPILER_RT_HAS_Zi_FLAG)
 endif()
 
 # Turn off several warnings.
-append_list_if(COMPILER_RT_HAS_WNO_GNU_FLAG -Wno-gnu SANITIZER_COMMON_CFLAGS)
-append_list_if(COMPILER_RT_HAS_WNO_VARIADIC_MACROS_FLAG -Wno-variadic-macros SANITIZER_COMMON_CFLAGS)
-append_list_if(COMPILER_RT_HAS_WNO_C99_EXTENSIONS_FLAG -Wno-c99-extensions SANITIZER_COMMON_CFLAGS)
-append_list_if(COMPILER_RT_HAS_WNO_NON_VIRTUAL_DTOR_FLAG -Wno-non-virtual-dtor SANITIZER_COMMON_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WGNU_FLAG -Wno-gnu SANITIZER_COMMON_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WVARIADIC_MACROS_FLAG -Wno-variadic-macros SANITIZER_COMMON_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WC99_EXTENSIONS_FLAG -Wno-c99-extensions SANITIZER_COMMON_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WNON_VIRTUAL_DTOR_FLAG -Wno-non-virtual-dtor SANITIZER_COMMON_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WD4146_FLAG /wd4146 SANITIZER_COMMON_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WD4291_FLAG /wd4291 SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_WD4391_FLAG /wd4391 SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_WD4722_FLAG /wd4722 SANITIZER_COMMON_CFLAGS)
-
+append_list_if(COMPILER_RT_HAS_WD4800_FLAG /wd4800 SANITIZER_COMMON_CFLAGS)
 if(APPLE)
   # Obtain the iOS Simulator SDK path from xcodebuild.
   execute_process(

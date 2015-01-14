@@ -215,8 +215,9 @@ __dfsw_strlen(const char *s, dfsan_label s_label, dfsan_label *ret_label) {
 
 
 static void *dfsan_memcpy(void *dest, const void *src, size_t n) {
-  dfsan_label *sdest = shadow_for(dest), *ssrc = shadow_for((void *)src);
-  internal_memcpy((void *)sdest, (void *)ssrc, n * sizeof(dfsan_label));
+  dfsan_label *sdest = shadow_for(dest);
+  const dfsan_label *ssrc = shadow_for(src);
+  internal_memcpy((void *)sdest, (const void *)ssrc, n * sizeof(dfsan_label));
   return internal_memcpy(dest, src, n);
 }
 
@@ -365,9 +366,11 @@ struct dl_iterate_phdr_info {
 int dl_iterate_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
   dl_iterate_phdr_info *dipi = (dl_iterate_phdr_info *)data;
   dfsan_set_label(0, *info);
-  dfsan_set_label(0, (void *)info->dlpi_name, strlen(info->dlpi_name) + 1);
-  dfsan_set_label(0, (void *)info->dlpi_phdr,
-                  sizeof(*info->dlpi_phdr) * info->dlpi_phnum);
+  dfsan_set_label(0, const_cast<char *>(info->dlpi_name),
+                  strlen(info->dlpi_name) + 1);
+  dfsan_set_label(
+      0, const_cast<char *>(reinterpret_cast<const char *>(info->dlpi_phdr)),
+      sizeof(*info->dlpi_phdr) * info->dlpi_phnum);
   dfsan_label ret_label;
   return dipi->callback_trampoline(dipi->callback, info, size, dipi->data, 0, 0,
                                    0, &ret_label);
@@ -908,7 +911,8 @@ static int format_chunk(char *str, size_t off, bool has_size, size_t size,
 // out which bytes of the output string depends on which argument and thus to
 // propagate labels more precisely.
 static int format_buffer(char *str, bool has_size, size_t size,
-                         const char *format, va_list ap) {
+                         const char *format, dfsan_label *va_labels,
+                         dfsan_label *ret_label, va_list ap) {
   InternalMmapVector<Chunk> chunks(8);
   size_t off = 0;
 
@@ -1055,68 +1059,65 @@ static int format_buffer(char *str, bool has_size, size_t size,
     off += status;
   }
 
-  // Consume the labels of the output buffer, (optional) size, and format
-  // string.
-  //
   // TODO(martignlo): Decide how to combine labels (e.g., whether to ignore or
   // not the label of the format string).
-  va_arg(ap, dfsan_label_va);
-  if (has_size) {
-    va_arg(ap, dfsan_label_va);
-  }
-  va_arg(ap, dfsan_label_va);
 
   // Label each output chunk according to the label supplied as argument to the
   // function. We need to go through all the chunks and arguments even if the
   // string was only partially printed ({v,}snprintf case).
   for (size_t i = 0; i < chunks.size(); ++i) {
     const Chunk& chunk = chunks[i];
+    void *chunk_ptr = const_cast<char *>(chunk.ptr);
 
     switch (chunk.label_type) {
       case Chunk::NONE:
-        dfsan_set_label(0, (void*) chunk.ptr, chunk.size);
+        dfsan_set_label(0, chunk_ptr, chunk.size);
         break;
       case Chunk::IGNORED:
-        va_arg(ap, dfsan_label_va);
-        dfsan_set_label(0, (void*) chunk.ptr, chunk.size);
+        va_labels++;
+        dfsan_set_label(0, chunk_ptr, chunk.size);
         break;
       case Chunk::NUMERIC: {
-        dfsan_label label = va_arg(ap, dfsan_label_va);
-        dfsan_set_label(label, (void*) chunk.ptr, chunk.size);
+        dfsan_label label = *va_labels++;
+        dfsan_set_label(label, chunk_ptr, chunk.size);
         break;
       }
       case Chunk::STRING: {
         // Consume the label of the pointer to the string
-        va_arg(ap, dfsan_label_va);
-        internal_memcpy(shadow_for((void *) chunk.ptr),
-                        shadow_for((void *) chunk.arg),
+        va_labels++;
+        internal_memcpy(shadow_for(chunk_ptr),
+                        shadow_for(chunk.arg),
                         sizeof(dfsan_label) * (strlen(chunk.arg)));
         break;
       }
     }
   }
 
-  dfsan_label *ret_label_ptr = va_arg(ap, dfsan_label *);
-  *ret_label_ptr = 0;
+  *ret_label = 0;
 
   // Number of bytes written in total.
   return off;
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-int __dfsw_sprintf(char *str, const char *format, ...) {
+int __dfsw_sprintf(char *str, const char *format, dfsan_label str_label,
+                   dfsan_label format_label, dfsan_label *va_labels,
+                   dfsan_label *ret_label, ...) {
   va_list ap;
-  va_start(ap, format);
-  int ret = format_buffer(str, false, 0, format, ap);
+  va_start(ap, ret_label);
+  int ret = format_buffer(str, false, 0, format, va_labels, ret_label, ap);
   va_end(ap);
   return ret;
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-int __dfsw_snprintf(char *str, size_t size, const char *format, ...) {
+int __dfsw_snprintf(char *str, size_t size, const char *format,
+                    dfsan_label str_label, dfsan_label size_label,
+                    dfsan_label format_label, dfsan_label *va_labels,
+                    dfsan_label *ret_label, ...) {
   va_list ap;
-  va_start(ap, format);
-  int ret = format_buffer(str, true, size, format, ap);
+  va_start(ap, ret_label);
+  int ret = format_buffer(str, true, size, format, va_labels, ret_label, ap);
   va_end(ap);
   return ret;
 }

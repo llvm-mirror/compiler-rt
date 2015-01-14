@@ -348,7 +348,12 @@ class LLVMSymbolizerProcess : public SymbolizerProcess {
 #else
     const char* const kSymbolizerArch = "--default-arch=unknown";
 #endif
-    execl(path_to_binary, path_to_binary, kSymbolizerArch, (char *)0);
+
+    const char *const inline_flag = common_flags()->symbolize_inline_frames
+                                        ? "--inlining=true"
+                                        : "--inlining=false";
+    execl(path_to_binary, path_to_binary, inline_flag, kSymbolizerArch,
+          (char *)0);
   }
 };
 
@@ -509,7 +514,7 @@ class POSIXSymbolizer : public Symbolizer {
         internal_symbolizer_(internal_symbolizer),
         libbacktrace_symbolizer_(libbacktrace_symbolizer) {}
 
-  uptr SymbolizePC(uptr addr, AddressInfo *frames, uptr max_frames) {
+  uptr SymbolizePC(uptr addr, AddressInfo *frames, uptr max_frames) override {
     BlockingMutexLock l(&mu_);
     if (max_frames == 0)
       return 0;
@@ -577,15 +582,14 @@ class POSIXSymbolizer : public Symbolizer {
     return frame_id;
   }
 
-  bool SymbolizeData(uptr addr, DataInfo *info) {
+  bool SymbolizeData(uptr addr, DataInfo *info) override {
     BlockingMutexLock l(&mu_);
     LoadedModule *module = FindModuleForAddress(addr);
     if (module == 0)
       return false;
     const char *module_name = module->full_name();
     uptr module_offset = addr - module->base_address();
-    internal_memset(info, 0, sizeof(*info));
-    info->address = addr;
+    info->Clear();
     info->module = internal_strdup(module_name);
     info->module_offset = module_offset;
     // First, try to use libbacktrace symbolizer (if it's available).
@@ -605,17 +609,17 @@ class POSIXSymbolizer : public Symbolizer {
   }
 
   bool GetModuleNameAndOffsetForPC(uptr pc, const char **module_name,
-                                   uptr *module_address) {
+                                   uptr *module_address) override {
     BlockingMutexLock l(&mu_);
     return FindModuleNameAndOffsetForAddress(pc, module_name, module_address);
   }
 
-  bool CanReturnFileLineInfo() {
+  bool CanReturnFileLineInfo() override {
     return internal_symbolizer_ != 0 || external_symbolizer_ != 0 ||
            libbacktrace_symbolizer_ != 0;
   }
 
-  void Flush() {
+  void Flush() override {
     BlockingMutexLock l(&mu_);
     if (internal_symbolizer_ != 0) {
       SymbolizerScope sym_scope(this);
@@ -623,7 +627,7 @@ class POSIXSymbolizer : public Symbolizer {
     }
   }
 
-  const char *Demangle(const char *name) {
+  const char *Demangle(const char *name) override {
     BlockingMutexLock l(&mu_);
     // Run hooks even if we don't use internal symbolizer, as cxxabi
     // demangle may call system functions.
@@ -638,7 +642,7 @@ class POSIXSymbolizer : public Symbolizer {
     return DemangleCXXABI(name);
   }
 
-  void PrepareForSandboxing() {
+  void PrepareForSandboxing() override {
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
     BlockingMutexLock l(&mu_);
     // Cache /proc/self/exe on Linux.

@@ -61,6 +61,8 @@ struct CommonFlags {
   const char *suppressions;
   bool print_suppressions;
   bool disable_coredump;
+  bool symbolize_inline_frames;
+  const char *stack_trace_format;
 };
 
 inline CommonFlags *common_flags() {

@@ -16,6 +16,7 @@
 #include "ubsan_flags.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
+#include "sanitizer_common/sanitizer_stacktrace_printer.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 #include <stdio.h>
 
@@ -33,7 +34,7 @@ static void MaybePrintStackTrace(uptr pc, uptr bp) {
   // under ASan).
   if (StackTrace::WillUseFastUnwind(false))
     return;
-  StackTrace stack;
+  BufferedStackTrace stack;
   stack.Unwind(kStackTraceMax, pc, bp, 0, 0, 0, false);
   stack.Print();
 }
@@ -129,14 +130,16 @@ static void renderLocation(Location Loc) {
     if (SLoc.isInvalid())
       LocBuffer.append("<unknown>");
     else
-      PrintSourceLocation(&LocBuffer, SLoc.getFilename(), SLoc.getLine(),
-                          SLoc.getColumn());
+      RenderSourceLocation(&LocBuffer, SLoc.getFilename(), SLoc.getLine(),
+                           SLoc.getColumn(), common_flags()->strip_path_prefix);
     break;
   }
-  case Location::LK_Module:
-    PrintModuleAndOffset(&LocBuffer, Loc.getModuleLocation().getModuleName(),
-                         Loc.getModuleLocation().getOffset());
+  case Location::LK_Module: {
+    ModuleLocation MLoc = Loc.getModuleLocation();
+    RenderModuleLocation(&LocBuffer, MLoc.getModuleName(), MLoc.getOffset(),
+                         common_flags()->strip_path_prefix);
     break;
+  }
   case Location::LK_Memory:
     LocBuffer.append("%p", Loc.getMemoryLocation());
     break;

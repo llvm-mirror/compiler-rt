@@ -1,12 +1,5 @@
 # Build for the AddressSanitizer runtime support library.
 
-if(APPLE)
-# Don't set rpath for the ASan libraries. Developers are encouraged to ship
-# their binaries together with the corresponding ASan runtime libraries,
-# so they'll anyway need to fix the rpath and the install name.
-set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
-endif()
-
 set(ASAN_SOURCES
   asan_allocator2.cc
   asan_activation.cc
@@ -35,10 +28,6 @@ set(ASAN_PREINIT_SOURCES
   asan_preinit.cc)
 
 include_directories(..)
-
-if(ANDROID)
-  include_directories(${COMPILER_RT_EXTRA_ANDROID_HEADERS})
-endif()
 
 set(ASAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 append_no_rtti_flag(ASAN_CFLAGS)

@@ -32,15 +32,18 @@ check_cxx_compiler_flag(-Wall COMPILER_RT_HAS_WALL_FLAG)
 check_cxx_compiler_flag(-Werror COMPILER_RT_HAS_WERROR_FLAG)
 check_cxx_compiler_flag("-Werror -Wframe-larger-than=512" COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG)
 check_cxx_compiler_flag("-Werror -Wglobal-constructors"   COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG)
-check_cxx_compiler_flag("-Werror -Wno-c99-extensions"     COMPILER_RT_HAS_WNO_C99_EXTENSIONS_FLAG)
-check_cxx_compiler_flag("-Werror -Wno-gnu"                COMPILER_RT_HAS_WNO_GNU_FLAG)
-check_cxx_compiler_flag("-Werror -Wno-non-virtual-dtor"   COMPILER_RT_HAS_WNO_NON_VIRTUAL_DTOR_FLAG)
-check_cxx_compiler_flag("-Werror -Wno-variadic-macros"    COMPILER_RT_HAS_WNO_VARIADIC_MACROS_FLAG)
+check_cxx_compiler_flag("-Werror -Wc99-extensions"     COMPILER_RT_HAS_WC99_EXTENSIONS_FLAG)
+check_cxx_compiler_flag("-Werror -Wgnu"                COMPILER_RT_HAS_WGNU_FLAG)
+check_cxx_compiler_flag("-Werror -Wnon-virtual-dtor"   COMPILER_RT_HAS_WNON_VIRTUAL_DTOR_FLAG)
+check_cxx_compiler_flag("-Werror -Wvariadic-macros"    COMPILER_RT_HAS_WVARIADIC_MACROS_FLAG)
 
 check_cxx_compiler_flag(/W3 COMPILER_RT_HAS_W3_FLAG)
 check_cxx_compiler_flag(/WX COMPILER_RT_HAS_WX_FLAG)
+check_cxx_compiler_flag(/wd4146 COMPILER_RT_HAS_WD4146_FLAG)
+check_cxx_compiler_flag(/wd4291 COMPILER_RT_HAS_WD4291_FLAG)
 check_cxx_compiler_flag(/wd4391 COMPILER_RT_HAS_WD4391_FLAG)
 check_cxx_compiler_flag(/wd4722 COMPILER_RT_HAS_WD4722_FLAG)
+check_cxx_compiler_flag(/wd4800 COMPILER_RT_HAS_WD4800_FLAG)
 
 # Symbols.
 check_symbol_exists(__func__ "" COMPILER_RT_HAS_FUNC_SYMBOL)
@@ -131,9 +134,10 @@ else()
     test_target_arch(i386 ${TARGET_32_BIT_CFLAGS})
   elseif("${LLVM_NATIVE_ARCH}" STREQUAL "PowerPC")
     test_target_arch(powerpc64 ${TARGET_64_BIT_CFLAGS})
+    test_target_arch(powerpc64le ${TARGET_64_BIT_CFLAGS})
   elseif("${LLVM_NATIVE_ARCH}" STREQUAL "Mips")
     if("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "mipsel|mips64el")
-      # regex for mipsel, mips64el                                                                                                                                                                                 
+      # regex for mipsel, mips64el
       test_target_arch(mipsel ${TARGET_32_BIT_CFLAGS})
       test_target_arch(mips64el ${TARGET_64_BIT_CFLAGS})
     else()
@@ -150,7 +154,7 @@ else()
   set(COMPILER_RT_OS_SUFFIX "")
 endif()
 
-message("Compiler-RT supported architectures: ${COMPILER_RT_SUPPORTED_ARCH}")
+message(STATUS "Compiler-RT supported architectures: ${COMPILER_RT_SUPPORTED_ARCH}")
 
 # Takes ${ARGN} and puts only supported architectures in @out_var list.
 function(filter_available_targets out_var)
@@ -166,17 +170,18 @@ endfunction()
 
 # Arhcitectures supported by compiler-rt libraries.
 filter_available_targets(SANITIZER_COMMON_SUPPORTED_ARCH
-  x86_64 i386 i686 powerpc64 arm aarch64 mips mips64 mipsel mips64el)
+  x86_64 i386 i686 powerpc64 powerpc64le arm aarch64 mips mips64 mipsel mips64el)
 filter_available_targets(ASAN_SUPPORTED_ARCH
-  x86_64 i386 i686 powerpc64 arm mips mipsel)
+  x86_64 i386 i686 powerpc64 powerpc64le arm mips mipsel mips64 mips64el)
 filter_available_targets(DFSAN_SUPPORTED_ARCH x86_64)
 filter_available_targets(LSAN_SUPPORTED_ARCH x86_64)
 # LSan common files should be available on all architectures supported
 # by other sanitizers (even if they build into dummy object files).
 filter_available_targets(LSAN_COMMON_SUPPORTED_ARCH
   ${SANITIZER_COMMON_SUPPORTED_ARCH})
-filter_available_targets(MSAN_SUPPORTED_ARCH x86_64)
-filter_available_targets(PROFILE_SUPPORTED_ARCH x86_64 i386 i686 arm mips mips64 mipsel mips64el aarch64)
+filter_available_targets(MSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
+filter_available_targets(PROFILE_SUPPORTED_ARCH x86_64 i386 i686 arm mips mips64
+  mipsel mips64el aarch64 powerpc64 powerpc64le)
 filter_available_targets(TSAN_SUPPORTED_ARCH x86_64)
 filter_available_targets(UBSAN_SUPPORTED_ARCH x86_64 i386 i686 arm aarch64 mips mipsel)
 
@@ -238,7 +243,7 @@ else()
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND TSAN_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Linux")
+    OS_NAME MATCHES "Linux|FreeBSD")
   set(COMPILER_RT_HAS_TSAN TRUE)
 else()
   set(COMPILER_RT_HAS_TSAN FALSE)
