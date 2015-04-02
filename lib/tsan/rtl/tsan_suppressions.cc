@@ -21,6 +21,7 @@
 #include "tsan_mman.h"
 #include "tsan_platform.h"
 
+#ifndef SANITIZER_GO
 // Suppressions for true/false positives in standard libraries.
 static const char *const std_suppressions =
 // Libstdc++ 4.4 has data races in std::string.
@@ -33,7 +34,6 @@ static const char *const std_suppressions =
 "race:std::_Sp_counted_ptr_inplace<std::thread::_Impl\n";
 
 // Can be overriden in frontend.
-#ifndef TSAN_GO
 extern "C" const char *WEAK __tsan_default_suppressions() {
   return 0;
 }
@@ -41,92 +41,107 @@ extern "C" const char *WEAK __tsan_default_suppressions() {
 
 namespace __tsan {
 
-static bool suppressions_inited = false;
+ALIGNED(64) static char suppression_placeholder[sizeof(SuppressionContext)];
+static SuppressionContext *suppression_ctx = nullptr;
+static const char *kSuppressionTypes[] = {
+    kSuppressionRace,   kSuppressionMutex, kSuppressionThread,
+    kSuppressionSignal, kSuppressionLib,   kSuppressionDeadlock};
 
 void InitializeSuppressions() {
-  CHECK(!suppressions_inited);
-  SuppressionContext::InitIfNecessary();
-#ifndef TSAN_GO
-  SuppressionContext::Get()->Parse(__tsan_default_suppressions());
-  SuppressionContext::Get()->Parse(std_suppressions);
+  CHECK_EQ(nullptr, suppression_ctx);
+  suppression_ctx = new (suppression_placeholder) // NOLINT
+      SuppressionContext(kSuppressionTypes, ARRAY_SIZE(kSuppressionTypes));
+  suppression_ctx->ParseFromFile(flags()->suppressions);
+#ifndef SANITIZER_GO
+  suppression_ctx->Parse(__tsan_default_suppressions());
+  suppression_ctx->Parse(std_suppressions);
 #endif
-  suppressions_inited = true;
 }
 
-SuppressionType conv(ReportType typ) {
+SuppressionContext *Suppressions() {
+  CHECK(suppression_ctx);
+  return suppression_ctx;
+}
+
+static const char *conv(ReportType typ) {
   if (typ == ReportTypeRace)
-    return SuppressionRace;
+    return kSuppressionRace;
   else if (typ == ReportTypeVptrRace)
-    return SuppressionRace;
+    return kSuppressionRace;
   else if (typ == ReportTypeUseAfterFree)
-    return SuppressionRace;
+    return kSuppressionRace;
   else if (typ == ReportTypeVptrUseAfterFree)
-    return SuppressionRace;
+    return kSuppressionRace;
   else if (typ == ReportTypeThreadLeak)
-    return SuppressionThread;
+    return kSuppressionThread;
   else if (typ == ReportTypeMutexDestroyLocked)
-    return SuppressionMutex;
+    return kSuppressionMutex;
   else if (typ == ReportTypeMutexDoubleLock)
-    return SuppressionMutex;
+    return kSuppressionMutex;
   else if (typ == ReportTypeMutexBadUnlock)
-    return SuppressionMutex;
+    return kSuppressionMutex;
   else if (typ == ReportTypeMutexBadReadLock)
-    return SuppressionMutex;
+    return kSuppressionMutex;
   else if (typ == ReportTypeMutexBadReadUnlock)
-    return SuppressionMutex;
+    return kSuppressionMutex;
   else if (typ == ReportTypeSignalUnsafe)
-    return SuppressionSignal;
+    return kSuppressionSignal;
   else if (typ == ReportTypeErrnoInSignal)
-    return SuppressionNone;
+    return kSuppressionNone;
   else if (typ == ReportTypeDeadlock)
-    return SuppressionDeadlock;
+    return kSuppressionDeadlock;
   Printf("ThreadSanitizer: unknown report type %d\n", typ),
   Die();
 }
 
 uptr IsSuppressed(ReportType typ, const ReportStack *stack, Suppression **sp) {
-  if (!SuppressionContext::Get()->SuppressionCount() || stack == 0 ||
+  CHECK(suppression_ctx);
+  if (!suppression_ctx->SuppressionCount() || stack == 0 ||
       !stack->suppressable)
     return 0;
-  SuppressionType stype = conv(typ);
-  if (stype == SuppressionNone)
+  const char *stype = conv(typ);
+  if (0 == internal_strcmp(stype, kSuppressionNone))
     return 0;
   Suppression *s;
-  for (const ReportStack *frame = stack; frame; frame = frame->next) {
-    if (SuppressionContext::Get()->Match(frame->func, stype, &s) ||
-        SuppressionContext::Get()->Match(frame->file, stype, &s) ||
-        SuppressionContext::Get()->Match(frame->module, stype, &s)) {
+  for (const SymbolizedStack *frame = stack->frames; frame;
+       frame = frame->next) {
+    const AddressInfo &info = frame->info;
+    if (suppression_ctx->Match(info.function, stype, &s) ||
+        suppression_ctx->Match(info.file, stype, &s) ||
+        suppression_ctx->Match(info.module, stype, &s)) {
       DPrintf("ThreadSanitizer: matched suppression '%s'\n", s->templ);
       s->hit_count++;
       *sp = s;
-      return frame->pc;
+      return info.address;
     }
   }
   return 0;
 }
 
 uptr IsSuppressed(ReportType typ, const ReportLocation *loc, Suppression **sp) {
-  if (!SuppressionContext::Get()->SuppressionCount() || loc == 0 ||
+  CHECK(suppression_ctx);
+  if (!suppression_ctx->SuppressionCount() || loc == 0 ||
       loc->type != ReportLocationGlobal || !loc->suppressable)
     return 0;
-  SuppressionType stype = conv(typ);
-  if (stype == SuppressionNone)
+  const char *stype = conv(typ);
+  if (0 == internal_strcmp(stype, kSuppressionNone))
     return 0;
   Suppression *s;
-  if (SuppressionContext::Get()->Match(loc->name, stype, &s) ||
-      SuppressionContext::Get()->Match(loc->file, stype, &s) ||
-      SuppressionContext::Get()->Match(loc->module, stype, &s)) {
+  const DataInfo &global = loc->global;
+  if (suppression_ctx->Match(global.name, stype, &s) ||
+      suppression_ctx->Match(global.module, stype, &s)) {
       DPrintf("ThreadSanitizer: matched suppression '%s'\n", s->templ);
       s->hit_count++;
       *sp = s;
-      return loc->addr;
+      return global.start;
   }
   return 0;
 }
 
 void PrintMatchedSuppressions() {
   InternalMmapVector<Suppression *> matched(1);
-  SuppressionContext::Get()->GetMatched(&matched);
+  CHECK(suppression_ctx);
+  suppression_ctx->GetMatched(&matched);
   if (!matched.size())
     return;
   int hit_count = 0;
@@ -135,8 +150,8 @@ void PrintMatchedSuppressions() {
   Printf("ThreadSanitizer: Matched %d suppressions (pid=%d):\n", hit_count,
          (int)internal_getpid());
   for (uptr i = 0; i < matched.size(); i++) {
-    Printf("%d %s:%s\n", matched[i]->hit_count,
-           SuppressionTypeString(matched[i]->type), matched[i]->templ);
+    Printf("%d %s:%s\n", matched[i]->hit_count, matched[i]->type,
+           matched[i]->templ);
   }
 }
 }  // namespace __tsan

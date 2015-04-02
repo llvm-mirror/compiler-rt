@@ -20,6 +20,8 @@
 #include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
 
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/mman.h>
 
 #if SANITIZER_LINUX
@@ -28,6 +30,13 @@
 
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
 #include <sys/personality.h>
+#endif
+
+#if SANITIZER_FREEBSD
+// The MAP_NORESERVE define has been removed in FreeBSD 11.x, and even before
+// that, it was never implemented.  So just define it to zero.
+#undef  MAP_NORESERVE
+#define MAP_NORESERVE 0
 #endif
 
 namespace __sanitizer {
@@ -40,7 +49,7 @@ uptr GetMmapGranularity() {
 #if SANITIZER_WORDSIZE == 32
 // Take care of unusable kernel area in top gigabyte.
 static uptr GetKernelAreaSize() {
-#if SANITIZER_LINUX
+#if SANITIZER_LINUX && !SANITIZER_X32
   const uptr gbyte = 1UL << 30;
 
   // Firstly check if there are writable segments
@@ -72,23 +81,23 @@ static uptr GetKernelAreaSize() {
   return gbyte;
 #else
   return 0;
-#endif  // SANITIZER_LINUX
+#endif  // SANITIZER_LINUX && !SANITIZER_X32
 }
 #endif  // SANITIZER_WORDSIZE == 32
 
 uptr GetMaxVirtualAddress() {
 #if SANITIZER_WORDSIZE == 64
-# if defined(__powerpc64__) && defined(__BIG_ENDIAN__)
+# if defined(__powerpc64__) || defined(__aarch64__)
   // On PowerPC64 we have two different address space layouts: 44- and 46-bit.
   // We somehow need to figure out which one we are using now and choose
   // one of 0x00000fffffffffffUL and 0x00003fffffffffffUL.
   // Note that with 'ulimit -s unlimited' the stack is moved away from the top
   // of the address space, so simply checking the stack address is not enough.
-  return (1ULL << 44) - 1;  // 0x00000fffffffffffUL
-# elif defined(__powerpc64__) && defined(__LITTLE_ENDIAN__)
-  return (1ULL << 46) - 1;  // 0x00003fffffffffffUL
-# elif defined(__aarch64__)
-  return (1ULL << 39) - 1;
+  // This should (does) work for both PowerPC64 Endian modes.
+  // Similarly, aarch64 has multiple address space layouts: 39, 42 and 47-bit.
+  return (1ULL << (MostSignificantSetBitIndex(GET_CURRENT_FRAME()) + 1)) - 1;
+# elif defined(__mips64)
+  return (1ULL << 40) - 1;  // 0x000000ffffffffffUL;
 # else
   return (1ULL << 47) - 1;  // 0x00007fffffffffffUL;
 # endif
@@ -196,8 +205,18 @@ void *Mprotect(uptr fixed_addr, uptr size) {
                                MAP_NORESERVE, -1, 0);
 }
 
+uptr OpenFile(const char *filename, FileAccessMode mode) {
+  int flags;
+  switch (mode) {
+    case RdOnly: flags = O_RDONLY; break;
+    case WrOnly: flags = O_WRONLY | O_CREAT; break;
+    case RdWr: flags = O_RDWR | O_CREAT; break;
+  }
+  return internal_open(filename, flags, 0660);
+}
+
 void *MapFileToMemory(const char *file_name, uptr *buff_size) {
-  uptr openrv = OpenFile(file_name, false);
+  uptr openrv = OpenFile(file_name, RdOnly);
   CHECK(!internal_iserror(openrv));
   fd_t fd = openrv;
   uptr fsize = internal_filesize(fd);
@@ -212,9 +231,10 @@ void *MapWritableFileToMemory(void *addr, uptr size, uptr fd, uptr offset) {
   uptr flags = MAP_SHARED;
   if (addr) flags |= MAP_FIXED;
   uptr p = internal_mmap(addr, size, PROT_READ | PROT_WRITE, flags, fd, offset);
-  if (internal_iserror(p)) {
-    Printf("could not map writable file (%zd, %zu, %zu): %zd\n", fd, offset,
-           size, p);
+  int mmap_errno = 0;
+  if (internal_iserror(p, &mmap_errno)) {
+    Printf("could not map writable file (%zd, %zu, %zu): %zd, errno: %d\n",
+           fd, offset, size, p, mmap_errno);
     return 0;
   }
   return (void *)p;
@@ -237,7 +257,8 @@ bool MemoryRangeIsAvailable(uptr range_start, uptr range_end) {
   while (proc_maps.Next(&start, &end,
                         /*offset*/0, /*filename*/0, /*filename_size*/0,
                         /*protection*/0)) {
-    if (!IntervalsAreSeparate(start, end, range_start, range_end))
+    CHECK_NE(0, end);
+    if (!IntervalsAreSeparate(start, end - 1, range_start, range_end))
       return false;
   }
   return true;
@@ -285,45 +306,28 @@ char *FindPathToBinary(const char *name) {
   return 0;
 }
 
-void MaybeOpenReportFile() {
-  if (!log_to_file) return;
-  uptr pid = internal_getpid();
-  // If in tracer, use the parent's file.
-  if (pid == stoptheworld_tracer_pid)
-    pid = stoptheworld_tracer_ppid;
-  if (report_fd_pid == pid) return;
-  InternalScopedBuffer<char> report_path_full(4096);
-  internal_snprintf(report_path_full.data(), report_path_full.size(),
-                    "%s.%zu", report_path_prefix, pid);
-  uptr openrv = OpenFile(report_path_full.data(), true);
-  if (internal_iserror(openrv)) {
-    report_fd = kStderrFd;
-    log_to_file = false;
-    Report("ERROR: Can't open file: %s\n", report_path_full.data());
-    Die();
-  }
-  if (report_fd != kInvalidFd) {
-    // We're in the child. Close the parent's log.
-    internal_close(report_fd);
-  }
-  report_fd = openrv;
-  report_fd_pid = pid;
+bool IsPathSeparator(const char c) {
+  return c == '/';
 }
 
-void RawWrite(const char *buffer) {
-  static const char *kRawWriteError =
-      "RawWrite can't output requested buffer!\n";
-  uptr length = (uptr)internal_strlen(buffer);
-  MaybeOpenReportFile();
-  if (length != internal_write(report_fd, buffer, length)) {
-    internal_write(report_fd, kRawWriteError, internal_strlen(kRawWriteError));
+bool IsAbsolutePath(const char *path) {
+  return path != nullptr && IsPathSeparator(path[0]);
+}
+
+void ReportFile::Write(const char *buffer, uptr length) {
+  SpinMutexLock l(mu);
+  static const char *kWriteError =
+      "ReportFile::Write() can't output requested buffer!\n";
+  ReopenIfNecessary();
+  if (length != internal_write(fd, buffer, length)) {
+    internal_write(fd, kWriteError, internal_strlen(kWriteError));
     Die();
   }
 }
 
 bool GetCodeRangeForFile(const char *module, uptr *start, uptr *end) {
   uptr s, e, off, prot;
-  InternalScopedString buff(4096);
+  InternalScopedString buff(kMaxPathLength);
   MemoryMappingLayout proc_maps(/*cache_enabled*/false);
   while (proc_maps.Next(&s, &e, &off, buff.data(), buff.size(), &prot)) {
     if ((prot & MemoryMappingLayout::kProtectionExecute) != 0
@@ -334,6 +338,13 @@ bool GetCodeRangeForFile(const char *module, uptr *start, uptr *end) {
     }
   }
   return false;
+}
+
+SignalContext SignalContext::Create(void *siginfo, void *context) {
+  uptr addr = (uptr)((siginfo_t*)siginfo)->si_addr;
+  uptr pc, sp, bp;
+  GetPcSpBp(context, &pc, &sp, &bp);
+  return SignalContext(context, addr, pc, sp, bp);
 }
 
 }  // namespace __sanitizer

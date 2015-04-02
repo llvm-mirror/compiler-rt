@@ -1,7 +1,7 @@
-// RUN: %clang_dfsan -m64 %s -o %t && DFSAN_OPTIONS="strict_data_dependencies=0" %run %t
-// RUN: %clang_dfsan -mllvm -dfsan-args-abi -m64 %s -o %t && DFSAN_OPTIONS="strict_data_dependencies=0" %run %t
-// RUN: %clang_dfsan -DSTRICT_DATA_DEPENDENCIES -m64 %s -o %t && %run %t
-// RUN: %clang_dfsan -DSTRICT_DATA_DEPENDENCIES -mllvm -dfsan-args-abi -m64 %s -o %t && %run %t
+// RUN: %clang_dfsan %s -o %t && DFSAN_OPTIONS="strict_data_dependencies=0" %run %t
+// RUN: %clang_dfsan -mllvm -dfsan-args-abi %s -o %t && DFSAN_OPTIONS="strict_data_dependencies=0" %run %t
+// RUN: %clang_dfsan -DSTRICT_DATA_DEPENDENCIES %s -o %t && %run %t
+// RUN: %clang_dfsan -DSTRICT_DATA_DEPENDENCIES -mllvm -dfsan-args-abi %s -o %t && %run %t
 
 // Tests custom implementations of various glibc functions.
 
@@ -810,6 +810,11 @@ void test_sprintf() {
 
   // Test formatting (no conversion specifier).
   assert(sprintf(buf, "Hello world!") == 12);
+  assert(strcmp(buf, "Hello world!") == 0);
+  ASSERT_READ_LABEL(buf, sizeof(buf), 0);
+
+  // Test for extra arguments.
+  assert(sprintf(buf, "Hello world!", 42, "hello") == 12);
   assert(strcmp(buf, "Hello world!") == 0);
   ASSERT_READ_LABEL(buf, sizeof(buf), 0);
 

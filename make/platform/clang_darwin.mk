@@ -6,31 +6,37 @@
 
 Description := Static runtime libraries for clang/Darwin.
 
-# A function that ensures we don't try to build for architectures that we
-# don't have working toolchains for.
+# A function that ensures we don't try to build for architectures and SDKs
+# that we don't have working toolchains for. Arguments:
+# (1): List of architectures
+# (2): Library name
+# (3): SDK path
+# The result is a possibly empty subset of the architectures from argument 1.
 CheckArches = \
   $(shell \
     result=""; \
-    for arch in $(1); do \
-      if $(CC) -arch $$arch -c \
-          -integrated-as \
-          $(ProjSrcRoot)/make/platform/clang_darwin_test_input.c \
-          -isysroot $(ProjSrcRoot)/SDKs/darwin \
-          -o /dev/null > /dev/null 2> /dev/null; then \
-        if $(LD) -v 2>&1 | grep "configured to support" \
-           | tr ' ' '\n' | grep "^$$arch$$" >/dev/null 2>/dev/null; then \
-          result="$$result$$arch "; \
+    if [ "X$(3)" != X ]; then \
+      for arch in $(1); do \
+        if $(CC) -arch $$arch -c \
+            -integrated-as \
+            $(ProjSrcRoot)/make/platform/clang_darwin_test_input.c \
+            -isysroot $(3) \
+            -o /dev/null > /dev/null 2> /dev/null; then \
+          if $(LD) -v 2>&1 | grep "configured to support" \
+             | tr ' ' '\n' | grep "^$$arch$$" >/dev/null 2>/dev/null; then \
+            result="$$result$$arch "; \
+          else \
+            printf 1>&2 \
+            "warning: clang_darwin.mk: dropping arch '$$arch' from lib '$(2)'";\
+            printf 1>&2 " (ld does not support it)\n"; \
+          fi; \
         else \
           printf 1>&2 \
-            "warning: clang_darwin.mk: dropping arch '$$arch' from lib '$(2)'"; \
-          printf 1>&2 " (ld does not support it)\n"; \
+           "warning: clang_darwin.mk: dropping arch '$$arch' from lib '$(2)'"; \
+          printf 1>&2 " (clang does not support it)\n"; \
         fi; \
-      else \
-        printf 1>&2 \
-          "warning: clang_darwin.mk: dropping arch '$$arch' from lib '$(2)'"; \
-        printf 1>&2 " (clang does not support it)\n"; \
-      fi; \
-    done; \
+      done; \
+    fi; \
     echo $$result)
 
 XCRun = \
@@ -38,10 +44,14 @@ XCRun = \
     result=`xcrun -find $(1) 2> /dev/null`; \
     if [ "$$?" != "0" ]; then result=$(1); fi; \
     echo $$result)
+# Prefer building with the internal SDKs.
 XCRunSdkPath = \
   $(shell \
-    result=`xcrun --sdk $(1) --show-sdk-path 2> /dev/null`; \
-    if [ "$$?" != "0" ]; then result=""; fi; \
+    result=`xcrun --sdk $(1).internal --show-sdk-path 2> /dev/null`; \
+    if [ "$$?" != "0" ]; then \
+      result=`xcrun --sdk $(1) --show-sdk-path 2> /dev/null`; \
+      if [ "$$?" != "0" ]; then result=""; fi; \
+    fi; \
     echo $$result)
 ###
 
@@ -53,6 +63,10 @@ STRIP    := $(call XCRun,strip)
 LIPO     := $(call XCRun,lipo)
 DSYMUTIL := $(call XCRun,dsymutil)
 
+OSX_SDK := $(call XCRunSdkPath,macosx)
+IOS_SDK := $(call XCRunSdkPath,iphoneos)
+IOSSIM_SDK := $(call XCRunSdkPath,iphonesimulator)
+
 Configs :=
 UniversalArchs :=
 
@@ -60,51 +74,56 @@ UniversalArchs :=
 # still be referenced from Darwin system headers. This symbol is only ever
 # needed on i386.
 Configs += eprintf
-UniversalArchs.eprintf := $(call CheckArches,i386,eprintf)
+UniversalArchs.eprintf := $(call CheckArches,i386,eprintf,$(OSX_SDK))
 
 # Configuration for targeting 10.4. We need a few functions missing from
 # libgcc_s.10.4.dylib. We only build x86 slices since clang doesn't really
 # support targeting PowerPC.
 Configs += 10.4
-UniversalArchs.10.4 := $(call CheckArches,i386 x86_64,10.4)
+UniversalArchs.10.4 := $(call CheckArches,i386 x86_64,10.4,$(OSX_SDK))
 
 # Configuration for targeting iOS for a couple of functions that didn't
 # make it into libSystem.
 Configs += ios
-UniversalArchs.ios := $(call CheckArches,i386 x86_64 x86_64h armv7 arm64,ios)
+UniversalArchs.ios := $(call CheckArches,i386 x86_64,ios,$(IOSSIM_SDK))
+UniversalArchs.ios += $(call CheckArches,armv7 arm64,ios,$(IOS_SDK))
 
 # Configuration for targeting OSX. These functions may not be in libSystem
 # so we should provide our own.
 Configs += osx
-UniversalArchs.osx := $(call CheckArches,i386 x86_64 x86_64h,osx)
+UniversalArchs.osx := $(call CheckArches,i386 x86_64 x86_64h,osx,$(OSX_SDK))
 
 # Configuration for use with kernel/kexts.
 Configs += cc_kext
-UniversalArchs.cc_kext := $(call CheckArches,armv7 arm64 i386 x86_64 x86_64h,cc_kext)
+UniversalArchs.cc_kext := $(call CheckArches,i386 x86_64 x86_64h,cc_kext,$(OSX_SDK))
+UniversalArchs.cc_kext += $(call CheckArches,armv7 arm64,cc_kext,$(IOS_SDK))
 
 # Configuration for use with kernel/kexts for iOS 5.0 and earlier (which used 
-# a different code generation strategy).
+# a different code generation strategy). Note: the x86_64 slice is unused but
+# it avoids build problems (see pr14013).
 Configs += cc_kext_ios5
-UniversalArchs.cc_kext_ios5 := $(call CheckArches,x86_64 x86_64h armv7,cc_kext_ios5)
+UniversalArchs.cc_kext_ios5 := $(call CheckArches,x86_64,cc_kext_ios5,$(IOSSIM_SDK))
+UniversalArchs.cc_kext_ios5 += $(call CheckArches,armv7,cc_kext_ios5,$(IOS_SDK))
 
 # Configurations which define the profiling support functions.
 Configs += profile_osx
-UniversalArchs.profile_osx := $(call CheckArches,i386 x86_64 x86_64h,profile_osx)
+UniversalArchs.profile_osx := $(call CheckArches,i386 x86_64 x86_64h,profile_osx,$(OSX_SDK))
 Configs += profile_ios
-UniversalArchs.profile_ios := $(call CheckArches,i386 x86_64 x86_64h armv7 arm64,profile_ios)
+UniversalArchs.profile_ios := $(call CheckArches,i386 x86_64,profile_ios,$(IOSSIM_SDK))
+UniversalArchs.profile_ios += $(call CheckArches,armv7 arm64,profile_ios,$(IOS_SDK))
 
 # Configurations which define the ASAN support functions.
 Configs += asan_osx_dynamic
-UniversalArchs.asan_osx_dynamic := $(call CheckArches,i386 x86_64 x86_64h,asan_osx_dynamic)
+UniversalArchs.asan_osx_dynamic := $(call CheckArches,i386 x86_64 x86_64h,asan_osx_dynamic,$(OSX_SDK))
 
-IOSSIM_SDK_PATH := $(call XCRunSdkPath,iphonesimulator)
-ifneq ($(IOSSIM_SDK_PATH),)
 Configs += asan_iossim_dynamic
-UniversalArchs.asan_iossim_dynamic := $(call CheckArches,i386 x86_64 x86_64h,asan_iossim_dynamic)
-endif
+UniversalArchs.asan_iossim_dynamic := $(call CheckArches,i386 x86_64,asan_iossim_dynamic,$(IOSSIM_SDK))
 
-Configs += ubsan_osx
-UniversalArchs.ubsan_osx := $(call CheckArches,i386 x86_64 x86_64h,ubsan_osx)
+Configs += ubsan_osx_dynamic
+UniversalArchs.ubsan_osx_dynamic := $(call CheckArches,i386 x86_64 x86_64h,ubsan_osx_dynamic,$(OSX_SDK))
+
+Configs += ubsan_iossim_dynamic
+UniversalArchs.ubsan_iossim_dynamic := $(call CheckArches,i386 x86_64,ubsan_iossim_dynamic,$(IOSSIM_SDK))
 
 # Darwin 10.6 has a bug in cctools that makes it unable to use ranlib on our ARM
 # object files. If we are on that platform, strip out all ARM archs. We still
@@ -119,16 +138,17 @@ endif
 
 # If RC_SUPPORTED_ARCHS is defined, treat it as a list of the architectures we
 # are intended to support and limit what we try to build to that.
-#
-# We make sure to remove empty configs if we end up dropping all the requested
-# archs for a particular config.
 ifneq ($(RC_SUPPORTED_ARCHS),)
 $(foreach config,$(Configs),\
   $(call Set,UniversalArchs.$(config),\
-	$(filter $(RC_SUPPORTED_ARCHS),$(UniversalArchs.$(config))))\
-  $(if $(UniversalArchs.$(config)),,\
-	$(call Set,Configs,$(filter-out $(config),$(Configs)))))
+	$(filter $(RC_SUPPORTED_ARCHS),$(UniversalArchs.$(config)))))
 endif
+
+# Remove empty configs if we end up dropping all the requested
+# archs for a particular config.
+$(foreach config,$(Configs),\
+  $(if $(strip $(UniversalArchs.$(config))),,\
+	$(call Set,Configs,$(filter-out $(config),$(Configs)))))
 
 ###
 
@@ -147,32 +167,42 @@ IOS_DEPLOYMENT_ARGS := -mios-version-min=1.0
 IOS6_DEPLOYMENT_ARGS := -mios-version-min=6.0
 IOSSIM_DEPLOYMENT_ARGS := -mios-simulator-version-min=1.0
 
-# Use our stub SDK as the sysroot to support more portable building.
-OSX_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
-IOS_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
-IOS6_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
-IOSSIM_DEPLOYMENT_ARGS += -isysroot $(ProjSrcRoot)/SDKs/darwin
+OSX_DEPLOYMENT_ARGS += -isysroot $(OSX_SDK)
+IOS_DEPLOYMENT_ARGS += -isysroot $(IOS_SDK)
+IOS6_DEPLOYMENT_ARGS += -isysroot $(IOS_SDK)
+IOSSIM_DEPLOYMENT_ARGS += -isysroot $(IOSSIM_SDK)
 
 CFLAGS.eprintf		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.10.4		:= $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
-# FIXME: We can't build ASAN with our stub SDK yet.
+
+SANITIZER_MACOSX_DEPLOYMENT_ARGS := -mmacosx-version-min=10.7
+SANITIZER_IOSSIM_DEPLOYMENT_ARGS := -mios-simulator-version-min=7.0 \
+  -isysroot $(IOSSIM_SDK)
+SANITIZER_CFLAGS := -fno-builtin -gline-tables-only -stdlib=libc++
+
 CFLAGS.asan_osx_dynamic := \
-	$(CFLAGS) -mmacosx-version-min=10.7 -fno-builtin \
-	-gline-tables-only \
-	-DMAC_INTERPOSE_FUNCTIONS=1
+	$(CFLAGS) $(SANITIZER_MACOSX_DEPLOYMENT_ARGS) \
+	$(SANITIZER_CFLAGS) \
+	-DMAC_INTERPOSE_FUNCTIONS=1 \
+	-DASAN_DYNAMIC=1
 
 CFLAGS.asan_iossim_dynamic := \
-	$(CFLAGS) -mios-simulator-version-min=7.0 \
-        -isysroot $(IOSSIM_SDK_PATH) \
-        -fno-builtin \
-	-gline-tables-only \
-	-DMAC_INTERPOSE_FUNCTIONS=1
+	$(CFLAGS) $(SANITIZER_IOSSIM_DEPLOYMENT_ARGS) \
+	$(SANITIZER_CFLAGS) \
+	-DMAC_INTERPOSE_FUNCTIONS=1 \
+	-DASAN_DYNAMIC=1
 
-CFLAGS.ubsan_osx := $(CFLAGS) -mmacosx-version-min=10.6 -fno-builtin
+CFLAGS.ubsan_osx_dynamic := \
+	$(CFLAGS) $(SANITIZER_MACOSX_DEPLOYMENT_ARGS) \
+	$(SANITIZER_CFLAGS)
+
+CFLAGS.ubsan_iossim_dynamic := \
+	$(CFLAGS) $(SANITIZER_IOSSIM_DEPLOYMENT_ARGS) \
+	$(SANITIZER_CFLAGS)
+
 
 CFLAGS.ios.i386		:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.ios.x86_64	:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
-CFLAGS.ios.x86_64h	:= $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.ios.armv7	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.ios.armv7k	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.ios.armv7s	:= $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
@@ -195,23 +225,35 @@ CFLAGS.profile_osx.x86_64  := $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.profile_osx.x86_64h := $(CFLAGS) $(OSX_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.i386    := $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.x86_64  := $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
-CFLAGS.profile_ios.x86_64h := $(CFLAGS) $(IOSSIM_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.armv7  := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.armv7k := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.armv7s := $(CFLAGS) $(IOS_DEPLOYMENT_ARGS)
 CFLAGS.profile_ios.arm64  := $(CFLAGS) $(IOS6_DEPLOYMENT_ARGS)
 
-# Configure the asan_osx_dynamic library to be built shared.
-SHARED_LIBRARY.asan_osx_dynamic := 1
-LDFLAGS.asan_osx_dynamic := -lstdc++ -undefined dynamic_lookup
+SANITIZER_LDFLAGS := -stdlib=libc++ -lc++
 
-# Configure the asan_iossim_dynamic library to be built shared.
+SHARED_LIBRARY.asan_osx_dynamic := 1
+LDFLAGS.asan_osx_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_osx_dynamic.dylib \
+  $(SANITIZER_MACOSX_DEPLOYMENT_ARGS)
+
 SHARED_LIBRARY.asan_iossim_dynamic := 1
-# configure+make uses Clang, so we're using isysroot instead of --sysroot
-# or -Wl,-syslibroot.
-LDFLAGS.asan_iossim_dynamic := -undefined dynamic_lookup \
-  -Wl,-ios_simulator_version_min,7.0.0 \
-  -mios-simulator-version-min=7.0 -isysroot $(IOSSIM_SDK_PATH)
+LDFLAGS.asan_iossim_dynamic := $(SANITIZER_LDFLAGS) -install_name @rpath/libclang_rt.asan_iossim_dynamic.dylib \
+  -Wl,-ios_simulator_version_min,7.0.0 $(SANITIZER_IOSSIM_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.ubsan_osx_dynamic := 1
+LDFLAGS.ubsan_osx_dynamic := $(SANITIZER_LDFLAGS) -lc++abi -install_name @rpath/libclang_rt.ubsan_osx_dynamic.dylib \
+  $(SANITIZER_MACOSX_DEPLOYMENT_ARGS)
+
+SHARED_LIBRARY.ubsan_iossim_dynamic := 1
+LDFLAGS.ubsan_iossim_dynamic := $(SANITIZER_LDFLAGS) -lc++abi -install_name @rpath/libclang_rt.ubsan_iossim_dynamic.dylib \
+  -Wl,-ios_simulator_version_min,7.0.0 $(SANITIZER_IOSSIM_DEPLOYMENT_ARGS)
+
+ifneq ($(OSX_SDK),)
+CFLAGS.asan_osx_dynamic += -isysroot $(OSX_SDK)
+LDFLAGS.asan_osx_dynamic += -isysroot $(OSX_SDK)
+CFLAGS.ubsan_osx_dynamic += -isysroot $(OSX_SDK)
+LDFLAGS.ubsan_osx_dynamic += -isysroot $(OSX_SDK)
+endif
 
 FUNCTIONS.eprintf := eprintf
 FUNCTIONS.10.4 := eprintf floatundidf floatundisf floatundixf
@@ -221,7 +263,6 @@ FUNCTIONS.ios	    := divmodsi4 udivmodsi4 mulosi4 mulodi4 muloti4
 FUNCTIONS.ios.i386    := $(FUNCTIONS.ios) \
                          divsi3 udivsi3
 FUNCTIONS.ios.x86_64  := $(FUNCTIONS.ios.i386)
-FUNCTIONS.ios.x86_64h := $(FUNCTIONS.ios.x86_64)
 FUNCTIONS.ios.arm64   := mulsc3 muldc3 divsc3 divdc3
 
 FUNCTIONS.osx	:= mulosi4 mulodi4 muloti4
@@ -234,17 +275,26 @@ FUNCTIONS.profile_ios := $(FUNCTIONS.profile_osx)
 FUNCTIONS.asan_osx_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
                               $(InterceptionFunctions) \
                               $(SanitizerCommonFunctions) \
-	                      $(AsanDynamicFunctions)
+                              $(AsanDynamicFunctions)
 
 FUNCTIONS.asan_iossim_dynamic := $(AsanFunctions) $(AsanCXXFunctions) \
                                  $(InterceptionFunctions) \
                                  $(SanitizerCommonFunctions) \
-	                         $(AsanDynamicFunctions)
+                                 $(AsanDynamicFunctions)
 
-FUNCTIONS.ubsan_osx := $(UbsanFunctions) $(UbsanCXXFunctions) \
-                       $(SanitizerCommonFunctions)
+FUNCTIONS.ubsan_osx_dynamic := $(UbsanFunctions) $(UbsanCXXFunctions) \
+                               $(SanitizerCommonFunctions)
+
+FUNCTIONS.ubsan_iossim_dynamic := $(UbsanFunctions) $(UbsanCXXFunctions) \
+                                  $(SanitizerCommonFunctions)
+
+CCKEXT_PROFILE_FUNCTIONS := \
+	InstrProfiling \
+	InstrProfilingBuffer \
+	InstrProfilingPlatformDarwin
 
 CCKEXT_COMMON_FUNCTIONS := \
+	$(CCKEXT_PROFILE_FUNCTIONS) \
 	absvdi2 \
 	absvsi2 \
 	addvdi3 \
@@ -389,10 +439,17 @@ CCKEXT_ARMVFP_FUNCTIONS := $(CCKEXT_ARM_FUNCTIONS) \
 	unorddf2vfp \
 	unordsf2vfp
 
+CCKEXT_ARM64_FUNCTIONS := \
+	$(CCKEXT_PROFILE_FUNCTIONS) \
+	divdc3 \
+	divsc3 \
+	muldc3 \
+	mulsc3
+
 FUNCTIONS.cc_kext.armv7 := $(CCKEXT_ARMVFP_FUNCTIONS)
 FUNCTIONS.cc_kext.armv7k := $(CCKEXT_ARMVFP_FUNCTIONS)
 FUNCTIONS.cc_kext.armv7s := $(CCKEXT_ARMVFP_FUNCTIONS)
-FUNCTIONS.cc_kext.arm64 := mulsc3 muldc3 divsc3 divdc3
+FUNCTIONS.cc_kext.arm64 := $(CCKEXT_ARM64_FUNCTIONS)
 FUNCTIONS.cc_kext_ios5.armv7 := $(CCKEXT_ARMVFP_FUNCTIONS)
 FUNCTIONS.cc_kext_ios5.armv7k := $(CCKEXT_ARMVFP_FUNCTIONS)
 FUNCTIONS.cc_kext_ios5.armv7s := $(CCKEXT_ARMVFP_FUNCTIONS)

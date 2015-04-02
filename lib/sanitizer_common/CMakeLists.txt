@@ -7,6 +7,7 @@ set(SANITIZER_SOURCES
   sanitizer_deadlock_detector1.cc
   sanitizer_deadlock_detector2.cc
   sanitizer_flags.cc
+  sanitizer_flag_parser.cc
   sanitizer_libc.cc
   sanitizer_libignore.cc
   sanitizer_linux.cc
@@ -22,9 +23,11 @@ set(SANITIZER_SOURCES
   sanitizer_procmaps_mac.cc
   sanitizer_stackdepot.cc
   sanitizer_stacktrace.cc
+  sanitizer_stacktrace_printer.cc
   sanitizer_suppressions.cc
   sanitizer_symbolizer.cc
   sanitizer_symbolizer_libbacktrace.cc
+  sanitizer_symbolizer_mac.cc
   sanitizer_symbolizer_win.cc
   sanitizer_tls_get_addr.cc
   sanitizer_thread_registry.cc
@@ -40,6 +43,7 @@ set(SANITIZER_LIBCDEP_SOURCES
   sanitizer_stoptheworld_linux_libcdep.cc
   sanitizer_symbolizer_libcdep.cc
   sanitizer_symbolizer_posix_libcdep.cc
+  sanitizer_symbolizer_process_libcdep.cc
   sanitizer_unwind_posix_libcdep.cc)
 
 # Explicitly list all sanitizer_common headers. Not all of these are
@@ -62,7 +66,10 @@ set(SANITIZER_HEADERS
   sanitizer_common_syscalls.inc
   sanitizer_deadlock_detector.h
   sanitizer_deadlock_detector_interface.h
+  sanitizer_flag_parser.h
   sanitizer_flags.h
+  sanitizer_flags.inc
+  sanitizer_interface_internal.h
   sanitizer_internal_defs.h
   sanitizer_lfstack.h
   sanitizer_libc.h
@@ -82,10 +89,14 @@ set(SANITIZER_HEADERS
   sanitizer_stackdepot.h
   sanitizer_stackdepotbase.h
   sanitizer_stacktrace.h
+  sanitizer_stacktrace_printer.h
   sanitizer_stoptheworld.h
   sanitizer_suppressions.h
   sanitizer_symbolizer.h
+  sanitizer_symbolizer_internal.h
   sanitizer_symbolizer_libbacktrace.h
+  sanitizer_symbolizer_mac.h
+  sanitizer_symbolizer_win.h
   sanitizer_syscall_generic.inc
   sanitizer_syscall_linux_x86_64.inc
   sanitizer_thread_registry.h)
@@ -103,11 +114,10 @@ endif()
 set(SANITIZER_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 append_no_rtti_flag(SANITIZER_CFLAGS)
 
-# Stack frames on PowerPC are much larger than anticipated.
-if(NOT ${LLVM_NATIVE_ARCH} STREQUAL "PowerPC")
-  append_list_if(COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG -Wframe-larger-than=512 SANITIZER_CFLAGS)
-endif()
-append_list_if(COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG -Wglobal-constructors SANITIZER_CFLAGS)
+append_list_if(SANITIZER_LIMIT_FRAME_SIZE -Wframe-larger-than=512
+               SANITIZER_CFLAGS)
+append_list_if(COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG -Wglobal-constructors
+               SANITIZER_CFLAGS)
 
 add_custom_target(sanitizer_common)
 set(SANITIZER_RUNTIME_LIBRARIES)
@@ -132,12 +142,6 @@ else()
       DEFS ${SANITIZER_COMMON_DEFINITIONS})
     list(APPEND SANITIZER_RUNTIME_LIBRARIES RTSanitizerCommon.${arch}
                                             RTSanitizerCommonLibc.${arch})
-    add_compiler_rt_runtime(clang_rt.san-${arch} ${arch} STATIC
-      SOURCES $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
-              $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>
-      CFLAGS ${SANITIZER_CFLAGS}
-      DEFS ${SANITIZER_COMMON_DEFINITIONS})
-    add_dependencies(sanitizer_common clang_rt.san-${arch})
   endforeach()
 endif()
 

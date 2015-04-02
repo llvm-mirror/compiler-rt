@@ -1,4 +1,4 @@
-// RUN: %clangxx_msan -m64 -O0 %s -o %t && %run %t
+// RUN: %clangxx_msan -O0 %s -o %t && %run %t
 
 // Check that strlen() and similar intercepted functions can be called on shadow
 // memory.
@@ -9,7 +9,11 @@
 #include <string.h>
 
 const char *mem_to_shadow(const char *p) {
+#if defined(__x86_64__)
   return (char *)((uintptr_t)p & ~0x400000000000ULL);
+#elif defined (__mips64)
+  return (char *)((uintptr_t)p & ~0x4000000000ULL);
+#endif
 }
 
 int main(void) {

@@ -9,7 +9,7 @@
 //
 // This file is a part of ThreadSanitizer (TSan), a race detector.
 //
-// Linux-specific code.
+// Linux- and FreeBSD-specific code.
 //===----------------------------------------------------------------------===//
 
 
@@ -63,7 +63,8 @@ void *__libc_stack_end = 0;
 
 namespace __tsan {
 
-const uptr kPageSize = 4096;
+static uptr g_data_start;
+static uptr g_data_end;
 
 enum {
   MemTotal  = 0,
@@ -77,22 +78,26 @@ enum {
   MemCount  = 8,
 };
 
-void FillProfileCallback(uptr start, uptr rss, bool file,
+void FillProfileCallback(uptr p, uptr rss, bool file,
                          uptr *mem, uptr stats_size) {
   mem[MemTotal] += rss;
-  start >>= 40;
-  if (start < 0x10)
+  if (p >= kShadowBeg && p < kShadowEnd)
     mem[MemShadow] += rss;
-  else if (start >= 0x20 && start < 0x30)
-    mem[file ? MemFile : MemMmap] += rss;
-  else if (start >= 0x30 && start < 0x40)
+  else if (p >= kMetaShadowBeg && p < kMetaShadowEnd)
     mem[MemMeta] += rss;
-  else if (start >= 0x7e)
-    mem[file ? MemFile : MemMmap] += rss;
-  else if (start >= 0x60 && start < 0x62)
-    mem[MemTrace] += rss;
-  else if (start >= 0x7d && start < 0x7e)
+#ifndef SANITIZER_GO
+  else if (p >= kHeapMemBeg && p < kHeapMemEnd)
     mem[MemHeap] += rss;
+  else if (p >= kLoAppMemBeg && p < kLoAppMemEnd)
+    mem[file ? MemFile : MemMmap] += rss;
+  else if (p >= kHiAppMemBeg && p < kHiAppMemEnd)
+    mem[file ? MemFile : MemMmap] += rss;
+#else
+  else if (p >= kAppMemBeg && p < kAppMemEnd)
+    mem[file ? MemFile : MemMmap] += rss;
+#endif
+  else if (p >= kTraceMemBeg && p < kTraceMemEnd)
+    mem[MemTrace] += rss;
   else
     mem[MemOther] += rss;
 }
@@ -111,38 +116,11 @@ void WriteMemoryProfile(char *buf, uptr buf_size, uptr nthread, uptr nlive) {
       nlive, nthread);
 }
 
-uptr GetRSS() {
-  uptr fd = OpenFile("/proc/self/statm", false);
-  if ((sptr)fd < 0)
-    return 0;
-  char buf[64];
-  uptr len = internal_read(fd, buf, sizeof(buf) - 1);
-  internal_close(fd);
-  if ((sptr)len <= 0)
-    return 0;
-  buf[len] = 0;
-  // The format of the file is:
-  // 1084 89 69 11 0 79 0
-  // We need the second number which is RSS in 4K units.
-  char *pos = buf;
-  // Skip the first number.
-  while (*pos >= '0' && *pos <= '9')
-    pos++;
-  // Skip whitespaces.
-  while (!(*pos >= '0' && *pos <= '9') && *pos != 0)
-    pos++;
-  // Read the number.
-  uptr rss = 0;
-  while (*pos >= '0' && *pos <= '9')
-    rss = rss * 10 + *pos++ - '0';
-  return rss * 4096;
-}
-
 #if SANITIZER_LINUX
 void FlushShadowMemoryCallback(
     const SuspendedThreadsList &suspended_threads_list,
     void *argument) {
-  FlushUnneededShadowMemory(kLinuxShadowBeg, kLinuxShadowEnd - kLinuxShadowBeg);
+  FlushUnneededShadowMemory(kShadowBeg, kShadowEnd - kShadowBeg);
 }
 #endif
 
@@ -152,7 +130,7 @@ void FlushShadowMemory() {
 #endif
 }
 
-#ifndef TSAN_GO
+#ifndef SANITIZER_GO
 static void ProtectRange(uptr beg, uptr end) {
   CHECK_LE(beg, end);
   if (beg == end)
@@ -193,7 +171,7 @@ static void MapRodata() {
     *p = kShadowRodata;
   internal_write(fd, marker.data(), marker.size());
   // Map the file into memory.
-  uptr page = internal_mmap(0, kPageSize, PROT_READ | PROT_WRITE,
+  uptr page = internal_mmap(0, GetPageSizeCached(), PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANONYMOUS, fd, 0);
   if (internal_iserror(page)) {
     internal_close(fd);
@@ -223,95 +201,69 @@ static void MapRodata() {
 
 void InitializeShadowMemory() {
   // Map memory shadow.
-  uptr shadow = (uptr)MmapFixedNoReserve(kLinuxShadowBeg,
-    kLinuxShadowEnd - kLinuxShadowBeg);
-  if (shadow != kLinuxShadowBeg) {
+  uptr shadow = (uptr)MmapFixedNoReserve(kShadowBeg,
+    kShadowEnd - kShadowBeg);
+  if (shadow != kShadowBeg) {
     Printf("FATAL: ThreadSanitizer can not mmap the shadow memory\n");
     Printf("FATAL: Make sure to compile with -fPIE and "
-               "to link with -pie (%p, %p).\n", shadow, kLinuxShadowBeg);
+               "to link with -pie (%p, %p).\n", shadow, kShadowBeg);
     Die();
   }
   // This memory range is used for thread stacks and large user mmaps.
   // Frequently a thread uses only a small part of stack and similarly
   // a program uses a small part of large mmap. On some programs
   // we see 20% memory usage reduction without huge pages for this range.
-#ifdef MADV_NOHUGEPAGE
-  madvise((void*)MemToShadow(0x7f0000000000ULL),
-      0x10000000000ULL * kShadowMultiplier, MADV_NOHUGEPAGE);
+  // FIXME: don't use constants here.
+#if defined(__x86_64__)
+  const uptr kMadviseRangeBeg  = 0x7f0000000000ull;
+  const uptr kMadviseRangeSize = 0x010000000000ull;
+#elif defined(__mips64)
+  const uptr kMadviseRangeBeg  = 0xff00000000ull;
+  const uptr kMadviseRangeSize = 0x0100000000ull;
 #endif
+  NoHugePagesInRegion(MemToShadow(kMadviseRangeBeg),
+                      kMadviseRangeSize * kShadowMultiplier);
+  if (common_flags()->use_madv_dontdump)
+    DontDumpShadowMemory(kShadowBeg, kShadowEnd - kShadowBeg);
   DPrintf("memory shadow: %zx-%zx (%zuGB)\n",
-      kLinuxShadowBeg, kLinuxShadowEnd,
-      (kLinuxShadowEnd - kLinuxShadowBeg) >> 30);
+      kShadowBeg, kShadowEnd,
+      (kShadowEnd - kShadowBeg) >> 30);
 
   // Map meta shadow.
-  if (MemToMeta(kLinuxAppMemBeg) < (u32*)kMetaShadow) {
-    Printf("ThreadSanitizer: bad meta shadow (%p -> %p < %p)\n",
-        kLinuxAppMemBeg, MemToMeta(kLinuxAppMemBeg), kMetaShadow);
-    Die();
-  }
-  if (MemToMeta(kLinuxAppMemEnd) >= (u32*)(kMetaShadow + kMetaSize)) {
-    Printf("ThreadSanitizer: bad meta shadow (%p -> %p >= %p)\n",
-        kLinuxAppMemEnd, MemToMeta(kLinuxAppMemEnd), kMetaShadow + kMetaSize);
-    Die();
-  }
-  uptr meta = (uptr)MmapFixedNoReserve(kMetaShadow, kMetaSize);
-  if (meta != kMetaShadow) {
+  uptr meta_size = kMetaShadowEnd - kMetaShadowBeg;
+  uptr meta = (uptr)MmapFixedNoReserve(kMetaShadowBeg, meta_size);
+  if (meta != kMetaShadowBeg) {
     Printf("FATAL: ThreadSanitizer can not mmap the shadow memory\n");
     Printf("FATAL: Make sure to compile with -fPIE and "
-               "to link with -pie (%p, %p).\n", meta, kMetaShadow);
+               "to link with -pie (%p, %p).\n", meta, kMetaShadowBeg);
     Die();
   }
+  if (common_flags()->use_madv_dontdump)
+    DontDumpShadowMemory(meta, meta_size);
   DPrintf("meta shadow: %zx-%zx (%zuGB)\n",
-      kMetaShadow, kMetaShadow + kMetaSize, kMetaSize >> 30);
-
-  // Protect gaps.
-  const uptr kClosedLowBeg  = 0x200000;
-  const uptr kClosedLowEnd  = kLinuxShadowBeg - 1;
-  const uptr kClosedMidBeg = kLinuxShadowEnd + 1;
-  const uptr kClosedMidEnd = min(min(kLinuxAppMemBeg, kTraceMemBegin),
-      kMetaShadow);
-
-  ProtectRange(kClosedLowBeg, kClosedLowEnd);
-  ProtectRange(kClosedMidBeg, kClosedMidEnd);
-  VPrintf(2, "kClosedLow   %zx-%zx (%zuGB)\n",
-      kClosedLowBeg, kClosedLowEnd, (kClosedLowEnd - kClosedLowBeg) >> 30);
-  VPrintf(2, "kClosedMid   %zx-%zx (%zuGB)\n",
-      kClosedMidBeg, kClosedMidEnd, (kClosedMidEnd - kClosedMidBeg) >> 30);
-  VPrintf(2, "app mem: %zx-%zx (%zuGB)\n",
-      kLinuxAppMemBeg, kLinuxAppMemEnd,
-      (kLinuxAppMemEnd - kLinuxAppMemBeg) >> 30);
-  VPrintf(2, "stack: %zx\n", (uptr)&shadow);
+      meta, meta + meta_size, meta_size >> 30);
 
   MapRodata();
-}
-#endif
-
-static uptr g_data_start;
-static uptr g_data_end;
-
-#ifndef TSAN_GO
-static void CheckPIE() {
-  // Ensure that the binary is indeed compiled with -pie.
-  MemoryMappingLayout proc_maps(true);
-  uptr start, end;
-  if (proc_maps.Next(&start, &end,
-                     /*offset*/0, /*filename*/0, /*filename_size*/0,
-                     /*protection*/0)) {
-    if ((u64)start < kLinuxAppMemBeg) {
-      Printf("FATAL: ThreadSanitizer can not mmap the shadow memory ("
-             "something is mapped at 0x%zx < 0x%zx)\n",
-             start, kLinuxAppMemBeg);
-      Printf("FATAL: Make sure to compile with -fPIE"
-             " and to link with -pie.\n");
-      Die();
-    }
-  }
 }
 
 static void InitDataSeg() {
   MemoryMappingLayout proc_maps(true);
   uptr start, end, offset;
   char name[128];
+#if SANITIZER_FREEBSD
+  // On FreeBSD BSS is usually the last block allocated within the
+  // low range and heap is the last block allocated within the range
+  // 0x800000000-0x8ffffffff.
+  while (proc_maps.Next(&start, &end, &offset, name, ARRAY_SIZE(name),
+                        /*protection*/ 0)) {
+    DPrintf("%p-%p %p %s\n", start, end, offset, name);
+    if ((start & 0xffff00000000ULL) == 0 && (end & 0xffff00000000ULL) == 0 &&
+        name[0] == '\0') {
+      g_data_start = start;
+      g_data_end = end;
+    }
+  }
+#else
   bool prev_is_data = false;
   while (proc_maps.Next(&start, &end, &offset, name, ARRAY_SIZE(name),
                         /*protection*/ 0)) {
@@ -327,13 +279,39 @@ static void InitDataSeg() {
       g_data_end = end;
     prev_is_data = is_data;
   }
+#endif
   DPrintf("guessed data_start=%p data_end=%p\n",  g_data_start, g_data_end);
   CHECK_LT(g_data_start, g_data_end);
   CHECK_GE((uptr)&g_data_start, g_data_start);
   CHECK_LT((uptr)&g_data_start, g_data_end);
 }
 
-#endif  // #ifndef TSAN_GO
+static void CheckAndProtect() {
+  // Ensure that the binary is indeed compiled with -pie.
+  MemoryMappingLayout proc_maps(true);
+  uptr p, end;
+  while (proc_maps.Next(&p, &end, 0, 0, 0, 0)) {
+    if (IsAppMem(p))
+      continue;
+    if (p >= kHeapMemEnd &&
+        p < HeapEnd())
+      continue;
+    if (p >= kVdsoBeg)  // vdso
+      break;
+    Printf("FATAL: ThreadSanitizer: unexpected memory mapping %p-%p\n", p, end);
+    Die();
+  }
+
+  ProtectRange(kLoAppMemEnd, kShadowBeg);
+  ProtectRange(kShadowEnd, kMetaShadowBeg);
+  ProtectRange(kMetaShadowEnd, kTraceMemBeg);
+  // Memory for traces is mapped lazily in MapThreadTrace.
+  // Protect the whole range for now, so that user does not map something here.
+  ProtectRange(kTraceMemBeg, kTraceMemEnd);
+  ProtectRange(kTraceMemEnd, kHeapMemBeg);
+  ProtectRange(HeapEnd(), kHiAppMemBeg);
+}
+#endif  // #ifndef SANITIZER_GO
 
 void InitializePlatform() {
   DisableCoreDumperIfNecessary();
@@ -367,8 +345,8 @@ void InitializePlatform() {
       ReExec();
   }
 
-#ifndef TSAN_GO
-  CheckPIE();
+#ifndef SANITIZER_GO
+  CheckAndProtect();
   InitTlsSize();
   InitDataSeg();
 #endif
@@ -378,7 +356,7 @@ bool IsGlobalVar(uptr addr) {
   return g_data_start && addr >= g_data_start && addr < g_data_end;
 }
 
-#ifndef TSAN_GO
+#ifndef SANITIZER_GO
 // Extract file descriptors passed to glibc internal __res_iclose function.
 // This is required to properly "close" the fds, because we do not see internal
 // closes within glibc. The code is a pure hack.
@@ -431,4 +409,4 @@ int call_pthread_cancel_with_cleanup(int(*fn)(void *c, void *m,
 
 }  // namespace __tsan
 
-#endif  // SANITIZER_LINUX
+#endif  // SANITIZER_LINUX || SANITIZER_FREEBSD

@@ -13,6 +13,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ubsan_platform.h"
+#if CAN_SANITIZE_UB
 #include "ubsan_handlers_cxx.h"
 #include "ubsan_diag.h"
 #include "ubsan_type_hash.h"
@@ -36,8 +38,7 @@ static void HandleDynamicTypeCacheMiss(
 
   // Check if error report should be suppressed.
   DynamicTypeInfo DTI = getDynamicTypeInfo((void*)Pointer);
-  if (DTI.isValid() &&
-      MatchSuppression(DTI.getMostDerivedTypeName(), SuppressionVptrCheck))
+  if (DTI.isValid() && IsVptrCheckSuppressed(DTI.getMostDerivedTypeName()))
     return;
 
   SourceLocation Loc = Data->Loc.acquire();
@@ -80,3 +81,5 @@ void __ubsan::__ubsan_handle_dynamic_type_cache_miss_abort(
   GET_REPORT_OPTIONS(true);
   HandleDynamicTypeCacheMiss(Data, Pointer, Hash, Opts);
 }
+
+#endif  // CAN_SANITIZE_UB

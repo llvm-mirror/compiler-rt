@@ -1,6 +1,8 @@
+include(CMakePushCheckState)
 include(CheckCXXCompilerFlag)
 include(CheckLibraryExists)
 include(CheckSymbolExists)
+include(TestBigEndian)
 
 # CodeGen options.
 check_cxx_compiler_flag(-fPIC                COMPILER_RT_HAS_FPIC_FLAG)
@@ -16,6 +18,8 @@ check_cxx_compiler_flag(-ffreestanding       COMPILER_RT_HAS_FFREESTANDING_FLAG)
 check_cxx_compiler_flag("-Werror -fno-function-sections" COMPILER_RT_HAS_FNO_FUNCTION_SECTIONS_FLAG)
 check_cxx_compiler_flag(-std=c++11           COMPILER_RT_HAS_STD_CXX11_FLAG)
 check_cxx_compiler_flag(-ftls-model=initial-exec COMPILER_RT_HAS_FTLS_MODEL_INITIAL_EXEC)
+check_cxx_compiler_flag(-fno-lto             COMPILER_RT_HAS_FNO_LTO_FLAG)
+check_cxx_compiler_flag(-msse3               COMPILER_RT_HAS_MSSE3_FLAG)
 
 check_cxx_compiler_flag(/GR COMPILER_RT_HAS_GR_FLAG)
 check_cxx_compiler_flag(/GS COMPILER_RT_HAS_GS_FLAG)
@@ -26,21 +30,24 @@ check_cxx_compiler_flag(/Oy COMPILER_RT_HAS_Oy_FLAG)
 check_cxx_compiler_flag(-gline-tables-only COMPILER_RT_HAS_GLINE_TABLES_ONLY_FLAG)
 check_cxx_compiler_flag(-g COMPILER_RT_HAS_G_FLAG)
 check_cxx_compiler_flag(/Zi COMPILER_RT_HAS_Zi_FLAG)
- 
+
 # Warnings.
 check_cxx_compiler_flag(-Wall COMPILER_RT_HAS_WALL_FLAG)
 check_cxx_compiler_flag(-Werror COMPILER_RT_HAS_WERROR_FLAG)
 check_cxx_compiler_flag("-Werror -Wframe-larger-than=512" COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG)
 check_cxx_compiler_flag("-Werror -Wglobal-constructors"   COMPILER_RT_HAS_WGLOBAL_CONSTRUCTORS_FLAG)
-check_cxx_compiler_flag("-Werror -Wno-c99-extensions"     COMPILER_RT_HAS_WNO_C99_EXTENSIONS_FLAG)
-check_cxx_compiler_flag("-Werror -Wno-gnu"                COMPILER_RT_HAS_WNO_GNU_FLAG)
-check_cxx_compiler_flag("-Werror -Wno-non-virtual-dtor"   COMPILER_RT_HAS_WNO_NON_VIRTUAL_DTOR_FLAG)
-check_cxx_compiler_flag("-Werror -Wno-variadic-macros"    COMPILER_RT_HAS_WNO_VARIADIC_MACROS_FLAG)
+check_cxx_compiler_flag("-Werror -Wc99-extensions"     COMPILER_RT_HAS_WC99_EXTENSIONS_FLAG)
+check_cxx_compiler_flag("-Werror -Wgnu"                COMPILER_RT_HAS_WGNU_FLAG)
+check_cxx_compiler_flag("-Werror -Wnon-virtual-dtor"   COMPILER_RT_HAS_WNON_VIRTUAL_DTOR_FLAG)
+check_cxx_compiler_flag("-Werror -Wvariadic-macros"    COMPILER_RT_HAS_WVARIADIC_MACROS_FLAG)
 
 check_cxx_compiler_flag(/W3 COMPILER_RT_HAS_W3_FLAG)
 check_cxx_compiler_flag(/WX COMPILER_RT_HAS_WX_FLAG)
+check_cxx_compiler_flag(/wd4146 COMPILER_RT_HAS_WD4146_FLAG)
+check_cxx_compiler_flag(/wd4291 COMPILER_RT_HAS_WD4291_FLAG)
 check_cxx_compiler_flag(/wd4391 COMPILER_RT_HAS_WD4391_FLAG)
 check_cxx_compiler_flag(/wd4722 COMPILER_RT_HAS_WD4722_FLAG)
+check_cxx_compiler_flag(/wd4800 COMPILER_RT_HAS_WD4800_FLAG)
 
 # Symbols.
 check_symbol_exists(__func__ "" COMPILER_RT_HAS_FUNC_SYMBOL)
@@ -64,19 +71,39 @@ set(COMPILER_RT_SUPPORTED_ARCH)
 set(SIMPLE_SOURCE ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/simple.cc)
 file(WRITE ${SIMPLE_SOURCE} "#include <stdlib.h>\n#include <limits>\nint main() {}\n")
 
-# test_target_arch(<arch> <target flags...>)
-# Sets the target flags for a given architecture and determines if this
-# architecture is supported by trying to build a simple file.
-macro(test_target_arch arch)
+function(check_compile_definition def argstring out_var)
+  if("${def}" STREQUAL "")
+    set(${out_var} TRUE PARENT_SCOPE)
+    return()
+  endif()
+  cmake_push_check_state()
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${argstring}")
+  check_symbol_exists(${def} "" ${out_var})
+  cmake_pop_check_state()
+endfunction()
+
+# test_target_arch(<arch> <def> <target flags...>)
+# Checks if architecture is supported: runs host compiler with provided
+# flags to verify that:
+#   1) <def> is defined (if non-empty)
+#   2) simple file can be successfully built.
+# If successful, saves target flags for this architecture.
+macro(test_target_arch arch def)
   set(TARGET_${arch}_CFLAGS ${ARGN})
-  set(argstring "${CMAKE_EXE_LINKER_FLAGS}")
+  set(argstring "")
   foreach(arg ${ARGN})
     set(argstring "${argstring} ${arg}")
   endforeach()
-  try_compile(CAN_TARGET_${arch} ${CMAKE_BINARY_DIR} ${SIMPLE_SOURCE}
-              COMPILE_DEFINITIONS "${TARGET_${arch}_CFLAGS}"
-              OUTPUT_VARIABLE TARGET_${arch}_OUTPUT
-              CMAKE_FLAGS "-DCMAKE_EXE_LINKER_FLAGS:STRING=${argstring}")
+  check_compile_definition("${def}" "${argstring}" HAS_${arch}_DEF)
+  if(NOT HAS_${arch}_DEF)
+    set(CAN_TARGET_${arch} FALSE)
+  else()
+    set(argstring "${CMAKE_EXE_LINKER_FLAGS} ${argstring}")
+    try_compile(CAN_TARGET_${arch} ${CMAKE_BINARY_DIR} ${SIMPLE_SOURCE}
+                COMPILE_DEFINITIONS "${TARGET_${arch}_CFLAGS}"
+                OUTPUT_VARIABLE TARGET_${arch}_OUTPUT
+                CMAKE_FLAGS "-DCMAKE_EXE_LINKER_FLAGS:STRING=${argstring}")
+  endif()
   if(${CAN_TARGET_${arch}})
     list(APPEND COMPILER_RT_SUPPORTED_ARCH ${arch})
   elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "${arch}")
@@ -117,6 +144,13 @@ macro(detect_target_arch)
   endif()
 endmacro()
 
+# Detect whether the current target platform is 32-bit or 64-bit, and setup
+# the correct commandline flags needed to attempt to target 32-bit and 64-bit.
+if (NOT CMAKE_SIZEOF_VOID_P EQUAL 4 AND
+    NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  message(FATAL_ERROR "Please use architecture with 4 or 8 byte pointers.")
+endif()
+
 # Generate the COMPILER_RT_SUPPORTED_ARCH list.
 if(ANDROID)
   # Can't rely on LLVM_NATIVE_ARCH in cross-compilation.
@@ -125,32 +159,43 @@ if(ANDROID)
   set(COMPILER_RT_OS_SUFFIX "-android")
 else()
   if("${LLVM_NATIVE_ARCH}" STREQUAL "X86")
-    if (NOT MSVC)
-      test_target_arch(x86_64 ${TARGET_64_BIT_CFLAGS})
+    if(NOT MSVC)
+      test_target_arch(x86_64 "" "-m64")
+      # FIXME: We build runtimes for both i686 and i386, as "clang -m32" may
+      # target different variant than "$CMAKE_C_COMPILER -m32". This part should
+      # be gone after we resolve PR14109.
+      test_target_arch(i686 __i686__ "-m32")
+      test_target_arch(i386 __i386__ "-m32")
+    else()
+      test_target_arch(i386 "" "")
     endif()
-    test_target_arch(i386 ${TARGET_32_BIT_CFLAGS})
   elseif("${LLVM_NATIVE_ARCH}" STREQUAL "PowerPC")
-    test_target_arch(powerpc64 ${TARGET_64_BIT_CFLAGS})
+    TEST_BIG_ENDIAN(HOST_IS_BIG_ENDIAN)
+    if(HOST_IS_BIG_ENDIAN)
+      test_target_arch(powerpc64 "" "-m64")
+    else()
+      test_target_arch(powerpc64le "" "-m64")
+    endif()
   elseif("${LLVM_NATIVE_ARCH}" STREQUAL "Mips")
     if("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "mipsel|mips64el")
-      # regex for mipsel, mips64el                                                                                                                                                                                 
-      test_target_arch(mipsel ${TARGET_32_BIT_CFLAGS})
-      test_target_arch(mips64el ${TARGET_64_BIT_CFLAGS})
+      # regex for mipsel, mips64el
+      test_target_arch(mipsel "" "-m32")
+      test_target_arch(mips64el "" "-m64")
     else()
-      test_target_arch(mips ${TARGET_32_BIT_CFLAGS})
-      test_target_arch(mips64 ${TARGET_64_BIT_CFLAGS})
+      test_target_arch(mips "" "-m32")
+      test_target_arch(mips64 "" "-m64")
     endif()
   elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "arm")
-    test_target_arch(arm "-march=armv7-a")
+    test_target_arch(arm "" "-march=armv7-a")
   elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "aarch32")
-    test_target_arch(aarch32 "-march=armv8-a")
+    test_target_arch(aarch32 "" "-march=armv8-a")
   elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "aarch64")
-    test_target_arch(aarch64 "-march=aarch64")
+    test_target_arch(aarch64 "" "-march=armv8-a")
   endif()
   set(COMPILER_RT_OS_SUFFIX "")
 endif()
 
-message("Compiler-RT supported architectures: ${COMPILER_RT_SUPPORTED_ARCH}")
+message(STATUS "Compiler-RT supported architectures: ${COMPILER_RT_SUPPORTED_ARCH}")
 
 # Takes ${ARGN} and puts only supported architectures in @out_var list.
 function(filter_available_targets out_var)
@@ -164,21 +209,31 @@ function(filter_available_targets out_var)
   set(${out_var} ${archs} PARENT_SCOPE)
 endfunction()
 
-# Arhcitectures supported by compiler-rt libraries.
+function(get_target_flags_for_arch arch out_var)
+  list(FIND COMPILER_RT_SUPPORTED_ARCH ${arch} ARCH_INDEX)
+  if(ARCH_INDEX EQUAL -1)
+    message(FATAL_ERROR "Unsupported architecture: ${arch}")
+  else()
+    set(${out_var} ${TARGET_${arch}_CFLAGS} PARENT_SCOPE)
+  endif()
+endfunction()
+
+# Architectures supported by compiler-rt libraries.
 filter_available_targets(SANITIZER_COMMON_SUPPORTED_ARCH
-  x86_64 i386 i686 powerpc64 arm aarch64 mips mips64 mipsel mips64el)
-filter_available_targets(ASAN_SUPPORTED_ARCH
-  x86_64 i386 i686 powerpc64 arm mips mipsel)
-filter_available_targets(DFSAN_SUPPORTED_ARCH x86_64)
-filter_available_targets(LSAN_SUPPORTED_ARCH x86_64)
+  x86_64 i386 i686 powerpc64 powerpc64le arm aarch64 mips mips64 mipsel mips64el)
 # LSan common files should be available on all architectures supported
 # by other sanitizers (even if they build into dummy object files).
 filter_available_targets(LSAN_COMMON_SUPPORTED_ARCH
   ${SANITIZER_COMMON_SUPPORTED_ARCH})
-filter_available_targets(MSAN_SUPPORTED_ARCH x86_64)
-filter_available_targets(PROFILE_SUPPORTED_ARCH x86_64 i386 i686 arm mips mips64 mipsel mips64el aarch64)
-filter_available_targets(TSAN_SUPPORTED_ARCH x86_64)
-filter_available_targets(UBSAN_SUPPORTED_ARCH x86_64 i386 i686 arm aarch64 mips mipsel)
+filter_available_targets(ASAN_SUPPORTED_ARCH
+  x86_64 i386 i686 powerpc64 powerpc64le arm mips mipsel mips64 mips64el)
+filter_available_targets(DFSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
+filter_available_targets(LSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
+filter_available_targets(MSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
+filter_available_targets(PROFILE_SUPPORTED_ARCH x86_64 i386 i686 arm mips mips64
+  mipsel mips64el aarch64 powerpc64 powerpc64le)
+filter_available_targets(TSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
+filter_available_targets(UBSAN_SUPPORTED_ARCH x86_64 i386 i686 arm aarch64 mips mipsel mips64 mips64el)
 
 if(ANDROID)
   set(OS_NAME "Android")
@@ -200,6 +255,12 @@ else()
   set(COMPILER_RT_HAS_ASAN FALSE)
 endif()
 
+if (OS_NAME MATCHES "Linux|FreeBSD|Windows")
+  set(COMPILER_RT_ASAN_HAS_STATIC_RUNTIME TRUE)
+else()
+  set(COMPILER_RT_ASAN_HAS_STATIC_RUNTIME FALSE)
+endif()
+
 # TODO: Add builtins support.
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND DFSAN_SUPPORTED_ARCH AND
@@ -214,13 +275,6 @@ if (COMPILER_RT_HAS_SANITIZER_COMMON AND LSAN_SUPPORTED_ARCH AND
   set(COMPILER_RT_HAS_LSAN TRUE)
 else()
   set(COMPILER_RT_HAS_LSAN FALSE)
-endif()
-
-if (COMPILER_RT_HAS_SANITIZER_COMMON AND LSAN_COMMON_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Darwin|Linux|FreeBSD|Android")
-  set(COMPILER_RT_HAS_LSAN_COMMON TRUE)
-else()
-  set(COMPILER_RT_HAS_LSAN_COMMON FALSE)
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND MSAN_SUPPORTED_ARCH AND
@@ -238,7 +292,7 @@ else()
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND TSAN_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Linux")
+    OS_NAME MATCHES "Linux|FreeBSD")
   set(COMPILER_RT_HAS_TSAN TRUE)
 else()
   set(COMPILER_RT_HAS_TSAN FALSE)

@@ -20,6 +20,7 @@
 #include <windows.h>
 #include <dbghelp.h>
 #include <io.h>
+#include <psapi.h>
 #include <stdlib.h>
 
 #include "sanitizer_common.h"
@@ -122,18 +123,34 @@ void *MmapNoReserveOrDie(uptr size, const char *mem_type) {
 }
 
 void *Mprotect(uptr fixed_addr, uptr size) {
-  return VirtualAlloc((LPVOID)fixed_addr, size,
-                      MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+  void *res = VirtualAlloc((LPVOID)fixed_addr, size,
+                           MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+  if (res == 0)
+    Report("WARNING: %s failed to "
+           "mprotect %p (%zd) bytes at %p (error code: %d)\n",
+           SanitizerToolName, size, size, fixed_addr, GetLastError());
+  return res;
 }
 
 void FlushUnneededShadowMemory(uptr addr, uptr size) {
   // This is almost useless on 32-bits.
-  // FIXME: add madvice-analog when we move to 64-bits.
+  // FIXME: add madvise-analog when we move to 64-bits.
+}
+
+void NoHugePagesInRegion(uptr addr, uptr size) {
+  // FIXME: probably similar to FlushUnneededShadowMemory.
+}
+
+void DontDumpShadowMemory(uptr addr, uptr length) {
+  // This is almost useless on 32-bits.
+  // FIXME: add madvise-analog when we move to 64-bits.
 }
 
 bool MemoryRangeIsAvailable(uptr range_start, uptr range_end) {
-  // FIXME: shall we do anything here on Windows?
-  return true;
+  MEMORY_BASIC_INFORMATION mbi;
+  CHECK(VirtualQuery((void *)range_start, &mbi, sizeof(mbi)));
+  return mbi.Protect == PAGE_NOACCESS &&
+         (uptr)mbi.BaseAddress + mbi.RegionSize >= range_end;
 }
 
 void *MapFileToMemory(const char *file_name, uptr *buff_size) {
@@ -187,9 +204,80 @@ u32 GetUid() {
   UNIMPLEMENTED();
 }
 
-void DumpProcessMap() {
-  UNIMPLEMENTED();
+namespace {
+struct ModuleInfo {
+  HMODULE handle;
+  uptr base_address;
+  uptr end_address;
+};
+
+int CompareModulesBase(const void *pl, const void *pr) {
+  const ModuleInfo &l = *(ModuleInfo *)pl, &r = *(ModuleInfo *)pr;
+  if (l.base_address < r.base_address)
+    return -1;
+  return l.base_address > r.base_address;
 }
+}  // namespace
+
+#ifndef SANITIZER_GO
+void DumpProcessMap() {
+  Report("Dumping process modules:\n");
+  HANDLE cur_process = GetCurrentProcess();
+
+  // Query the list of modules.  Start by assuming there are no more than 256
+  // modules and retry if that's not sufficient.
+  ModuleInfo *modules;
+  size_t num_modules;
+  {
+    HMODULE *hmodules = 0;
+    uptr modules_buffer_size = sizeof(HMODULE) * 256;
+    DWORD bytes_required;
+    while (!hmodules) {
+      hmodules = (HMODULE *)MmapOrDie(modules_buffer_size, __FUNCTION__);
+      CHECK(EnumProcessModules(cur_process, hmodules, modules_buffer_size,
+                               &bytes_required));
+      if (bytes_required > modules_buffer_size) {
+        // Either there turned out to be more than 256 hmodules, or new hmodules
+        // could have loaded since the last try.  Retry.
+        UnmapOrDie(hmodules, modules_buffer_size);
+        hmodules = 0;
+        modules_buffer_size = bytes_required;
+      }
+    }
+
+    num_modules = bytes_required / sizeof(HMODULE);
+    modules =
+        (ModuleInfo *)MmapOrDie(num_modules * sizeof(ModuleInfo), __FUNCTION__);
+    for (size_t i = 0; i < num_modules; ++i) {
+      modules[i].handle = hmodules[i];
+      MODULEINFO mi;
+      if (!GetModuleInformation(cur_process, hmodules[i], &mi, sizeof(mi)))
+        continue;
+      modules[i].base_address = (uptr)mi.lpBaseOfDll;
+      modules[i].end_address = (uptr)mi.lpBaseOfDll + mi.SizeOfImage;
+    }
+    UnmapOrDie(hmodules, modules_buffer_size);
+  }
+
+  qsort(modules, num_modules, sizeof(ModuleInfo), CompareModulesBase);
+
+  for (size_t i = 0; i < num_modules; ++i) {
+    const ModuleInfo &mi = modules[i];
+    char module_name[MAX_PATH];
+    bool got_module_name = GetModuleFileNameA(
+        mi.handle, module_name, sizeof(module_name));
+    if (mi.end_address != 0) {
+      Printf("\t%p-%p %s\n", mi.base_address, mi.end_address,
+             got_module_name ? module_name : "[no name]");
+    } else if (got_module_name) {
+      Printf("\t??\?-??? %s\n", module_name);
+    } else {
+      Printf("\t???\n");
+    }
+  }
+  UnmapOrDie(modules, num_modules * sizeof(ModuleInfo));
+}
+#endif
 
 void DisableCoreDumperIfNecessary() {
   // Do nothing.
@@ -225,6 +313,19 @@ char *FindPathToBinary(const char *name) {
   return 0;
 }
 
+uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
+  // Nothing here for now.
+  return 0;
+}
+
+bool IsPathSeparator(const char c) {
+  return c == '\\' || c == '/';
+}
+
+bool IsAbsolutePath(const char *path) {
+  UNIMPLEMENTED();
+}
+
 void SleepForSeconds(int seconds) {
   Sleep(seconds * 1000);
 }
@@ -238,8 +339,9 @@ u64 NanoTime() {
 }
 
 void Abort() {
-  abort();
-  internal__exit(-1);  // abort is not NORETURN on Windows.
+  if (::IsDebuggerPresent())
+    __debugbreak();
+  internal__exit(3);
 }
 
 uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
@@ -279,7 +381,7 @@ uptr internal_open(const char *filename, int flags, u32 mode) {
   UNIMPLEMENTED();
 }
 
-uptr OpenFile(const char *filename, bool write) {
+uptr OpenFile(const char *filename, FileAccessMode mode) {
   UNIMPLEMENTED();
 }
 
@@ -375,6 +477,13 @@ uptr internal_rename(const char *oldpath, const char *newpath) {
   UNIMPLEMENTED();
 }
 
+uptr GetRSS() {
+  return 0;
+}
+
+void *internal_start_thread(void (*func)(void *arg), void *arg) { return 0; }
+void internal_join_thread(void *th) { }
+
 // ---------------------- BlockingMutex ---------------- {{{1
 const uptr LOCK_UNINITIALIZED = 0;
 const uptr LOCK_READY = (uptr)-1;
@@ -444,7 +553,7 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
 }
 
 #if !SANITIZER_GO
-void StackTrace::SlowUnwindStack(uptr pc, uptr max_depth) {
+void BufferedStackTrace::SlowUnwindStack(uptr pc, u32 max_depth) {
   CHECK_GE(max_depth, 2);
   // FIXME: CaptureStackBackTrace might be too slow for us.
   // FIXME: Compare with StackWalk64.
@@ -459,8 +568,8 @@ void StackTrace::SlowUnwindStack(uptr pc, uptr max_depth) {
   PopStackFrames(pc_location);
 }
 
-void StackTrace::SlowUnwindStackWithContext(uptr pc, void *context,
-                                            uptr max_depth) {
+void BufferedStackTrace::SlowUnwindStackWithContext(uptr pc, void *context,
+                                                    u32 max_depth) {
   CONTEXT ctx = *(CONTEXT *)context;
   STACKFRAME64 stack_frame;
   memset(&stack_frame, 0, sizeof(stack_frame));
@@ -483,20 +592,15 @@ void StackTrace::SlowUnwindStackWithContext(uptr pc, void *context,
                      &stack_frame, &ctx, NULL, &SymFunctionTableAccess64,
                      &SymGetModuleBase64, NULL) &&
          size < Min(max_depth, kStackTraceMax)) {
-    trace[size++] = (uptr)stack_frame.AddrPC.Offset;
+    trace_buffer[size++] = (uptr)stack_frame.AddrPC.Offset;
   }
 }
 #endif  // #if !SANITIZER_GO
 
-void MaybeOpenReportFile() {
-  // Windows doesn't have native fork, and we don't support Cygwin or other
-  // environments that try to fake it, so the initial report_fd will always be
-  // correct.
-}
-
-void RawWrite(const char *buffer) {
-  uptr length = (uptr)internal_strlen(buffer);
-  if (length != internal_write(report_fd, buffer, length)) {
+void ReportFile::Write(const char *buffer, uptr length) {
+  SpinMutexLock l(mu);
+  ReopenIfNecessary();
+  if (length != internal_write(fd, buffer, length)) {
     // stderr may be closed, but we may be able to print to the debugger
     // instead.  This is the case when launching a program from Visual Studio,
     // and the following routine should write to its console.
@@ -525,6 +629,23 @@ bool IsDeadlySignal(int signum) {
 bool IsAccessibleMemoryRange(uptr beg, uptr size) {
   // FIXME: Actually implement this function.
   return true;
+}
+
+SignalContext SignalContext::Create(void *siginfo, void *context) {
+  EXCEPTION_RECORD *exception_record = (EXCEPTION_RECORD*)siginfo;
+  CONTEXT *context_record = (CONTEXT*)context;
+
+  uptr pc = (uptr)exception_record->ExceptionAddress;
+#ifdef _WIN64
+  uptr bp = (uptr)context_record->Rbp;
+  uptr sp = (uptr)context_record->Rsp;
+#else
+  uptr bp = (uptr)context_record->Ebp;
+  uptr sp = (uptr)context_record->Esp;
+#endif
+  uptr access_addr = exception_record->ExceptionInformation[1];
+
+  return SignalContext(context, access_addr, pc, sp, bp);
 }
 
 }  // namespace __sanitizer

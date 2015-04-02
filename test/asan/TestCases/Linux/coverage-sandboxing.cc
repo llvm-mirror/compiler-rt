@@ -1,5 +1,5 @@
-// RUN: %clangxx_asan -mllvm -asan-coverage=2 -DSHARED %s -shared -o %T/libcoverage_sandboxing_test.so -fPIC
-// RUN: %clangxx_asan -mllvm -asan-coverage=1 %s   -o %t -Wl,-R,\$ORIGIN -L%T -lcoverage_sandboxing_test
+// RUN: %clangxx_asan -fsanitize-coverage=2 -DSHARED %s -shared -o %T/libcoverage_sandboxing_test.so -fPIC
+// RUN: %clangxx_asan -fsanitize-coverage=1 %s   -o %t -Wl,-R,\$ORIGIN -L%T -lcoverage_sandboxing_test
 // RUN: export ASAN_OPTIONS=coverage=1:verbosity=1
 // RUN: rm -rf %T/coverage_sandboxing_test
 // RUN: mkdir %T/coverage_sandboxing_test && cd %T/coverage_sandboxing_test
@@ -27,7 +27,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <sanitizer/common_interface_defs.h>
+#include <sanitizer/coverage_interface.h>
 
 #define bb0(n)                        \
   case n:                             \
@@ -78,8 +78,8 @@ int main(int argc, char **argv) {
 #endif
 
 // CHECK-vanilla: PID: [[PID:[0-9]+]]
-// CHECK-vanilla: [[PID]].sancov: 1 PCs written
 // CHECK-vanilla: .so.[[PID]].sancov: 258 PCs written
+// CHECK-vanilla: [[PID]].sancov: 1 PCs written
 
 // CHECK-sandbox: PID: [[PID:[0-9]+]]
 // CHECK-sandbox: 258 PCs written to packed file

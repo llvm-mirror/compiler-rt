@@ -88,13 +88,20 @@ void __msan_check_mem_is_initialized(const void *x, uptr size);
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_set_origin(const void *a, uptr size, u32 origin);
 SANITIZER_INTERFACE_ATTRIBUTE
-void __msan_set_alloca_origin(void *a, uptr size, const char *descr);
+void __msan_set_alloca_origin(void *a, uptr size, char *descr);
 SANITIZER_INTERFACE_ATTRIBUTE
-void __msan_set_alloca_origin4(void *a, uptr size, const char *descr, uptr pc);
+void __msan_set_alloca_origin4(void *a, uptr size, char *descr, uptr pc);
 SANITIZER_INTERFACE_ATTRIBUTE
 u32 __msan_chain_origin(u32 id);
 SANITIZER_INTERFACE_ATTRIBUTE
 u32 __msan_get_origin(const void *a);
+
+// Test that this_id is a descendant of prev_id (or they are simply equal).
+// "descendant" here means that are part of the same chain, created with
+// __msan_chain_origin.
+SANITIZER_INTERFACE_ATTRIBUTE
+int __msan_origin_is_descendant_or_same(u32 this_id, u32 prev_id);
+
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_clear_on_return();
@@ -121,16 +128,6 @@ SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_dump_shadow(const void *x, uptr size);
 SANITIZER_INTERFACE_ATTRIBUTE
 int  __msan_has_dynamic_component();
-
-// Returns x such that %fs:x is the first byte of __msan_retval_tls.
-SANITIZER_INTERFACE_ATTRIBUTE
-int __msan_get_retval_tls_offset();
-SANITIZER_INTERFACE_ATTRIBUTE
-int __msan_get_param_tls_offset();
-
-// For intercepting mmap from ld.so in msandr.
-SANITIZER_INTERFACE_ATTRIBUTE
-bool __msan_is_in_loader();
 
 // For testing.
 SANITIZER_INTERFACE_ATTRIBUTE
@@ -160,15 +157,6 @@ void __sanitizer_unaligned_store32(uu32 *p, u32 x);
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __sanitizer_unaligned_store64(uu64 *p, u64 x);
-
-SANITIZER_INTERFACE_ATTRIBUTE
-void __msan_dr_is_initialized();
-
-SANITIZER_INTERFACE_ATTRIBUTE
-void *__msan_wrap_indirect_call(void *target);
-
-SANITIZER_INTERFACE_ATTRIBUTE
-void __msan_set_indirect_call_wrapper(uptr wrapper);
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_set_death_callback(void (*callback)(void));

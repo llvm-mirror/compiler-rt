@@ -7,6 +7,7 @@ include(SanitizerUtils)
 if(COMPILER_RT_HAS_SANITIZER_COMMON)
   add_subdirectory(interception)
   add_subdirectory(sanitizer_common)
+  add_subdirectory(lsan)
 endif()
 
 if(COMPILER_RT_HAS_ASAN)
@@ -19,13 +20,8 @@ if(COMPILER_RT_HAS_DFSAN)
   add_subdirectory(dfsan)
 endif()
 
-if(COMPILER_RT_HAS_LSAN OR COMPILER_RT_HAS_LSAN_COMMON)
-  add_subdirectory(lsan)
-endif()
-
 if(COMPILER_RT_HAS_MSAN)
   add_subdirectory(msan)
-  add_subdirectory(msandr)
 endif()
 
 if(COMPILER_RT_HAS_PROFILE)

@@ -14,12 +14,18 @@
 
 // This test assumes float and double are IEEE-754 single- and double-precision.
 // XFAIL: armv7l-unknown-linux-gnueabihf
+// XFAIL: aarch64
 
 #if defined(__APPLE__)
 # include <machine/endian.h>
 # define BYTE_ORDER __DARWIN_BYTE_ORDER
 # define BIG_ENDIAN __DARWIN_BIG_ENDIAN
 # define LITTLE_ENDIAN __DARWIN_LITTLE_ENDIAN
+#elif defined(__FreeBSD__)
+# include <sys/endian.h>
+# define BYTE_ORDER _BYTE_ORDER
+# define BIG_ENDIAN _BIG_ENDIAN
+# define LITTLE_ENDIAN _LITTLE_ENDIAN
 #else
 # include <endian.h>
 # define BYTE_ORDER __BYTE_ORDER

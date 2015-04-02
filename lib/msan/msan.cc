@@ -16,15 +16,16 @@
 #include "msan_chained_origin_depot.h"
 #include "msan_origin.h"
 #include "msan_thread.h"
+#include "msan_poisoning.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flags.h"
+#include "sanitizer_common/sanitizer_flag_parser.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_procmaps.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
-
 
 // ACHTUNG! No system header includes in this file.
 
@@ -34,27 +35,25 @@ using namespace __sanitizer;
 static THREADLOCAL int msan_expect_umr = 0;
 static THREADLOCAL int msan_expected_umr_found = 0;
 
-static bool msan_running_under_dr;
-
 // Function argument shadow. Each argument starts at the next available 8-byte
 // aligned address.
 SANITIZER_INTERFACE_ATTRIBUTE
-THREADLOCAL u64 __msan_param_tls[kMsanParamTlsSizeInWords];
+THREADLOCAL u64 __msan_param_tls[kMsanParamTlsSize / sizeof(u64)];
 
 // Function argument origin. Each argument starts at the same offset as the
 // corresponding shadow in (__msan_param_tls). Slightly weird, but changing this
 // would break compatibility with older prebuilt binaries.
 SANITIZER_INTERFACE_ATTRIBUTE
-THREADLOCAL u32 __msan_param_origin_tls[kMsanParamTlsSizeInWords];
+THREADLOCAL u32 __msan_param_origin_tls[kMsanParamTlsSize / sizeof(u32)];
 
 SANITIZER_INTERFACE_ATTRIBUTE
-THREADLOCAL u64 __msan_retval_tls[kMsanRetvalTlsSizeInWords];
+THREADLOCAL u64 __msan_retval_tls[kMsanRetvalTlsSize / sizeof(u64)];
 
 SANITIZER_INTERFACE_ATTRIBUTE
 THREADLOCAL u32 __msan_retval_origin_tls;
 
 SANITIZER_INTERFACE_ATTRIBUTE
-THREADLOCAL u64 __msan_va_arg_tls[kMsanParamTlsSizeInWords];
+THREADLOCAL u64 __msan_va_arg_tls[kMsanParamTlsSize / sizeof(u64)];
 
 SANITIZER_INTERFACE_ATTRIBUTE
 THREADLOCAL u64 __msan_va_arg_overflow_size_tls;
@@ -63,7 +62,6 @@ SANITIZER_INTERFACE_ATTRIBUTE
 THREADLOCAL u32 __msan_origin_tls;
 
 static THREADLOCAL int is_in_symbolizer;
-static THREADLOCAL int is_in_loader;
 
 extern "C" SANITIZER_WEAK_ATTRIBUTE const int __msan_track_origins;
 
@@ -78,14 +76,6 @@ namespace __msan {
 void EnterSymbolizer() { ++is_in_symbolizer; }
 void ExitSymbolizer()  { --is_in_symbolizer; }
 bool IsInSymbolizer() { return is_in_symbolizer; }
-
-void EnterLoader() { ++is_in_loader; }
-void ExitLoader()  { --is_in_loader; }
-
-extern "C" {
-SANITIZER_INTERFACE_ATTRIBUTE
-bool __msan_is_in_loader() { return is_in_loader; }
-}
 
 static Flags msan_flags;
 
@@ -107,19 +97,81 @@ static const char *StackOriginDescr[kNumStackOriginDescrs];
 static uptr StackOriginPC[kNumStackOriginDescrs];
 static atomic_uint32_t NumStackOriginDescrs;
 
-static void ParseFlagsFromString(Flags *f, const char *str) {
-  CommonFlags *cf = common_flags();
-  ParseCommonFlagsFromString(cf, str);
-  ParseFlag(str, &f->poison_heap_with_zeroes, "poison_heap_with_zeroes", "");
-  ParseFlag(str, &f->poison_stack_with_zeroes, "poison_stack_with_zeroes", "");
-  ParseFlag(str, &f->poison_in_malloc, "poison_in_malloc", "");
-  ParseFlag(str, &f->poison_in_free, "poison_in_free", "");
-  ParseFlag(str, &f->exit_code, "exit_code", "");
+void Flags::SetDefaults() {
+#define MSAN_FLAG(Type, Name, DefaultValue, Description) Name = DefaultValue;
+#include "msan_flags.inc"
+#undef MSAN_FLAG
+}
+
+// keep_going is an old name for halt_on_error,
+// and it has inverse meaning.
+class FlagHandlerKeepGoing : public FlagHandlerBase {
+  bool *halt_on_error_;
+
+ public:
+  explicit FlagHandlerKeepGoing(bool *halt_on_error)
+      : halt_on_error_(halt_on_error) {}
+  bool Parse(const char *value) final {
+    bool tmp;
+    FlagHandler<bool> h(&tmp);
+    if (!h.Parse(value)) return false;
+    *halt_on_error_ = !tmp;
+    return true;
+  }
+};
+
+static void RegisterMsanFlags(FlagParser *parser, Flags *f) {
+#define MSAN_FLAG(Type, Name, DefaultValue, Description) \
+  RegisterFlag(parser, #Name, Description, &f->Name);
+#include "msan_flags.inc"
+#undef MSAN_FLAG
+
+  FlagHandlerKeepGoing *fh_keep_going = new (FlagParser::Alloc)  // NOLINT
+      FlagHandlerKeepGoing(&f->halt_on_error);
+  parser->RegisterHandler("keep_going", fh_keep_going,
+                          "deprecated, use halt_on_error");
+}
+
+static void InitializeFlags() {
+  Flags *f = flags();
+  FlagParser parser;
+  RegisterMsanFlags(&parser, f);
+  RegisterCommonFlags(&parser);
+
+  SetCommonFlagsDefaults();
+  {
+    CommonFlags cf;
+    cf.CopyFrom(*common_flags());
+    cf.external_symbolizer_path = GetEnv("MSAN_SYMBOLIZER_PATH");
+    cf.malloc_context_size = 20;
+    cf.handle_ioctl = true;
+    // FIXME: test and enable.
+    cf.check_printf = false;
+    cf.intercept_tls_get_addr = true;
+    OverrideCommonFlags(cf);
+  }
+
+  f->SetDefaults();
+
+  // Override from user-specified string.
+  if (__msan_default_options)
+    parser.ParseString(__msan_default_options());
+
+  const char *msan_options = GetEnv("MSAN_OPTIONS");
+  parser.ParseString(msan_options);
+  VPrintf(1, "MSAN_OPTIONS: %s\n", msan_options ? msan_options : "<empty>");
+
+  SetVerbosity(common_flags()->verbosity);
+
+  if (Verbosity()) ReportUnrecognizedFlags();
+
+  if (common_flags()->help) parser.PrintFlagDescriptions();
+
+  // Check flag values:
   if (f->exit_code < 0 || f->exit_code > 127) {
     Printf("Exit code not in [0, 128) range: %d\n", f->exit_code);
     Die();
   }
-  ParseFlag(str, &f->origin_history_size, "origin_history_size", "");
   if (f->origin_history_size < 0 ||
       f->origin_history_size > Origin::kMaxDepth) {
     Printf(
@@ -128,8 +180,6 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
         f->origin_history_size, Origin::kMaxDepth);
     Die();
   }
-  ParseFlag(str, &f->origin_history_per_stack_limit,
-            "origin_history_per_stack_limit", "");
   // Limiting to kStackDepotMaxUseCount / 2 to avoid overflow in
   // StackDepotHandle::inc_use_count_unsafe.
   if (f->origin_history_per_stack_limit < 0 ||
@@ -140,54 +190,10 @@ static void ParseFlagsFromString(Flags *f, const char *str) {
         f->origin_history_per_stack_limit, kStackDepotMaxUseCount / 2);
     Die();
   }
-
-  ParseFlag(str, &f->report_umrs, "report_umrs", "");
-  ParseFlag(str, &f->wrap_signals, "wrap_signals", "");
-  ParseFlag(str, &f->print_stats, "print_stats", "");
-  ParseFlag(str, &f->atexit, "atexit", "");
-  ParseFlag(str, &f->store_context_size, "store_context_size", "");
   if (f->store_context_size < 1) f->store_context_size = 1;
-
-  // keep_going is an old name for halt_on_error,
-  // and it has inverse meaning.
-  f->halt_on_error = !f->halt_on_error;
-  ParseFlag(str, &f->halt_on_error, "keep_going", "");
-  f->halt_on_error = !f->halt_on_error;
-  ParseFlag(str, &f->halt_on_error, "halt_on_error", "");
 }
 
-static void InitializeFlags(Flags *f, const char *options) {
-  CommonFlags *cf = common_flags();
-  SetCommonFlagsDefaults(cf);
-  cf->external_symbolizer_path = GetEnv("MSAN_SYMBOLIZER_PATH");
-  cf->malloc_context_size = 20;
-  cf->handle_ioctl = true;
-  // FIXME: test and enable.
-  cf->check_printf = false;
-  cf->intercept_tls_get_addr = true;
-
-  internal_memset(f, 0, sizeof(*f));
-  f->poison_heap_with_zeroes = false;
-  f->poison_stack_with_zeroes = false;
-  f->poison_in_malloc = true;
-  f->poison_in_free = true;
-  f->exit_code = 77;
-  f->origin_history_size = Origin::kMaxDepth;
-  f->origin_history_per_stack_limit = 20000;
-  f->report_umrs = true;
-  f->wrap_signals = true;
-  f->print_stats = false;
-  f->atexit = false;
-  f->halt_on_error = !&__msan_keep_going;
-  f->store_context_size = 20;
-
-  // Override from user-specified string.
-  if (__msan_default_options)
-    ParseFlagsFromString(f, __msan_default_options());
-  ParseFlagsFromString(f, options);
-}
-
-void GetStackTrace(StackTrace *stack, uptr max_s, uptr pc, uptr bp,
+void GetStackTrace(BufferedStackTrace *stack, uptr max_s, uptr pc, uptr bp,
                    bool request_fast_unwind) {
   MsanThread *t = GetCurrentThread();
   if (!t || !StackTrace::WillUseFastUnwind(request_fast_unwind)) {
@@ -216,10 +222,10 @@ void PrintWarningWithOrigin(uptr pc, uptr bp, u32 origin) {
   GET_FATAL_STACK_TRACE_PC_BP(pc, bp);
 
   u32 report_origin =
-    (__msan_get_track_origins() && Origin(origin).isValid()) ? origin : 0;
+    (__msan_get_track_origins() && Origin::isValidId(origin)) ? origin : 0;
   ReportUMR(&stack, report_origin);
 
-  if (__msan_get_track_origins() && !Origin(origin).isValid()) {
+  if (__msan_get_track_origins() && !Origin::isValidId(origin)) {
     Printf(
         "  ORIGIN: invalid (%x). Might be a bug in MemorySanitizer origin "
         "tracking.\n    This could still be a bug in your code, too!\n",
@@ -269,32 +275,10 @@ u32 ChainOrigin(u32 id, StackTrace *stack) {
   if (t && t->InSignalHandler())
     return id;
 
-  Origin o(id);
-  int depth = o.depth();
-  // 0 means unlimited depth.
-  if (flags()->origin_history_size > 0 && depth > 0) {
-    if (depth >= flags()->origin_history_size) {
-      return id;
-    } else {
-      ++depth;
-    }
-  }
-
-  StackDepotHandle h = StackDepotPut_WithHandle(stack->trace, stack->size);
-  if (!h.valid()) return id;
-
-  if (flags()->origin_history_per_stack_limit > 0) {
-    int use_count = h.use_count();
-    if (use_count > flags()->origin_history_per_stack_limit) return id;
-  }
-
-  u32 chained_id;
-  bool inserted = ChainedOriginDepotPut(h.id(), o.id(), &chained_id);
-
-  if (inserted && flags()->origin_history_per_stack_limit > 0)
-    h.inc_use_count_unsafe();
-
-  return Origin(chained_id, depth).raw_id();
+  Origin o = Origin::FromRawId(id);
+  stack->tag = StackTrace::TAG_UNKNOWN;
+  Origin chained = Origin::CreateChainedOrigin(o, stack);
+  return chained.raw_id();
 }
 
 }  // namespace __msan
@@ -370,9 +354,7 @@ void __msan_init() {
   SetDieCallback(MsanDie);
   InitTlsSize();
 
-  const char *msan_options = GetEnv("MSAN_OPTIONS");
-  InitializeFlags(&msan_flags, msan_options);
-  if (common_flags()->help) PrintFlagDescriptions();
+  InitializeFlags();
   __sanitizer_set_report_path(common_flags()->log_path);
 
   InitializeInterceptors();
@@ -389,13 +371,10 @@ void __msan_init() {
     ReExec();
   }
 
-  VPrintf(1, "MSAN_OPTIONS: %s\n", msan_options ? msan_options : "<empty>");
-
   __msan_clear_on_return();
   if (__msan_get_track_origins())
     VPrintf(1, "msan_track_origins\n");
-  if (!InitShadow(/* prot1 */ !msan_running_under_dr, /* prot2 */ true,
-                  /* map_shadow */ true, __msan_get_track_origins())) {
+  if (!InitShadow(/* map_shadow */ true, __msan_get_track_origins())) {
     Printf("FATAL: MemorySanitizer can not mmap the shadow memory.\n");
     Printf("FATAL: Make sure to compile with -fPIE and to link with -pie.\n");
     Printf("FATAL: Disabling ASLR is known to cause this error.\n");
@@ -406,6 +385,8 @@ void __msan_init() {
   }
 
   Symbolizer::GetOrInit()->AddHooks(EnterSymbolizer, ExitSymbolizer);
+
+  InitializeCoverage(common_flags()->coverage, common_flags()->coverage_dir);
 
   MsanTSDInit(MsanTSDDtor);
 
@@ -485,7 +466,7 @@ void __msan_check_mem_is_initialized(const void *x, uptr size) {
   (void)sp;
   ReportUMRInsideAddressRange(__func__, x, size, offset);
   __msan::PrintWarningWithOrigin(pc, bp,
-                                 __msan_get_origin(((char *)x) + offset));
+                                 __msan_get_origin(((const char *)x) + offset));
   if (__msan::flags()->halt_on_error) {
     Printf("Exiting\n");
     Die();
@@ -498,38 +479,11 @@ int __msan_set_poison_in_malloc(int do_poison) {
   return old;
 }
 
-int  __msan_has_dynamic_component() {
-  return msan_running_under_dr;
-}
+int __msan_has_dynamic_component() { return false; }
 
 NOINLINE
 void __msan_clear_on_return() {
   __msan_param_tls[0] = 0;
-}
-
-static void* get_tls_base() {
-  u64 p;
-  asm("mov %%fs:0, %0"
-      : "=r"(p) ::);
-  return (void*)p;
-}
-
-int __msan_get_retval_tls_offset() {
-  // volatile here is needed to avoid UB, because the compiler thinks that we
-  // are doing address arithmetics on unrelated pointers, and takes some
-  // shortcuts
-  volatile sptr retval_tls_p = (sptr)&__msan_retval_tls;
-  volatile sptr tls_base_p = (sptr)get_tls_base();
-  return retval_tls_p - tls_base_p;
-}
-
-int __msan_get_param_tls_offset() {
-  // volatile here is needed to avoid UB, because the compiler thinks that we
-  // are doing address arithmetics on unrelated pointers, and takes some
-  // shortcuts
-  volatile sptr param_tls_p = (sptr)&__msan_param_tls;
-  volatile sptr tls_base_p = (sptr)get_tls_base();
-  return param_tls_p - tls_base_p;
 }
 
 void __msan_partial_poison(const void* data, void* shadow, uptr size) {
@@ -542,34 +496,17 @@ void __msan_load_unpoisoned(void *src, uptr size, void *dst) {
 }
 
 void __msan_set_origin(const void *a, uptr size, u32 origin) {
-  // Origin mapping is 4 bytes per 4 bytes of application memory.
-  // Here we extend the range such that its left and right bounds are both
-  // 4 byte aligned.
-  if (!__msan_get_track_origins()) return;
-  uptr x = MEM_TO_ORIGIN((uptr)a);
-  uptr beg = x & ~3UL;  // align down.
-  uptr end = (x + size + 3) & ~3UL;  // align up.
-  u64 origin64 = ((u64)origin << 32) | origin;
-  // This is like memset, but the value is 32-bit. We unroll by 2 to write
-  // 64 bits at once. May want to unroll further to get 128-bit stores.
-  if (beg & 7ULL) {
-    *(u32*)beg = origin;
-    beg += 4;
-  }
-  for (uptr addr = beg; addr < (end & ~7UL); addr += 8)
-    *(u64*)addr = origin64;
-  if (end & 7ULL)
-    *(u32*)(end - 4) = origin;
+  if (__msan_get_track_origins()) SetOrigin(a, size, origin);
 }
 
 // 'descr' is created at compile time and contains '----' in the beginning.
 // When we see descr for the first time we replace '----' with a uniq id
 // and set the origin to (id | (31-th bit)).
-void __msan_set_alloca_origin(void *a, uptr size, const char *descr) {
+void __msan_set_alloca_origin(void *a, uptr size, char *descr) {
   __msan_set_alloca_origin4(a, size, descr, 0);
 }
 
-void __msan_set_alloca_origin4(void *a, uptr size, const char *descr, uptr pc) {
+void __msan_set_alloca_origin4(void *a, uptr size, char *descr, uptr pc) {
   static const u32 dash = '-';
   static const u32 first_timer =
       dash + (dash << 8) + (dash << 16) + (dash << 24);
@@ -581,14 +518,14 @@ void __msan_set_alloca_origin4(void *a, uptr size, const char *descr, uptr pc) {
     CHECK_LT(idx, kNumStackOriginDescrs);
     StackOriginDescr[idx] = descr + 4;
     StackOriginPC[idx] = pc;
-    ChainedOriginDepotPut(idx, Origin::kStackRoot, &id);
+    id = Origin::CreateStackOrigin(idx).raw_id();
     *id_ptr = id;
     if (print)
       Printf("First time: idx=%d id=%d %s %p \n", idx, id, descr + 4, pc);
   }
   if (print)
     Printf("__msan_set_alloca_origin: descr=%s id=%x\n", descr + 4, id);
-  __msan_set_origin(a, size, Origin(id, 1).raw_id());
+  __msan_set_origin(a, size, id);
 }
 
 u32 __msan_chain_origin(u32 id) {
@@ -604,6 +541,13 @@ u32 __msan_get_origin(const void *a) {
   uptr aligned = x & ~3ULL;
   uptr origin_ptr = MEM_TO_ORIGIN(aligned);
   return *(u32*)origin_ptr;
+}
+
+int __msan_origin_is_descendant_or_same(u32 this_id, u32 prev_id) {
+  Origin o = Origin::FromRawId(this_id);
+  while (o.raw_id() != prev_id && o.isChainedOrigin())
+    o = o.getNextChainedOrigin(nullptr);
+  return o.raw_id() == prev_id;
 }
 
 u32 __msan_get_umr_origin() {
@@ -655,18 +599,6 @@ void __sanitizer_unaligned_store64(uu64 *p, u64 x) {
 
 void __msan_set_death_callback(void (*callback)(void)) {
   death_callback = callback;
-}
-
-void *__msan_wrap_indirect_call(void *target) {
-  return IndirectExternCall(target);
-}
-
-void __msan_dr_is_initialized() {
-  msan_running_under_dr = true;
-}
-
-void __msan_set_indirect_call_wrapper(uptr wrapper) {
-  SetIndirectCallWrapper(wrapper);
 }
 
 #if !SANITIZER_SUPPORTS_WEAK_HOOKS

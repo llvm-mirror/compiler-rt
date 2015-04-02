@@ -4,15 +4,17 @@
 // RUN: LD_PRELOAD=%shared_libasan not %run %t 2>&1 | FileCheck %s
 
 // REQUIRES: asan-dynamic-runtime
-// XFAIL: android
+
+// This way of setting LD_PRELOAD does not work with Android test runner.
+// REQUIRES: not-android
 
 #include <stdlib.h>
 
-extern "C" void *memset(void *p, int val, size_t n);
+extern "C" ssize_t write(int fd, const void *buf, size_t count);
 
 void do_access(void *p) {
   // CHECK: AddressSanitizer: heap-buffer-overflow
-  memset(p, 0, 2);
+  write(1, p, 2);
 }
 
 int main(int argc, char **argv) {

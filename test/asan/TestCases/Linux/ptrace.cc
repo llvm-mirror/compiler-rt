@@ -3,8 +3,7 @@
 //
 // RUN: %clangxx_asan -O0 %s -o %t && %run %t
 // RUN: %clangxx_asan -DPOSITIVE -O0 %s -o %t && not %run %t 2>&1 | FileCheck %s
-// XFAIL: arm-linux-gnueabi
-// XFAIL: armv7l-unknown-linux-gnueabihf
+// REQUIRES: x86_64-supported-target,i386-supported-target
 
 #include <assert.h>
 #include <stdio.h>
@@ -32,8 +31,8 @@ int main(void) {
     // CHECK: AddressSanitizer: stack-buffer-overflow
     // CHECK: {{.*ptrace.cc:}}[[@LINE-2]]
     assert(!res);
-#if __WORDSIZE == 64
-    printf("%zx\n", regs.rip);
+#ifdef __x86_64__
+    printf("%lx\n", (unsigned long)regs.rip);
 #else
     printf("%lx\n", regs.eip);
 #endif
@@ -43,7 +42,7 @@ int main(void) {
     assert(!res);
     printf("%lx\n", (unsigned long)fpregs.cwd);
 
-#if __WORDSIZE == 32
+#ifndef __x86_64__
     user_fpxregs_struct fpxregs;
     res = ptrace(PTRACE_GETFPXREGS, pid, NULL, &fpxregs);
     assert(!res);

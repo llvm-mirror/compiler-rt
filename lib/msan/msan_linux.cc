@@ -9,11 +9,11 @@
 //
 // This file is a part of MemorySanitizer.
 //
-// Linux-specific code.
+// Linux- and FreeBSD-specific code.
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_common/sanitizer_platform.h"
-#if SANITIZER_LINUX
+#if SANITIZER_FREEBSD || SANITIZER_LINUX
 
 #include "msan.h"
 #include "msan_thread.h"
@@ -35,58 +35,107 @@
 
 namespace __msan {
 
-static const uptr kMemBeg     = 0x600000000000;
-static const uptr kMemEnd     = 0x7fffffffffff;
-static const uptr kShadowBeg  = MEM_TO_SHADOW(kMemBeg);
-static const uptr kShadowEnd  = MEM_TO_SHADOW(kMemEnd);
-static const uptr kBad1Beg    = 0;
-static const uptr kBad1End    = kShadowBeg - 1;
-static const uptr kBad2Beg    = kShadowEnd + 1;
-static const uptr kBad2End    = kMemBeg - 1;
-static const uptr kOriginsBeg = kBad2Beg;
-static const uptr kOriginsEnd = kBad2End;
-
-bool InitShadow(bool prot1, bool prot2, bool map_shadow, bool init_origins) {
-  if ((uptr) & InitShadow < kMemBeg) {
-    Printf("FATAL: Code below application range: %p < %p. Non-PIE build?\n",
-           &InitShadow, (void *)kMemBeg);
-    return false;
+void ReportMapRange(const char *descr, uptr beg, uptr size) {
+  if (size > 0) {
+    uptr end = beg + size - 1;
+    VPrintf(1, "%s : %p - %p\n", descr, beg, end);
   }
+}
 
-  VPrintf(1, "__msan_init %p\n", &__msan_init);
-  VPrintf(1, "Memory   : %p %p\n", kMemBeg, kMemEnd);
-  VPrintf(1, "Bad2     : %p %p\n", kBad2Beg, kBad2End);
-  VPrintf(1, "Origins  : %p %p\n", kOriginsBeg, kOriginsEnd);
-  VPrintf(1, "Shadow   : %p %p\n", kShadowBeg, kShadowEnd);
-  VPrintf(1, "Bad1     : %p %p\n", kBad1Beg, kBad1End);
-
-  if (!MemoryRangeIsAvailable(kShadowBeg,
-                              init_origins ? kOriginsEnd : kShadowEnd) ||
-      (prot1 && !MemoryRangeIsAvailable(kBad1Beg, kBad1End)) ||
-      (prot2 && !MemoryRangeIsAvailable(kBad2Beg, kBad2End))) {
-    Printf("FATAL: Shadow memory range is not available.\n");
-    return false;
-  }
-
-  if (prot1 && !Mprotect(kBad1Beg, kBad1End - kBad1Beg))
-    return false;
-  if (prot2 && !Mprotect(kBad2Beg, kBad2End - kBad2Beg))
-    return false;
-  if (map_shadow) {
-    void *shadow = MmapFixedNoReserve(kShadowBeg, kShadowEnd - kShadowBeg);
-    if (shadow != (void*)kShadowBeg) return false;
-  }
-  if (init_origins) {
-    void *origins = MmapFixedNoReserve(kOriginsBeg, kOriginsEnd - kOriginsBeg);
-    if (origins != (void*)kOriginsBeg) return false;
+static bool CheckMemoryRangeAvailability(uptr beg, uptr size) {
+  if (size > 0) {
+    uptr end = beg + size - 1;
+    if (!MemoryRangeIsAvailable(beg, end)) {
+      Printf("FATAL: Memory range %p - %p is not available.\n", beg, end);
+      return false;
+    }
   }
   return true;
 }
 
+static bool ProtectMemoryRange(uptr beg, uptr size) {
+  if (size > 0) {
+    uptr end = beg + size - 1;
+    if (!Mprotect(beg, size)) {
+      Printf("FATAL: Cannot protect memory range %p - %p.\n", beg, end);
+      return false;
+    }
+  }
+  return true;
+}
+
+static void CheckMemoryLayoutSanity() {
+  uptr prev_end = 0;
+  for (unsigned i = 0; i < kMemoryLayoutSize; ++i) {
+    uptr start = kMemoryLayout[i].start;
+    uptr end = kMemoryLayout[i].end;
+    MappingDesc::Type type = kMemoryLayout[i].type;
+    CHECK_LT(start, end);
+    CHECK_EQ(prev_end, start);
+    CHECK(addr_is_type(start, type));
+    CHECK(addr_is_type((start + end) / 2, type));
+    CHECK(addr_is_type(end - 1, type));
+    if (type == MappingDesc::APP) {
+      uptr addr = start;
+      CHECK(MEM_IS_SHADOW(MEM_TO_SHADOW(addr)));
+      CHECK(MEM_IS_ORIGIN(MEM_TO_ORIGIN(addr)));
+      CHECK_EQ(MEM_TO_ORIGIN(addr), SHADOW_TO_ORIGIN(MEM_TO_SHADOW(addr)));
+
+      addr = (start + end) / 2;
+      CHECK(MEM_IS_SHADOW(MEM_TO_SHADOW(addr)));
+      CHECK(MEM_IS_ORIGIN(MEM_TO_ORIGIN(addr)));
+      CHECK_EQ(MEM_TO_ORIGIN(addr), SHADOW_TO_ORIGIN(MEM_TO_SHADOW(addr)));
+
+      addr = end - 1;
+      CHECK(MEM_IS_SHADOW(MEM_TO_SHADOW(addr)));
+      CHECK(MEM_IS_ORIGIN(MEM_TO_ORIGIN(addr)));
+      CHECK_EQ(MEM_TO_ORIGIN(addr), SHADOW_TO_ORIGIN(MEM_TO_SHADOW(addr)));
+    }
+    prev_end = end;
+  }
+}
+
+bool InitShadow(bool map_shadow, bool init_origins) {
+  // Let user know mapping parameters first.
+  VPrintf(1, "__msan_init %p\n", &__msan_init);
+  for (unsigned i = 0; i < kMemoryLayoutSize; ++i)
+    VPrintf(1, "%s: %zx - %zx\n", kMemoryLayout[i].name, kMemoryLayout[i].start,
+            kMemoryLayout[i].end - 1);
+
+  CheckMemoryLayoutSanity();
+
+  if (!MEM_IS_APP(&__msan_init)) {
+    Printf("FATAL: Code %p is out of application range. Non-PIE build?\n",
+           (uptr)&__msan_init);
+    return false;
+  }
+
+  for (unsigned i = 0; i < kMemoryLayoutSize; ++i) {
+    uptr start = kMemoryLayout[i].start;
+    uptr end = kMemoryLayout[i].end;
+    uptr size= end - start;
+    MappingDesc::Type type = kMemoryLayout[i].type;
+    if ((map_shadow && type == MappingDesc::SHADOW) ||
+        (init_origins && type == MappingDesc::ORIGIN)) {
+      if (!CheckMemoryRangeAvailability(start, size)) return false;
+      if ((uptr)MmapFixedNoReserve(start, size) != start) return false;
+      if (common_flags()->use_madv_dontdump)
+        DontDumpShadowMemory(start, size);
+    } else if (type == MappingDesc::INVALID) {
+      if (!CheckMemoryRangeAvailability(start, size)) return false;
+      if (!ProtectMemoryRange(start, size)) return false;
+    }
+  }
+
+  return true;
+}
+
 void MsanDie() {
+  if (common_flags()->coverage)
+    __sanitizer_cov_dump();
   if (death_callback)
     death_callback();
-  _exit(flags()->exit_code);
+  internal__exit(flags()->exit_code);
 }
 
 static void MsanAtExit(void) {
@@ -106,20 +155,26 @@ void InstallAtExitHandler() {
 
 static pthread_key_t tsd_key;
 static bool tsd_key_inited = false;
+
 void MsanTSDInit(void (*destructor)(void *tsd)) {
   CHECK(!tsd_key_inited);
   tsd_key_inited = true;
   CHECK_EQ(0, pthread_key_create(&tsd_key, destructor));
 }
 
-void *MsanTSDGet() {
-  CHECK(tsd_key_inited);
-  return pthread_getspecific(tsd_key);
+static THREADLOCAL MsanThread* msan_current_thread;
+
+MsanThread *GetCurrentThread() {
+  return msan_current_thread;
 }
 
-void MsanTSDSet(void *tsd) {
+void SetCurrentThread(MsanThread *t) {
+  // Make sure we do not reset the current MsanThread.
+  CHECK_EQ(0, msan_current_thread);
+  msan_current_thread = t;
+  // Make sure that MsanTSDDtor gets called at the end.
   CHECK(tsd_key_inited);
-  pthread_setspecific(tsd_key, tsd);
+  pthread_setspecific(tsd_key, (void *)t);
 }
 
 void MsanTSDDtor(void *tsd) {
@@ -129,9 +184,12 @@ void MsanTSDDtor(void *tsd) {
     CHECK_EQ(0, pthread_setspecific(tsd_key, tsd));
     return;
   }
+  msan_current_thread = nullptr;
+  // Make sure that signal handler can not see a stale current thread pointer.
+  atomic_signal_fence(memory_order_seq_cst);
   MsanThread::TSDDtor(tsd);
 }
 
 }  // namespace __msan
 
-#endif  // __linux__
+#endif  // SANITIZER_FREEBSD || SANITIZER_LINUX

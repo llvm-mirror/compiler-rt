@@ -15,6 +15,7 @@
 #include "sanitizer_platform.h"
 #if SANITIZER_FREEBSD || SANITIZER_LINUX
 
+#include "sanitizer_allocator_internal.h"
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_internal_defs.h"
@@ -28,6 +29,17 @@
 
 #if !SANITIZER_FREEBSD
 #include <asm/param.h>
+#endif
+
+// For mips64, syscall(__NR_stat) fills the buffer in the 'struct kernel_stat'
+// format. Struct kernel_stat is defined as 'struct stat' in asm/stat.h. To
+// access stat from asm/stat.h, without conflicting with definition in
+// sys/stat.h, we use this trick.
+#if defined(__mips64)
+#include <sys/types.h>
+#define stat kernel_stat
+#include <asm/stat.h>
+#undef stat
 #endif
 
 #include <dlfcn.h>
@@ -45,6 +57,7 @@
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #if SANITIZER_FREEBSD
@@ -97,14 +110,16 @@ namespace __sanitizer {
 #endif
 
 // --------------- sanitizer_libc.h
-uptr internal_mmap(void *addr, uptr length, int prot, int flags,
-                    int fd, u64 offset) {
+uptr internal_mmap(void *addr, uptr length, int prot, int flags, int fd,
+                   u64 offset) {
 #if SANITIZER_FREEBSD || SANITIZER_LINUX_USES_64BIT_SYSCALLS
   return internal_syscall(SYSCALL(mmap), (uptr)addr, length, prot, flags, fd,
                           offset);
 #else
+  // mmap2 specifies file offset in 4096-byte units.
+  CHECK(IsAligned(offset, 4096));
   return internal_syscall(SYSCALL(mmap2), addr, length, prot, flags, fd,
-                          offset);
+                          offset / 4096);
 #endif
 }
 
@@ -133,11 +148,6 @@ uptr internal_open(const char *filename, int flags, u32 mode) {
 #endif
 }
 
-uptr OpenFile(const char *filename, bool write) {
-  return internal_open(filename,
-      write ? O_RDWR | O_CREAT /*| O_CLOEXEC*/ : O_RDONLY, 0660);
-}
-
 uptr internal_read(fd_t fd, void *buf, uptr count) {
   sptr res;
   HANDLE_EINTR(res, (sptr)internal_syscall(SYSCALL(read), fd, (uptr)buf,
@@ -154,7 +164,8 @@ uptr internal_write(fd_t fd, const void *buf, uptr count) {
 
 uptr internal_ftruncate(fd_t fd, uptr size) {
   sptr res;
-  HANDLE_EINTR(res, (sptr)internal_syscall(SYSCALL(ftruncate), fd, size));
+  HANDLE_EINTR(res, (sptr)internal_syscall(SYSCALL(ftruncate), fd,
+               (OFF_T)size));
   return res;
 }
 
@@ -178,6 +189,26 @@ static void stat64_to_stat(struct stat64 *in, struct stat *out) {
 }
 #endif
 
+#if defined(__mips64)
+static void kernel_stat_to_stat(struct kernel_stat *in, struct stat *out) {
+  internal_memset(out, 0, sizeof(*out));
+  out->st_dev = in->st_dev;
+  out->st_ino = in->st_ino;
+  out->st_mode = in->st_mode;
+  out->st_nlink = in->st_nlink;
+  out->st_uid = in->st_uid;
+  out->st_gid = in->st_gid;
+  out->st_rdev = in->st_rdev;
+  out->st_size = in->st_size;
+  out->st_blksize = in->st_blksize;
+  out->st_blocks = in->st_blocks;
+  out->st_atime = in->st_atime_nsec;
+  out->st_mtime = in->st_mtime_nsec;
+  out->st_ctime = in->st_ctime_nsec;
+  out->st_ino = in->st_ino;
+}
+#endif
+
 uptr internal_stat(const char *path, void *buf) {
 #if SANITIZER_FREEBSD
   return internal_syscall(SYSCALL(stat), path, buf);
@@ -185,7 +216,15 @@ uptr internal_stat(const char *path, void *buf) {
   return internal_syscall(SYSCALL(newfstatat), AT_FDCWD, (uptr)path,
                           (uptr)buf, 0);
 #elif SANITIZER_LINUX_USES_64BIT_SYSCALLS
+# if defined(__mips64)
+  // For mips64, stat syscall fills buffer in the format of kernel_stat
+  struct kernel_stat kbuf;
+  int res = internal_syscall(SYSCALL(stat), path, &kbuf);
+  kernel_stat_to_stat(&kbuf, (struct stat *)buf);
+  return res;
+# else
   return internal_syscall(SYSCALL(stat), (uptr)path, (uptr)buf);
+# endif
 #else
   struct stat64 buf64;
   int res = internal_syscall(SYSCALL(stat64), path, &buf64);
@@ -283,17 +322,15 @@ uptr internal_execve(const char *filename, char *const argv[],
 
 // ----------------- sanitizer_common.h
 bool FileExists(const char *filename) {
+  struct stat st;
 #if SANITIZER_USES_CANONICAL_LINUX_SYSCALLS
-  struct stat st;
   if (internal_syscall(SYSCALL(newfstatat), AT_FDCWD, filename, &st, 0))
-    return false;
 #else
-  struct stat st;
   if (internal_stat(filename, &st))
+#endif
     return false;
   // Sanity check: filename is a regular file.
   return S_ISREG(st.st_mode);
-#endif
 }
 
 uptr GetTid() {
@@ -409,32 +446,18 @@ void ReExec() {
   Die();
 }
 
-// Stub implementation of GetThreadStackAndTls for Go.
-#if SANITIZER_GO
-void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
-                          uptr *tls_addr, uptr *tls_size) {
-  *stk_addr = 0;
-  *stk_size = 0;
-  *tls_addr = 0;
-  *tls_size = 0;
-}
-#endif  // SANITIZER_GO
-
 enum MutexState {
   MtxUnlocked = 0,
   MtxLocked = 1,
   MtxSleeping = 2
 };
 
-BlockingMutex::BlockingMutex(LinkerInitialized) {
-  CHECK_EQ(owner_, 0);
-}
-
 BlockingMutex::BlockingMutex() {
   internal_memset(this, 0, sizeof(*this));
 }
 
 void BlockingMutex::Lock() {
+  CHECK_EQ(owner_, 0);
   atomic_uint32_t *m = reinterpret_cast<atomic_uint32_t *>(&opaque_storage_);
   if (atomic_exchange(m, MtxLocked, memory_order_acquire) == MtxUnlocked)
     return;
@@ -532,19 +555,21 @@ int internal_fork() {
 }
 
 #if SANITIZER_LINUX
+#define SA_RESTORER 0x04000000
 // Doesn't set sa_restorer, use with caution (see below).
 int internal_sigaction_norestorer(int signum, const void *act, void *oldact) {
   __sanitizer_kernel_sigaction_t k_act, k_oldact;
   internal_memset(&k_act, 0, sizeof(__sanitizer_kernel_sigaction_t));
   internal_memset(&k_oldact, 0, sizeof(__sanitizer_kernel_sigaction_t));
-  const __sanitizer_sigaction *u_act = (__sanitizer_sigaction *)act;
+  const __sanitizer_sigaction *u_act = (const __sanitizer_sigaction *)act;
   __sanitizer_sigaction *u_oldact = (__sanitizer_sigaction *)oldact;
   if (u_act) {
     k_act.handler = u_act->handler;
     k_act.sigaction = u_act->sigaction;
     internal_memcpy(&k_act.sa_mask, &u_act->sa_mask,
                     sizeof(__sanitizer_kernel_sigset_t));
-    k_act.sa_flags = u_act->sa_flags;
+    // Without SA_RESTORER kernel ignores the calls (probably returns EINVAL).
+    k_act.sa_flags = u_act->sa_flags | SA_RESTORER;
     // FIXME: most often sa_restorer is unset, however the kernel requires it
     // to point to a valid signal restorer that calls the rt_sigreturn syscall.
     // If sa_restorer passed to the kernel is NULL, the program may crash upon
@@ -734,6 +759,7 @@ bool LibraryNameIs(const char *full_name, const char *base_name) {
 #if !SANITIZER_ANDROID
 // Call cb for each region mapped by map.
 void ForEachMappedRegion(link_map *map, void (*cb)(const void *, uptr)) {
+  CHECK_NE(map, nullptr);
 #if !SANITIZER_FREEBSD
   typedef ElfW(Phdr) Elf_Phdr;
   typedef ElfW(Ehdr) Elf_Ehdr;
@@ -833,6 +859,13 @@ uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
                        : "rsp", "memory", "r11", "rcx");
   return res;
 }
+#elif defined(__mips__)
+// TODO(sagarthakur): clone function is to be rewritten in assembly.
+uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+                    int *parent_tidptr, void *newtls, int *child_tidptr) {
+  return clone(fn, child_stack, flags, arg, parent_tidptr,
+               newtls, child_tidptr);
+}
 #endif  // defined(__x86_64__) && SANITIZER_LINUX
 
 #if SANITIZER_ANDROID
@@ -870,7 +903,100 @@ void GetExtraActivationFlags(char *buf, uptr size) {
 #endif
 
 bool IsDeadlySignal(int signum) {
-  return (signum == SIGSEGV) && common_flags()->handle_segv;
+  return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
+}
+
+#ifndef SANITIZER_GO
+void *internal_start_thread(void(*func)(void *arg), void *arg) {
+  // Start the thread with signals blocked, otherwise it can steal user signals.
+  __sanitizer_sigset_t set, old;
+  internal_sigfillset(&set);
+  internal_sigprocmask(SIG_SETMASK, &set, &old);
+  void *th;
+  real_pthread_create(&th, 0, (void*(*)(void *arg))func, arg);
+  internal_sigprocmask(SIG_SETMASK, &old, 0);
+  return th;
+}
+
+void internal_join_thread(void *th) {
+  real_pthread_join(th, 0);
+}
+#else
+void *internal_start_thread(void (*func)(void *), void *arg) { return 0; }
+
+void internal_join_thread(void *th) {}
+#endif
+
+void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
+#if defined(__arm__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.arm_pc;
+  *bp = ucontext->uc_mcontext.arm_fp;
+  *sp = ucontext->uc_mcontext.arm_sp;
+#elif defined(__aarch64__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.pc;
+  *bp = ucontext->uc_mcontext.regs[29];
+  *sp = ucontext->uc_mcontext.sp;
+#elif defined(__hppa__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.sc_iaoq[0];
+  /* GCC uses %r3 whenever a frame pointer is needed.  */
+  *bp = ucontext->uc_mcontext.sc_gr[3];
+  *sp = ucontext->uc_mcontext.sc_gr[30];
+#elif defined(__x86_64__)
+# if SANITIZER_FREEBSD
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.mc_rip;
+  *bp = ucontext->uc_mcontext.mc_rbp;
+  *sp = ucontext->uc_mcontext.mc_rsp;
+# else
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.gregs[REG_RIP];
+  *bp = ucontext->uc_mcontext.gregs[REG_RBP];
+  *sp = ucontext->uc_mcontext.gregs[REG_RSP];
+# endif
+#elif defined(__i386__)
+# if SANITIZER_FREEBSD
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.mc_eip;
+  *bp = ucontext->uc_mcontext.mc_ebp;
+  *sp = ucontext->uc_mcontext.mc_esp;
+# else
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.gregs[REG_EIP];
+  *bp = ucontext->uc_mcontext.gregs[REG_EBP];
+  *sp = ucontext->uc_mcontext.gregs[REG_ESP];
+# endif
+#elif defined(__powerpc__) || defined(__powerpc64__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.regs->nip;
+  *sp = ucontext->uc_mcontext.regs->gpr[PT_R1];
+  // The powerpc{,64}-linux ABIs do not specify r31 as the frame
+  // pointer, but GCC always uses r31 when we need a frame pointer.
+  *bp = ucontext->uc_mcontext.regs->gpr[PT_R31];
+#elif defined(__sparc__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+  uptr *stk_ptr;
+# if defined (__arch64__)
+  *pc = ucontext->uc_mcontext.mc_gregs[MC_PC];
+  *sp = ucontext->uc_mcontext.mc_gregs[MC_O6];
+  stk_ptr = (uptr *) (*sp + 2047);
+  *bp = stk_ptr[15];
+# else
+  *pc = ucontext->uc_mcontext.gregs[REG_PC];
+  *sp = ucontext->uc_mcontext.gregs[REG_O6];
+  stk_ptr = (uptr *) *sp;
+  *bp = stk_ptr[15];
+# endif
+#elif defined(__mips__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+  *pc = ucontext->uc_mcontext.gregs[31];
+  *bp = ucontext->uc_mcontext.gregs[30];
+  *sp = ucontext->uc_mcontext.gregs[29];
+#else
+# error "Unsupported arch"
+#endif
 }
 
 }  // namespace __sanitizer

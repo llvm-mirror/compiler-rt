@@ -103,7 +103,7 @@ TEST(Mman, UsableSize) {
   EXPECT_EQ(20U, user_alloc_usable_size(p2));
   user_free(thr, pc, p);
   user_free(thr, pc, p2);
-  EXPECT_EQ(0U, user_alloc_usable_size((void*)0x123));
+  EXPECT_EQ(0U, user_alloc_usable_size((void*)0x4123));
 }
 
 TEST(Mman, Stats) {
@@ -136,7 +136,7 @@ TEST(Mman, Stats) {
 }
 
 TEST(Mman, CallocOverflow) {
-#if TSAN_DEBUG
+#if SANITIZER_DEBUG
   // EXPECT_DEATH clones a thread with 4K stack,
   // which is overflown by tsan memory accesses functions in debug mode.
   return;

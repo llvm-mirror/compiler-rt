@@ -11,11 +11,9 @@ import argparse
 import bisect
 import getopt
 import os
-import pty
 import re
 import subprocess
 import sys
-import termios
 
 symbolizers = {}
 DEBUG = False
@@ -25,6 +23,7 @@ sysroot_path = None
 binary_name_filter = None
 fix_filename_patterns = None
 logfile = sys.stdin
+allow_system_symbolizer = True
 
 # FIXME: merge the code that calls fix_filename().
 def fix_filename(file_name):
@@ -66,10 +65,12 @@ class Symbolizer(object):
 
 
 class LLVMSymbolizer(Symbolizer):
-  def __init__(self, symbolizer_path, addr):
+  def __init__(self, symbolizer_path, default_arch, system, dsym_hints=[]):
     super(LLVMSymbolizer, self).__init__()
     self.symbolizer_path = symbolizer_path
-    self.default_arch = guess_arch(addr)
+    self.default_arch = default_arch
+    self.system = system
+    self.dsym_hints = dsym_hints
     self.pipe = self.open_llvm_symbolizer()
 
   def open_llvm_symbolizer(self):
@@ -79,6 +80,9 @@ class LLVMSymbolizer(Symbolizer):
            '--functions=short',
            '--inlining=true',
            '--default-arch=%s' % self.default_arch]
+    if self.system == 'Darwin':
+      for hint in self.dsym_hints:
+        cmd.append('--dsym-hint=%s' % hint)
     if DEBUG:
       print ' '.join(cmd)
     try:
@@ -94,7 +98,7 @@ class LLVMSymbolizer(Symbolizer):
       return None
     result = []
     try:
-      symbolizer_input = '%s %s' % (binary, offset)
+      symbolizer_input = '"%s" %s' % (binary, offset)
       if DEBUG:
         print symbolizer_input
       print >> self.pipe.stdin, symbolizer_input
@@ -116,14 +120,14 @@ class LLVMSymbolizer(Symbolizer):
     return result
 
 
-def LLVMSymbolizerFactory(system, addr):
+def LLVMSymbolizerFactory(system, default_arch, dsym_hints=[]):
   symbolizer_path = os.getenv('LLVM_SYMBOLIZER_PATH')
   if not symbolizer_path:
     symbolizer_path = os.getenv('ASAN_SYMBOLIZER_PATH')
     if not symbolizer_path:
       # Assume llvm-symbolizer is in PATH.
       symbolizer_path = 'llvm-symbolizer'
-  return LLVMSymbolizer(symbolizer_path, addr)
+  return LLVMSymbolizer(symbolizer_path, default_arch, system, dsym_hints)
 
 
 class Addr2LineSymbolizer(Symbolizer):
@@ -166,6 +170,9 @@ class UnbufferedLineConverter(object):
   output.  Uses pty to trick the child into providing unbuffered output.
   """
   def __init__(self, args, close_stderr=False):
+    # Local imports so that the script can start on Windows.
+    import pty
+    import termios
     pid, fd = pty.fork()
     if pid == 0:
       # We're the child. Transfer control to command.
@@ -335,28 +342,59 @@ class BreakpadSymbolizer(Symbolizer):
 
 
 class SymbolizationLoop(object):
-  def __init__(self, binary_name_filter=None):
-    # Used by clients who may want to supply a different binary name.
-    # E.g. in Chrome several binaries may share a single .dSYM.
-    self.binary_name_filter = binary_name_filter
-    self.system = os.uname()[0]
-    if self.system not in ['Linux', 'Darwin', 'FreeBSD']:
-      raise Exception('Unknown system')
-    self.llvm_symbolizer = None
-    self.frame_no = 0
+  def __init__(self, binary_name_filter=None, dsym_hint_producer=None):
+    if sys.platform == 'win32':
+      # ASan on Windows uses dbghelp.dll to symbolize in-process, which works
+      # even in sandboxed processes.  Nothing needs to be done here.
+      self.process_line = self.process_line_echo
+    else:
+      # Used by clients who may want to supply a different binary name.
+      # E.g. in Chrome several binaries may share a single .dSYM.
+      self.binary_name_filter = binary_name_filter
+      self.dsym_hint_producer = dsym_hint_producer
+      self.system = os.uname()[0]
+      if self.system not in ['Linux', 'Darwin', 'FreeBSD']:
+        raise Exception('Unknown system')
+      self.llvm_symbolizers = {}
+      self.last_llvm_symbolizer = None
+      self.dsym_hints = set([])
+      self.frame_no = 0
+      self.process_line = self.process_line_posix
 
   def symbolize_address(self, addr, binary, offset):
-    # Initialize llvm-symbolizer lazily.
-    if not self.llvm_symbolizer:
-      self.llvm_symbolizer = LLVMSymbolizerFactory(self.system, addr)
+    # On non-Darwin (i.e. on platforms without .dSYM debug info) always use
+    # a single symbolizer binary.
+    # On Darwin, if the dsym hint producer is present:
+    #  1. check whether we've seen this binary already; if so,
+    #     use |llvm_symbolizers[binary]|, which has already loaded the debug
+    #     info for this binary (might not be the case for
+    #     |last_llvm_symbolizer|);
+    #  2. otherwise check if we've seen all the hints for this binary already;
+    #     if so, reuse |last_llvm_symbolizer| which has the full set of hints;
+    #  3. otherwise create a new symbolizer and pass all currently known
+    #     .dSYM hints to it.
+    if not binary in self.llvm_symbolizers:
+      use_new_symbolizer = True
+      if self.system == 'Darwin' and self.dsym_hint_producer:
+        dsym_hints_for_binary = set(self.dsym_hint_producer(binary))
+        use_new_symbolizer = bool(dsym_hints_for_binary - self.dsym_hints)
+        self.dsym_hints |= dsym_hints_for_binary
+      if self.last_llvm_symbolizer and not use_new_symbolizer:
+          self.llvm_symbolizers[binary] = self.last_llvm_symbolizer
+      else:
+        self.last_llvm_symbolizer = LLVMSymbolizerFactory(
+            self.system, guess_arch(addr), self.dsym_hints)
+        self.llvm_symbolizers[binary] = self.last_llvm_symbolizer
     # Use the chain of symbolizers:
     # Breakpad symbolizer -> LLVM symbolizer -> addr2line/atos
     # (fall back to next symbolizer if the previous one fails).
     if not binary in symbolizers:
       symbolizers[binary] = ChainSymbolizer(
-          [BreakpadSymbolizerFactory(binary), self.llvm_symbolizer])
+          [BreakpadSymbolizerFactory(binary), self.llvm_symbolizers[binary]])
     result = symbolizers[binary].symbolize(addr, binary, offset)
     if result is None:
+      if not allow_system_symbolizer:
+        raise Exception('Failed to launch or use llvm-symbolizer.')
       # Initialize system symbolizer only if other symbolizers failed.
       symbolizers[binary].append_symbolizer(
           SystemSymbolizerFactory(self.system, addr, binary))
@@ -377,14 +415,14 @@ class SymbolizationLoop(object):
 
   def process_logfile(self):
     self.frame_no = 0
-    while True:
-      line = logfile.readline()
-      if not line:
-        break
+    for line in logfile:
       processed = self.process_line(line)
       print '\n'.join(processed)
 
-  def process_line(self, line):
+  def process_line_echo(self, line):
+    return [line.rstrip()]
+
+  def process_line_posix(self, line):
     self.current_line = line.rstrip()
     #0 0x7f6e35cf2e45  (/blah/foo.so+0x11fe45)
     stack_trace_line_format = (
@@ -409,20 +447,23 @@ class SymbolizationLoop(object):
 
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
-  description='ASan symbolization script',
-  epilog='''Example of use:
-  asan_symbolize.py -c "$HOME/opt/cross/bin/arm-linux-gnueabi-" -s "$HOME/SymbolFiles" < asan.log''')
+  parser = argparse.ArgumentParser(
+      formatter_class=argparse.RawDescriptionHelpFormatter,
+      description='ASan symbolization script',
+      epilog='Example of use:\n'
+             'asan_symbolize.py -c "$HOME/opt/cross/bin/arm-linux-gnueabi-" '
+             '-s "$HOME/SymbolFiles" < asan.log')
   parser.add_argument('path_to_cut', nargs='*',
-    help='pattern to be cut from the result file path ')
+                      help='pattern to be cut from the result file path ')
   parser.add_argument('-d','--demangle', action='store_true',
-    help='demangle function names')
+                      help='demangle function names')
   parser.add_argument('-s', metavar='SYSROOT',
-    help='set path to sysroot for sanitized binaries')
+                      help='set path to sysroot for sanitized binaries')
   parser.add_argument('-c', metavar='CROSS_COMPILE',
-    help='set prefix for binutils')
-  parser.add_argument('-l','--logfile', default=sys.stdin, type=argparse.FileType('r'),
-    help='set log file name to parse, default is stdin')
+                      help='set prefix for binutils')
+  parser.add_argument('-l','--logfile', default=sys.stdin,
+                      type=argparse.FileType('r'),
+                      help='set log file name to parse, default is stdin')
   args = parser.parse_args()
   if args.path_to_cut:
     fix_filename_patterns = args.path_to_cut

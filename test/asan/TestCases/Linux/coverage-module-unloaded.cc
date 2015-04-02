@@ -1,8 +1,8 @@
 // Check that unloading a module doesn't break coverage dumping for remaining
 // modules.
-// RUN: %clangxx_asan -mllvm -asan-coverage=1 -DSHARED %s -shared -o %T/libcoverage_module_unloaded_test_1.so -fPIC
-// RUN: %clangxx_asan -mllvm -asan-coverage=1 -DSHARED %s -shared -o %T/libcoverage_module_unloaded_test_2.so -fPIC
-// RUN: %clangxx_asan -mllvm -asan-coverage=1 -DSO_DIR=\"%T\" %s -o %t
+// RUN: %clangxx_asan -fsanitize-coverage=1 -DSHARED %s -shared -o %T/libcoverage_module_unloaded_test_1.so -fPIC
+// RUN: %clangxx_asan -fsanitize-coverage=1 -DSHARED %s -shared -o %T/libcoverage_module_unloaded_test_2.so -fPIC
+// RUN: %clangxx_asan -fsanitize-coverage=1 -DSO_DIR=\"%T\" %s %libdl -o %t
 // RUN: export ASAN_OPTIONS=coverage=1:verbosity=1
 // RUN: mkdir -p %T/coverage-module-unloaded && cd %T/coverage-module-unloaded
 // RUN: %run %t 2>&1         | FileCheck %s
@@ -50,7 +50,7 @@ int main(int argc, char **argv) {
 
 // CHECK: PID: [[PID:[0-9]+]]
 // CHECK: [[PID]].sancov: 1 PCs written
-// CHECK: .so.[[PID]]
-// If we get coverage for both DSOs, it means the module wasn't unloaded and
-// this test is useless.
-// CHECK-NOT: .so.[[PID]]
+// CHECK: test_1.so.[[PID]]
+// CHECK: test_2.so.[[PID]]
+// Even though we've unloaded one of the libs we still dump the coverage file
+// for that lib (although the data will be inaccurate, it at all useful)

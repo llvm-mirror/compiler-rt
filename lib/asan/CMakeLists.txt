@@ -1,17 +1,11 @@
 # Build for the AddressSanitizer runtime support library.
 
-if(APPLE)
-# Don't set rpath for the ASan libraries. Developers are encouraged to ship
-# their binaries together with the corresponding ASan runtime libraries,
-# so they'll anyway need to fix the rpath and the install name.
-set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
-endif()
-
 set(ASAN_SOURCES
-  asan_allocator2.cc
+  asan_allocator.cc
   asan_activation.cc
   asan_debugging.cc
   asan_fake_stack.cc
+  asan_flags.cc
   asan_globals.cc
   asan_interceptors.cc
   asan_linux.cc
@@ -25,6 +19,7 @@ set(ASAN_SOURCES
   asan_rtl.cc
   asan_stack.cc
   asan_stats.cc
+  asan_suppressions.cc
   asan_thread.cc
   asan_win.cc)
 
@@ -35,10 +30,6 @@ set(ASAN_PREINIT_SOURCES
   asan_preinit.cc)
 
 include_directories(..)
-
-if(ANDROID)
-  include_directories(${COMPILER_RT_EXTRA_ANDROID_HEADERS})
-endif()
 
 set(ASAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 append_no_rtti_flag(ASAN_CFLAGS)
@@ -74,8 +65,8 @@ if(APPLE)
     add_compiler_rt_darwin_object_library(RTAsan ${os}
       ARCH ${ASAN_SUPPORTED_ARCH}
       SOURCES ${ASAN_SOURCES} ${ASAN_CXX_SOURCES}
-      CFLAGS ${ASAN_CFLAGS}
-      DEFS ${ASAN_COMMON_DEFINITIONS})
+      CFLAGS ${ASAN_DYNAMIC_CFLAGS}
+      DEFS ${ASAN_DYNAMIC_DEFINITIONS})
   endforeach()
 else()
   foreach(arch ${ASAN_SUPPORTED_ARCH})
@@ -88,12 +79,10 @@ else()
     add_compiler_rt_object_library(RTAsan_preinit ${arch}
       SOURCES ${ASAN_PREINIT_SOURCES} CFLAGS ${ASAN_CFLAGS}
       DEFS ${ASAN_COMMON_DEFINITIONS})
-    if (COMPILER_RT_BUILD_SHARED_ASAN)
-      add_compiler_rt_object_library(RTAsan_dynamic ${arch}
-        SOURCES ${ASAN_SOURCES} ${ASAN_CXX_SOURCES}
-        CFLAGS ${ASAN_DYNAMIC_CFLAGS}
-        DEFS ${ASAN_DYNAMIC_DEFINITIONS})
-    endif()
+    add_compiler_rt_object_library(RTAsan_dynamic ${arch}
+      SOURCES ${ASAN_SOURCES} ${ASAN_CXX_SOURCES}
+      CFLAGS ${ASAN_DYNAMIC_CFLAGS}
+      DEFS ${ASAN_DYNAMIC_DEFINITIONS})
   endforeach()
 endif()
 
@@ -107,8 +96,8 @@ if(APPLE)
               $<TARGET_OBJECTS:RTInterception.${os}>
               $<TARGET_OBJECTS:RTSanitizerCommon.${os}>
               $<TARGET_OBJECTS:RTLSanCommon.${os}>
-      CFLAGS ${ASAN_CFLAGS}
-      DEFS ${ASAN_COMMON_DEFINITIONS})
+      CFLAGS ${ASAN_DYNAMIC_CFLAGS}
+      DEFS ${ASAN_DYNAMIC_DEFINITIONS})
     add_dependencies(asan clang_rt.asan_${os}_dynamic)
   endforeach()
 else()
@@ -117,12 +106,8 @@ else()
     set(ASAN_COMMON_RUNTIME_OBJECTS
       $<TARGET_OBJECTS:RTInterception.${arch}>
       $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
-      $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>)
-    if(NOT WIN32)
-      # We can't build Leak Sanitizer on Windows yet.
-      list(APPEND ASAN_COMMON_RUNTIME_OBJECTS
-           $<TARGET_OBJECTS:RTLSanCommon.${arch}>)
-    endif()
+      $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>
+      $<TARGET_OBJECTS:RTLSanCommon.${arch}>)
 
     add_compiler_rt_runtime(clang_rt.asan-${arch} ${arch} STATIC
       SOURCES $<TARGET_OBJECTS:RTAsan_preinit.${arch}>
@@ -138,30 +123,27 @@ else()
       DEFS ${ASAN_COMMON_DEFINITIONS})
     add_dependencies(asan clang_rt.asan_cxx-${arch})
 
-    if (COMPILER_RT_BUILD_SHARED_ASAN)
-      add_compiler_rt_runtime(clang_rt.asan-preinit-${arch} ${arch} STATIC
-        SOURCES $<TARGET_OBJECTS:RTAsan_preinit.${arch}>
-        CFLAGS ${ASAN_CFLAGS}
-        DEFS ${ASAN_COMMON_DEFINITIONS})
-      add_dependencies(asan clang_rt.asan-preinit-${arch})
+    add_compiler_rt_runtime(clang_rt.asan-preinit-${arch} ${arch} STATIC
+      SOURCES $<TARGET_OBJECTS:RTAsan_preinit.${arch}>
+      CFLAGS ${ASAN_CFLAGS}
+      DEFS ${ASAN_COMMON_DEFINITIONS})
+    add_dependencies(asan clang_rt.asan-preinit-${arch})
 
-      if (WIN32)
-         set(SHARED_ASAN_NAME clang_rt.asan_dynamic-${arch}${COMPILER_RT_OS_SUFFIX})
-      else()
-         set(SHARED_ASAN_NAME clang_rt.asan-${arch}${COMPILER_RT_OS_SUFFIX})
-      endif()
-
-      add_compiler_rt_runtime(clang_rt.asan-dynamic-${arch} ${arch} SHARED
-        OUTPUT_NAME ${SHARED_ASAN_NAME}
-        SOURCES $<TARGET_OBJECTS:RTAsan_dynamic.${arch}>
-                ${ASAN_COMMON_RUNTIME_OBJECTS}
-        CFLAGS ${ASAN_DYNAMIC_CFLAGS}
-        DEFS ${ASAN_DYNAMIC_DEFINITIONS})
-      target_link_libraries(clang_rt.asan-dynamic-${arch} ${ASAN_DYNAMIC_LIBS})
-      add_dependencies(asan clang_rt.asan-dynamic-${arch})
+    if (WIN32)
+      set(SHARED_ASAN_NAME clang_rt.asan_dynamic-${arch}${COMPILER_RT_OS_SUFFIX})
+    else()
+      set(SHARED_ASAN_NAME clang_rt.asan-${arch}${COMPILER_RT_OS_SUFFIX})
     endif()
+    add_compiler_rt_runtime(clang_rt.asan-dynamic-${arch} ${arch} SHARED
+      OUTPUT_NAME ${SHARED_ASAN_NAME}
+      SOURCES $<TARGET_OBJECTS:RTAsan_dynamic.${arch}>
+              ${ASAN_COMMON_RUNTIME_OBJECTS}
+      CFLAGS ${ASAN_DYNAMIC_CFLAGS}
+      DEFS ${ASAN_DYNAMIC_DEFINITIONS})
+    target_link_libraries(clang_rt.asan-dynamic-${arch} ${ASAN_DYNAMIC_LIBS})
+    add_dependencies(asan clang_rt.asan-dynamic-${arch})
 
-    if (UNIX AND NOT ${arch} STREQUAL "i386" AND NOT ${arch} STREQUAL "i686")
+    if (UNIX AND NOT ${arch} MATCHES "i386|i686")
       add_sanitizer_rt_symbols(clang_rt.asan_cxx-${arch})
       add_dependencies(asan clang_rt.asan_cxx-${arch}-symbols)
       add_sanitizer_rt_symbols(clang_rt.asan-${arch} asan.syms.extra)

@@ -11,18 +11,62 @@
 // run-time libraries.
 //===----------------------------------------------------------------------===//
 
+#include "sanitizer_allocator_internal.h"
 #include "sanitizer_internal_defs.h"
-#include "sanitizer_symbolizer.h"
+#include "sanitizer_symbolizer_internal.h"
 
 namespace __sanitizer {
+
+const char *ExtractToken(const char *str, const char *delims, char **result) {
+  uptr prefix_len = internal_strcspn(str, delims);
+  *result = (char*)InternalAlloc(prefix_len + 1);
+  internal_memcpy(*result, str, prefix_len);
+  (*result)[prefix_len] = '\0';
+  const char *prefix_end = str + prefix_len;
+  if (*prefix_end != '\0') prefix_end++;
+  return prefix_end;
+}
+
+const char *ExtractInt(const char *str, const char *delims, int *result) {
+  char *buff;
+  const char *ret = ExtractToken(str, delims, &buff);
+  if (buff != 0) {
+    *result = (int)internal_atoll(buff);
+  }
+  InternalFree(buff);
+  return ret;
+}
+
+const char *ExtractUptr(const char *str, const char *delims, uptr *result) {
+  char *buff;
+  const char *ret = ExtractToken(str, delims, &buff);
+  if (buff != 0) {
+    *result = (uptr)internal_atoll(buff);
+  }
+  InternalFree(buff);
+  return ret;
+}
+
+const char *ExtractTokenUpToDelimiter(const char *str, const char *delimiter,
+                                      char **result) {
+  const char *found_delimiter = internal_strstr(str, delimiter);
+  uptr prefix_len =
+      found_delimiter ? found_delimiter - str : internal_strlen(str);
+  *result = (char *)InternalAlloc(prefix_len + 1);
+  internal_memcpy(*result, str, prefix_len);
+  (*result)[prefix_len] = '\0';
+  const char *prefix_end = str + prefix_len;
+  if (*prefix_end != '\0') prefix_end += internal_strlen(delimiter);
+  return prefix_end;
+}
 
 Symbolizer *Symbolizer::GetOrInit() {
   SpinMutexLock l(&init_mu_);
   if (symbolizer_)
     return symbolizer_;
-  if ((symbolizer_ = PlatformInit()))
-    return symbolizer_;
-  return Disable();
+  symbolizer_ = PlatformInit();
+  CHECK(symbolizer_);
+  return symbolizer_;
 }
 
 }  // namespace __sanitizer

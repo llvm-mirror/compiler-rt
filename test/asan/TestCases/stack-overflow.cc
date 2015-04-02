@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sanitizer/asan_interface.h>
 
 const int BS = 1024;
 volatile char x;
@@ -65,7 +66,8 @@ void recursive_func(char *p) {
   z13 = t13;
 #else
   char buf[BS];
-  if (p)
+  // Check that the stack grows in the righ direction, unless we use fake stack.
+  if (p && !__asan_get_current_fake_stack())
     assert(p - buf >= BS);
   buf[rand() % BS] = 1;
   buf[rand() % BS] = 2;
@@ -90,7 +92,7 @@ void LimitStackAndReexec(int argc, char **argv) {
   int res = getrlimit(RLIMIT_STACK, &rlim);
   assert(res == 0);
   if (rlim.rlim_cur == RLIM_INFINITY) {
-    rlim.rlim_cur = 128 * 1024;
+    rlim.rlim_cur = 256 * 1024;
     res = setrlimit(RLIMIT_STACK, &rlim);
     assert(res == 0);
 

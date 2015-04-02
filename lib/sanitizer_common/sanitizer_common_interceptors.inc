@@ -17,10 +17,12 @@
 //   COMMON_INTERCEPTOR_READ_RANGE
 //   COMMON_INTERCEPTOR_WRITE_RANGE
 //   COMMON_INTERCEPTOR_INITIALIZE_RANGE
+//   COMMON_INTERCEPTOR_DIR_ACQUIRE
 //   COMMON_INTERCEPTOR_FD_ACQUIRE
 //   COMMON_INTERCEPTOR_FD_RELEASE
 //   COMMON_INTERCEPTOR_FD_ACCESS
 //   COMMON_INTERCEPTOR_SET_THREAD_NAME
+//   COMMON_INTERCEPTOR_ON_DLOPEN
 //   COMMON_INTERCEPTOR_ON_EXIT
 //   COMMON_INTERCEPTOR_MUTEX_LOCK
 //   COMMON_INTERCEPTOR_MUTEX_UNLOCK
@@ -40,6 +42,12 @@
 #if SANITIZER_WINDOWS && !defined(va_copy)
 #define va_copy(dst, src) ((dst) = (src))
 #endif // _WIN32
+
+#if SANITIZER_FREEBSD
+#define pthread_setname_np pthread_set_name_np
+#define inet_aton __inet_aton
+#define inet_pton __inet_pton
+#endif
 
 #ifndef COMMON_INTERCEPTOR_INITIALIZE_RANGE
 #define COMMON_INTERCEPTOR_INITIALIZE_RANGE(p, size) {}
@@ -78,7 +86,7 @@
 #endif
 
 #ifndef COMMON_INTERCEPTOR_LIBRARY_LOADED
-#define COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, map) {}
+#define COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, handle) {}
 #endif
 
 #ifndef COMMON_INTERCEPTOR_LIBRARY_UNLOADED
@@ -92,6 +100,10 @@
 
 #ifndef COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED
 #define COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED (0)
+#endif
+
+#ifndef COMMON_INTERCEPTOR_ON_DLOPEN
+#define COMMON_INTERCEPTOR_ON_DLOPEN(filename, flag) {}
 #endif
 
 struct FileMetadata {
@@ -251,7 +263,7 @@ INTERCEPTOR(void*, memchr, const void *s, int c, SIZE_T n) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, memchr, s, c, n);
   void *res = REAL(memchr)(s, c, n);
-  uptr len = res ? (char*)res - (char*)s + 1 : n;
+  uptr len = res ? (char *)res - (const char *)s + 1 : n;
   COMMON_INTERCEPTOR_READ_RANGE(ctx, s, len);
   return res;
 }
@@ -911,6 +923,16 @@ INTERCEPTOR(int, vsnprintf, char *str, SIZE_T size, const char *format,
             va_list ap)
 VSNPRINTF_INTERCEPTOR_IMPL(vsnprintf, str, size, format, ap)
 
+#if SANITIZER_INTERCEPT_PRINTF_L
+INTERCEPTOR(int, vsnprintf_l, char *str, SIZE_T size, void *loc,
+            const char *format, va_list ap)
+VSNPRINTF_INTERCEPTOR_IMPL(vsnprintf_l, str, size, loc, format, ap)
+
+INTERCEPTOR(int, snprintf_l, char *str, SIZE_T size, void *loc,
+            const char *format, ...)
+FORMAT_INTERCEPTOR_IMPL(snprintf_l, vsnprintf_l, str, size, loc, format)
+#endif  // SANITIZER_INTERCEPT_PRINTF_L
+
 INTERCEPTOR(int, vsprintf, char *str, const char *format, va_list ap)
 VSPRINTF_INTERCEPTOR_IMPL(vsprintf, str, format, ap)
 
@@ -987,6 +1009,14 @@ FORMAT_INTERCEPTOR_IMPL(__isoc99_snprintf, __isoc99_vsnprintf, str, size,
 #define INIT_PRINTF
 #endif
 
+#if SANITIZER_INTERCEPT_PRINTF_L
+#define INIT_PRINTF_L                     \
+  COMMON_INTERCEPT_FUNCTION(snprintf_l);  \
+  COMMON_INTERCEPT_FUNCTION(vsnprintf_l);
+#else
+#define INIT_PRINTF_L
+#endif
+
 #if SANITIZER_INTERCEPT_ISOC99_PRINTF
 #define INIT_ISOC99_PRINTF                       \
   COMMON_INTERCEPT_FUNCTION(__isoc99_printf);    \
@@ -1003,8 +1033,18 @@ FORMAT_INTERCEPTOR_IMPL(__isoc99_snprintf, __isoc99_vsnprintf, str, size,
 
 #if SANITIZER_INTERCEPT_IOCTL
 #include "sanitizer_common_interceptors_ioctl.inc"
-INTERCEPTOR(int, ioctl, int d, unsigned request, void *arg) {
+INTERCEPTOR(int, ioctl, int d, unsigned long request, ...) {
+  // We need a frame pointer, because we call into ioctl_common_[pre|post] which
+  // can trigger a report and we need to be able to unwind through this
+  // function.  On Mac in debug mode we might not have a frame pointer, because
+  // ioctl_common_[pre|post] doesn't get inlined here.
+  ENABLE_FRAME_POINTER;
+
   void *ctx;
+  va_list ap;
+  va_start(ap, request);
+  void *arg = va_arg(ap, void *);
+  va_end(ap);
   COMMON_INTERCEPTOR_ENTER(ctx, ioctl, d, request, arg);
 
   CHECK(ioctl_initialized);
@@ -1012,6 +1052,10 @@ INTERCEPTOR(int, ioctl, int d, unsigned request, void *arg) {
   // Note: TSan does not use common flags, and they are zero-initialized.
   // This effectively disables ioctl handling in TSan.
   if (!common_flags()->handle_ioctl) return REAL(ioctl)(d, request, arg);
+
+  // Although request is unsigned long, the rest of the interceptor uses it
+  // as just "unsigned" to save space, because we know that all values fit in
+  // "unsigned" - they are compile-time constants.
 
   const ioctl_desc *desc = ioctl_lookup(request);
   ioctl_desc decoded_desc;
@@ -1438,30 +1482,30 @@ static THREADLOCAL __sanitizer_glob_t *pglob_copy;
 
 static void wrapped_gl_closedir(void *dir) {
   COMMON_INTERCEPTOR_UNPOISON_PARAM(1);
-  IndirectExternCall(pglob_copy->gl_closedir)(dir);
+  pglob_copy->gl_closedir(dir);
 }
 
 static void *wrapped_gl_readdir(void *dir) {
   COMMON_INTERCEPTOR_UNPOISON_PARAM(1);
-  return IndirectExternCall(pglob_copy->gl_readdir)(dir);
+  return pglob_copy->gl_readdir(dir);
 }
 
 static void *wrapped_gl_opendir(const char *s) {
   COMMON_INTERCEPTOR_UNPOISON_PARAM(1);
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(s, REAL(strlen)(s) + 1);
-  return IndirectExternCall(pglob_copy->gl_opendir)(s);
+  return pglob_copy->gl_opendir(s);
 }
 
 static int wrapped_gl_lstat(const char *s, void *st) {
   COMMON_INTERCEPTOR_UNPOISON_PARAM(2);
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(s, REAL(strlen)(s) + 1);
-  return IndirectExternCall(pglob_copy->gl_lstat)(s, st);
+  return pglob_copy->gl_lstat(s, st);
 }
 
 static int wrapped_gl_stat(const char *s, void *st) {
   COMMON_INTERCEPTOR_UNPOISON_PARAM(2);
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(s, REAL(strlen)(s) + 1);
-  return IndirectExternCall(pglob_copy->gl_stat)(s, st);
+  return pglob_copy->gl_stat(s, st);
 }
 
 INTERCEPTOR(int, glob, const char *pattern, int flags,
@@ -2135,6 +2179,16 @@ INTERCEPTOR(int, sysinfo, void *info) {
 #endif
 
 #if SANITIZER_INTERCEPT_READDIR
+INTERCEPTOR(__sanitizer_dirent *, opendir, const char *path) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, opendir, path);
+  COMMON_INTERCEPTOR_READ_RANGE(ctx, path, REAL(strlen)(path) + 1);
+  __sanitizer_dirent *res = REAL(opendir)(path);
+  if (res != 0)
+    COMMON_INTERCEPTOR_DIR_ACQUIRE(ctx, path);
+  return res;
+}
+
 INTERCEPTOR(__sanitizer_dirent *, readdir, void *dirp) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, readdir, dirp);
@@ -2163,6 +2217,7 @@ INTERCEPTOR(int, readdir_r, void *dirp, __sanitizer_dirent *entry,
 }
 
 #define INIT_READDIR                  \
+  COMMON_INTERCEPT_FUNCTION(opendir); \
   COMMON_INTERCEPT_FUNCTION(readdir); \
   COMMON_INTERCEPT_FUNCTION(readdir_r);
 #else
@@ -2556,6 +2611,19 @@ INTERCEPTOR(int, sched_getaffinity, int pid, SIZE_T cpusetsize, void *mask) {
 #define INIT_SCHED_GETAFFINITY
 #endif
 
+#if SANITIZER_INTERCEPT_SCHED_GETPARAM
+INTERCEPTOR(int, sched_getparam, int pid, void *param) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, sched_getparam, pid, param);
+  int res = REAL(sched_getparam)(pid, param);
+  if (!res) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, param, struct_sched_param_sz);
+  return res;
+}
+#define INIT_SCHED_GETPARAM COMMON_INTERCEPT_FUNCTION(sched_getparam);
+#else
+#define INIT_SCHED_GETPARAM
+#endif
+
 #if SANITIZER_INTERCEPT_STRERROR
 INTERCEPTOR(char *, strerror, int errnum) {
   void *ctx;
@@ -2629,7 +2697,7 @@ static THREADLOCAL scandir_compar_f scandir_compar;
 static int wrapped_scandir_filter(const struct __sanitizer_dirent *dir) {
   COMMON_INTERCEPTOR_UNPOISON_PARAM(1);
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(dir, dir->d_reclen);
-  return IndirectExternCall(scandir_filter)(dir);
+  return scandir_filter(dir);
 }
 
 static int wrapped_scandir_compar(const struct __sanitizer_dirent **a,
@@ -2639,7 +2707,7 @@ static int wrapped_scandir_compar(const struct __sanitizer_dirent **a,
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(*a, (*a)->d_reclen);
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(b, sizeof(*b));
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(*b, (*b)->d_reclen);
-  return IndirectExternCall(scandir_compar)(a, b);
+  return scandir_compar(a, b);
 }
 
 INTERCEPTOR(int, scandir, char *dirp, __sanitizer_dirent ***namelist,
@@ -2681,7 +2749,7 @@ static THREADLOCAL scandir64_compar_f scandir64_compar;
 static int wrapped_scandir64_filter(const struct __sanitizer_dirent64 *dir) {
   COMMON_INTERCEPTOR_UNPOISON_PARAM(1);
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(dir, dir->d_reclen);
-  return IndirectExternCall(scandir64_filter)(dir);
+  return scandir64_filter(dir);
 }
 
 static int wrapped_scandir64_compar(const struct __sanitizer_dirent64 **a,
@@ -2691,7 +2759,7 @@ static int wrapped_scandir64_compar(const struct __sanitizer_dirent64 **a,
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(*a, (*a)->d_reclen);
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(b, sizeof(*b));
   COMMON_INTERCEPTOR_INITIALIZE_RANGE(*b, (*b)->d_reclen);
-  return IndirectExternCall(scandir64_compar)(a, b);
+  return scandir64_compar(a, b);
 }
 
 INTERCEPTOR(int, scandir64, char *dirp, __sanitizer_dirent64 ***namelist,
@@ -3864,6 +3932,12 @@ INTERCEPTOR(__sanitizer_clock_t, times, void *tms) {
 
 #if SANITIZER_INTERCEPT_TLS_GET_ADDR
 #define INIT_TLS_GET_ADDR COMMON_INTERCEPT_FUNCTION(__tls_get_addr)
+// If you see any crashes around this functions, there are 2 known issues with
+// it: 1. __tls_get_addr can be called with mis-aligned stack due to:
+// https://gcc.gnu.org/bugzilla/show_bug.cgi?id=58066
+// 2. It can be called recursively if sanitizer code uses __tls_get_addr
+// to access thread local variables (it should not happen normally,
+// because sanitizers use initial-exec tls model).
 INTERCEPTOR(void *, __tls_get_addr, void *arg) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, __tls_get_addr, arg);
@@ -4625,6 +4699,7 @@ INTERCEPTOR(int, fclose, __sanitizer_FILE *fp) {
 INTERCEPTOR(void*, dlopen, const char *filename, int flag) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER_NOIGNORE(ctx, dlopen, filename, flag);
+  COMMON_INTERCEPTOR_ON_DLOPEN(filename, flag);
   void *res = REAL(dlopen)(filename, flag);
   COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, res);
   return res;
@@ -4758,6 +4833,7 @@ static void InitializeCommonInterceptors() {
   INIT_SCANF;
   INIT_ISOC99_SCANF;
   INIT_PRINTF;
+  INIT_PRINTF_L;
   INIT_ISOC99_PRINTF;
   INIT_FREXP;
   INIT_FREXPF_FREXPL;
@@ -4808,6 +4884,7 @@ static void InitializeCommonInterceptors() {
   INIT_CANONICALIZE_FILE_NAME;
   INIT_CONFSTR;
   INIT_SCHED_GETAFFINITY;
+  INIT_SCHED_GETPARAM;
   INIT_STRERROR;
   INIT_STRERROR_R;
   INIT_XPG_STRERROR_R;
