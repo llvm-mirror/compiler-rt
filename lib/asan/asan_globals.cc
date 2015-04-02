@@ -18,6 +18,7 @@
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_stats.h"
+#include "asan_suppressions.h"
 #include "asan_thread.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_mutex.h"
@@ -158,13 +159,14 @@ static void RegisterGlobal(const Global *g) {
       // the entire redzone of the second global may be within the first global.
       for (ListOfGlobals *l = list_of_all_globals; l; l = l->next) {
         if (g->beg == l->g->beg &&
-            (flags()->detect_odr_violation >= 2 || g->size != l->g->size))
+            (flags()->detect_odr_violation >= 2 || g->size != l->g->size) &&
+            !IsODRViolationSuppressed(g->name))
           ReportODRViolation(g, FindRegistrationSite(g),
                              l->g, FindRegistrationSite(l->g));
       }
     }
   }
-  if (flags()->poison_heap)
+  if (CanPoisonMemory())
     PoisonRedZones(*g);
   ListOfGlobals *l = new(allocator_for_globals) ListOfGlobals;
   l->g = g;
@@ -182,11 +184,13 @@ static void RegisterGlobal(const Global *g) {
 
 static void UnregisterGlobal(const Global *g) {
   CHECK(asan_inited);
+  if (flags()->report_globals >= 2)
+    ReportGlobal(*g, "Removed");
   CHECK(flags()->report_globals);
   CHECK(AddrIsInMem(g->beg));
   CHECK(AddrIsAlignedByGranularity(g->beg));
   CHECK(AddrIsAlignedByGranularity(g->size_with_redzone));
-  if (flags()->poison_heap)
+  if (CanPoisonMemory())
     PoisonShadowForGlobal(g, 0);
   // We unpoison the shadow memory for the global but we do not remove it from
   // the list because that would require O(n^2) time with the current list
@@ -208,6 +212,20 @@ void StopInitOrderChecking() {
   }
 }
 
+#if SANITIZER_WINDOWS  // Should only be called on Windows.
+SANITIZER_INTERFACE_ATTRIBUTE
+void UnregisterGlobalsInRange(void *beg, void *end) {
+  if (!flags()->report_globals)
+    return;
+  BlockingMutexLock lock(&mu_for_globals);
+  for (ListOfGlobals *l = list_of_all_globals; l; l = l->next) {
+    void *address = (void *)l->g->beg;
+    if (beg <= address && address < end)
+      UnregisterGlobal(l->g);
+  }
+}
+#endif
+
 }  // namespace __asan
 
 // ---------------------- Interface ---------------- {{{1
@@ -216,7 +234,7 @@ using namespace __asan;  // NOLINT
 // Register an array of globals.
 void __asan_register_globals(__asan_global *globals, uptr n) {
   if (!flags()->report_globals) return;
-  GET_STACK_TRACE_FATAL_HERE;
+  GET_STACK_TRACE_MALLOC;
   u32 stack_id = StackDepotPut(stack);
   BlockingMutexLock lock(&mu_for_globals);
   if (!global_registration_site_vector)
@@ -249,7 +267,7 @@ void __asan_unregister_globals(__asan_global *globals, uptr n) {
 // initializer can only touch global variables in the same TU.
 void __asan_before_dynamic_init(const char *module_name) {
   if (!flags()->check_initialization_order ||
-      !flags()->poison_heap)
+      !CanPoisonMemory())
     return;
   bool strict_init_order = flags()->strict_init_order;
   CHECK(dynamic_init_globals);
@@ -275,7 +293,7 @@ void __asan_before_dynamic_init(const char *module_name) {
 // TU are poisoned.  It simply unpoisons all dynamically initialized globals.
 void __asan_after_dynamic_init() {
   if (!flags()->check_initialization_order ||
-      !flags()->poison_heap)
+      !CanPoisonMemory())
     return;
   CHECK(asan_inited);
   BlockingMutexLock lock(&mu_for_globals);

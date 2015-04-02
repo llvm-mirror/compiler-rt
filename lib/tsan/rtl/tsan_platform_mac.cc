@@ -50,11 +50,7 @@ void FlushShadowMemory() {
 void WriteMemoryProfile(char *buf, uptr buf_size, uptr nthread, uptr nlive) {
 }
 
-uptr GetRSS() {
-  return 0;
-}
-
-#ifndef TSAN_GO
+#ifndef SANITIZER_GO
 void InitializeShadowMemory() {
   uptr shadow = (uptr)MmapFixedNoReserve(kShadowBeg,
     kShadowEnd - kShadowBeg);
@@ -64,6 +60,8 @@ void InitializeShadowMemory() {
            "to link with -pie.\n");
     Die();
   }
+  if (common_flags()->use_madv_dontdump)
+    DontDumpShadowMemory(kShadowBeg, kShadowEnd - kShadowBeg);
   DPrintf("kShadow %zx-%zx (%zuGB)\n",
       kShadowBeg, kShadowEnd,
       (kShadowEnd - kShadowBeg) >> 30);
@@ -77,7 +75,7 @@ void InitializePlatform() {
   DisableCoreDumperIfNecessary();
 }
 
-#ifndef TSAN_GO
+#ifndef SANITIZER_GO
 int call_pthread_cancel_with_cleanup(int(*fn)(void *c, void *m,
     void *abstime), void *c, void *m, void *abstime,
     void(*cleanup)(void *arg), void *arg) {

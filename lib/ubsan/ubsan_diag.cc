@@ -14,9 +14,11 @@
 #include "ubsan_diag.h"
 #include "ubsan_init.h"
 #include "ubsan_flags.h"
+#include "sanitizer_common/sanitizer_placement_new.h"
 #include "sanitizer_common/sanitizer_report_decorator.h"
 #include "sanitizer_common/sanitizer_stacktrace.h"
 #include "sanitizer_common/sanitizer_stacktrace_printer.h"
+#include "sanitizer_common/sanitizer_suppressions.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 #include <stdio.h>
 
@@ -66,31 +68,9 @@ class Decorator : public SanitizerCommonDecorator {
 };
 }
 
-Location __ubsan::getCallerLocation(uptr CallerLoc) {
-  if (!CallerLoc)
-    return Location();
-
-  uptr Loc = StackTrace::GetPreviousInstructionPc(CallerLoc);
-  return getFunctionLocation(Loc, 0);
-}
-
-Location __ubsan::getFunctionLocation(uptr Loc, const char **FName) {
-  if (!Loc)
-    return Location();
+SymbolizedStack *__ubsan::getSymbolizedLocation(uptr PC) {
   InitIfNecessary();
-
-  AddressInfo Info;
-  if (!Symbolizer::GetOrInit()->SymbolizePC(Loc, &Info, 1) || !Info.module ||
-      !*Info.module)
-    return Location(Loc);
-
-  if (FName && Info.function)
-    *FName = Info.function;
-
-  if (!Info.file)
-    return ModuleLocation(Info.module, Info.module_offset);
-
-  return SourceLocation(Info.file, Info.line, Info.column);
+  return Symbolizer::GetOrInit()->SymbolizePC(PC);
 }
 
 Diag &Diag::operator<<(const TypeDescriptor &V) {
@@ -134,15 +114,22 @@ static void renderLocation(Location Loc) {
                            SLoc.getColumn(), common_flags()->strip_path_prefix);
     break;
   }
-  case Location::LK_Module: {
-    ModuleLocation MLoc = Loc.getModuleLocation();
-    RenderModuleLocation(&LocBuffer, MLoc.getModuleName(), MLoc.getOffset(),
-                         common_flags()->strip_path_prefix);
-    break;
-  }
   case Location::LK_Memory:
     LocBuffer.append("%p", Loc.getMemoryLocation());
     break;
+  case Location::LK_Symbolized: {
+    const AddressInfo &Info = Loc.getSymbolizedStack()->info;
+    if (Info.file) {
+      RenderSourceLocation(&LocBuffer, Info.file, Info.line, Info.column,
+                           common_flags()->strip_path_prefix);
+    } else if (Info.module) {
+      RenderModuleLocation(&LocBuffer, Info.module, Info.module_offset,
+                           common_flags()->strip_path_prefix);
+    } else {
+      LocBuffer.append("%p", Info.address);
+    }
+    break;
+  }
   case Location::LK_Null:
     LocBuffer.append("<unknown>");
     break;
@@ -348,11 +335,24 @@ ScopedReport::~ScopedReport() {
     Die();
 }
 
-bool __ubsan::MatchSuppression(const char *Str, SuppressionType Type) {
-  Suppression *s;
+ALIGNED(64) static char suppression_placeholder[sizeof(SuppressionContext)];
+static SuppressionContext *suppression_ctx = nullptr;
+static const char kVptrCheck[] = "vptr_check";
+static const char *kSuppressionTypes[] = { kVptrCheck };
+
+void __ubsan::InitializeSuppressions() {
+  CHECK_EQ(nullptr, suppression_ctx);
+  suppression_ctx = new (suppression_placeholder) // NOLINT
+      SuppressionContext(kSuppressionTypes, ARRAY_SIZE(kSuppressionTypes));
+  suppression_ctx->ParseFromFile(flags()->suppressions);
+}
+
+bool __ubsan::IsVptrCheckSuppressed(const char *TypeName) {
   // If .preinit_array is not used, it is possible that the UBSan runtime is not
   // initialized.
   if (!SANITIZER_CAN_USE_PREINIT_ARRAY)
     InitIfNecessary();
-  return SuppressionContext::Get()->Match(Str, Type, &s);
+  CHECK(suppression_ctx);
+  Suppression *s;
+  return suppression_ctx->Match(TypeName, kVptrCheck, &s);
 }

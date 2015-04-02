@@ -22,6 +22,7 @@
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flags.h"
+#include "sanitizer_common/sanitizer_flag_parser.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
 #include "dfsan/dfsan.h"
@@ -63,12 +64,37 @@ SANITIZER_INTERFACE_ATTRIBUTE THREADLOCAL dfsan_label __dfsan_arg_tls[64];
 // account for the double byte representation of shadow labels and move the
 // address into the shadow memory range.  See the function shadow_for below.
 
+// On Linux/MIPS64, memory is laid out as follows:
+//
+// +--------------------+ 0x10000000000 (top of memory)
+// | application memory |
+// +--------------------+ 0xF000008000 (kAppAddr)
+// |                    |
+// |       unused       |
+// |                    |
+// +--------------------+ 0x2200000000 (kUnusedAddr)
+// |    union table     |
+// +--------------------+ 0x2000000000 (kUnionTableAddr)
+// |   shadow memory    |
+// +--------------------+ 0x0000010000 (kShadowAddr)
+// | reserved by kernel |
+// +--------------------+ 0x0000000000
+
 typedef atomic_dfsan_label dfsan_union_table_t[kNumLabels][kNumLabels];
 
+#if defined(__x86_64__)
 static const uptr kShadowAddr = 0x10000;
 static const uptr kUnionTableAddr = 0x200000000000;
 static const uptr kUnusedAddr = kUnionTableAddr + sizeof(dfsan_union_table_t);
 static const uptr kAppAddr = 0x700000008000;
+#elif defined(__mips64)
+static const uptr kShadowAddr = 0x10000;
+static const uptr kUnionTableAddr = 0x2000000000;
+static const uptr kUnusedAddr = kUnionTableAddr + sizeof(dfsan_union_table_t);
+static const uptr kAppAddr = 0xF000008000;
+#else
+# error "DFSan not supported for this platform!"
+#endif
 
 static atomic_dfsan_label *union_table(dfsan_label l1, dfsan_label l2) {
   return &(*(dfsan_union_table_t *) kUnionTableAddr)[l1][l2];
@@ -231,7 +257,7 @@ dfsan_read_label(const void *addr, uptr size) {
   return __dfsan_union_load(shadow_for(addr), size);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
 const struct dfsan_label_info *dfsan_get_label_info(dfsan_label label) {
   return &__dfsan_label_info[label];
 }
@@ -285,16 +311,24 @@ dfsan_dump_labels(int fd) {
   }
 }
 
-static void InitializeFlags(Flags &f, const char *env) {
-  f.warn_unimplemented = true;
-  f.warn_nonzero_labels = false;
-  f.strict_data_dependencies = true;
-  f.dump_labels_at_exit = "";
+void Flags::SetDefaults() {
+#define DFSAN_FLAG(Type, Name, DefaultValue, Description) Name = DefaultValue;
+#include "dfsan_flags.inc"
+#undef DFSAN_FLAG
+}
 
-  ParseFlag(env, &f.warn_unimplemented, "warn_unimplemented", "");
-  ParseFlag(env, &f.warn_nonzero_labels, "warn_nonzero_labels", "");
-  ParseFlag(env, &f.strict_data_dependencies, "strict_data_dependencies", "");
-  ParseFlag(env, &f.dump_labels_at_exit, "dump_labels_at_exit", "");
+static void RegisterDfsanFlags(FlagParser *parser, Flags *f) {
+#define DFSAN_FLAG(Type, Name, DefaultValue, Description) \
+  RegisterFlag(parser, #Name, Description, &f->Name);
+#include "dfsan_flags.inc"
+#undef DFSAN_FLAG
+}
+
+static void InitializeFlags() {
+  FlagParser parser;
+  RegisterDfsanFlags(&parser, &flags());
+  flags().SetDefaults();
+  parser.ParseString(GetEnv("DFSAN_OPTIONS"));
 }
 
 static void dfsan_fini() {
@@ -329,8 +363,7 @@ static void dfsan_init(int argc, char **argv, char **envp) {
   if (!(init_addr >= kUnusedAddr && init_addr < kAppAddr))
     Mprotect(kUnusedAddr, kAppAddr - kUnusedAddr);
 
-  InitializeFlags(flags(), GetEnv("DFSAN_OPTIONS"));
-
+  InitializeFlags();
   InitializeInterceptors();
 
   // Register the fini callback to run when the program terminates successfully
