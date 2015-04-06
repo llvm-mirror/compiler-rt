@@ -160,8 +160,6 @@ include(CompilerRTUtils)
 
 set(COMPILER_RT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(COMPILER_RT_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
-# Setup custom SDK sysroots.
-set(COMPILER_RT_LINUX_SDK_SYSROOT ${COMPILER_RT_SOURCE_DIR}/SDKs/linux)
 
 # We support running instrumented tests when we're not cross compiling
 # and target a UNIX-like system or Windows.
@@ -302,15 +300,22 @@ if(APPLE)
   set(SANITIZER_MIN_OSX_VERSION 10.7)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "") # We're setting the flag manually below.
   set(DARWIN_osx_CFLAGS -mmacosx-version-min=${SANITIZER_MIN_OSX_VERSION}
-    -isysroot ${OSX_SDK_DIR} -stdlib=libc++)
+    -stdlib=libc++)
   set(DARWIN_iossim_CFLAGS
+    -stdlib=libc++
     -mios-simulator-version-min=7.0 -isysroot ${IOSSIM_SDK_DIR})
   set(DARWIN_osx_LINKFLAGS -mmacosx-version-min=${SANITIZER_MIN_OSX_VERSION}
-    -isysroot ${OSX_SDK_DIR} -stdlib=libc++)
+    -stdlib=libc++ -lc++)
   set(DARWIN_iossim_LINKFLAGS
+    -stdlib=libc++ -lc++
     -Wl,-ios_simulator_version_min,7.0.0
     -mios-simulator-version-min=7.0
     -isysroot ${IOSSIM_SDK_DIR})
+
+  if(OSX_SDK_DIR)
+    list(APPEND DARWIN_osx_CFLAGS -isysroot ${OSX_SDK_DIR})
+    list(APPEND DARWIN_osx_LINKFLAGS -isysroot ${OSX_SDK_DIR})
+  endif()
 endif()
 
 add_subdirectory(include)

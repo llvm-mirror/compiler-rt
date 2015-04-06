@@ -1,4 +1,4 @@
-// RUN: %clang_tsan -O1 %s -o %t && TSAN_OPTIONS="flush_memory_ms=1 memory_limit_mb=1" %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx -O1 %s -o %t && TSAN_OPTIONS="flush_memory_ms=1 memory_limit_mb=1" ASAN_OPTIONS="handle_segv=0 allow_user_segv_handler=1" %run %t 2>&1 | FileCheck %s
 
 // JVM uses SEGV to preempt threads. All threads do a load from a known address
 // periodically. When runtime needs to preempt threads, it unmaps the page.
@@ -13,7 +13,8 @@
 // "benign" SEGVs that are handled by signal handler, and ensures that
 // the process survive.
 
-#include "test.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <sys/mman.h>
 
@@ -24,15 +25,16 @@ void handler(int signo, siginfo_t *info, void *uctx) {
 }
 
 int main() {
-  struct sigaction a;
+  struct sigaction a, old;
   a.sa_sigaction = handler;
   a.sa_flags = SA_SIGINFO;
-  sigaction(SIGSEGV, &a, 0);
+  sigaction(SIGSEGV, &a, &old);
   guard = mmap(0, 4096, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
   for (int i = 0; i < 1000000; i++) {
     mprotect(guard, 4096, PROT_NONE);
     *(int*)guard = 1;
   }
+  sigaction(SIGSEGV, &old, 0);
   fprintf(stderr, "DONE\n");
 }
 

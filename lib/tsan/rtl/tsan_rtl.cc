@@ -153,7 +153,7 @@ static void BackgroundThread(void *arg) {
     } else {
       InternalScopedString filename(kMaxPathLength);
       filename.append("%s.%d", flags()->profile_memory, (int)internal_getpid());
-      uptr openrv = OpenFile(filename.data(), true);
+      uptr openrv = OpenFile(filename.data(), WrOnly);
       if (internal_iserror(openrv)) {
         Printf("ThreadSanitizer: failed to open memory profile file '%s'\n",
             &filename[0]);
@@ -461,7 +461,7 @@ void GrowShadowStack(ThreadState *thr) {
 #endif
 
 u32 CurrentStackId(ThreadState *thr, uptr pc) {
-  if (thr->shadow_stack_pos == 0)  // May happen during bootstrap.
+  if (!thr->is_inited)  // May happen during bootstrap.
     return 0;
   if (pc != 0) {
 #ifndef SANITIZER_GO

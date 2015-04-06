@@ -43,8 +43,7 @@ struct AddressInfo {
   AddressInfo();
   // Deletes all strings and resets all fields.
   void Clear();
-  void FillAddressAndModuleInfo(uptr addr, const char *mod_name,
-                                uptr mod_offset);
+  void FillModuleInfo(const char *mod_name, uptr mod_offset);
 };
 
 // Linked list of symbolized frames (each frame is described by AddressInfo).
@@ -74,6 +73,8 @@ struct DataInfo {
   void Clear();
 };
 
+class SymbolizerTool;
+
 class Symbolizer {
  public:
   /// Initialize and return platform-specific implementation of symbolizer
@@ -81,26 +82,22 @@ class Symbolizer {
   static Symbolizer *GetOrInit();
   // Returns a list of symbolized frames for a given address (containing
   // all inlined functions, if necessary).
-  virtual SymbolizedStack *SymbolizePC(uptr address) {
-    return SymbolizedStack::New(address);
-  }
-  virtual bool SymbolizeData(uptr address, DataInfo *info) {
-    return false;
-  }
-  virtual bool GetModuleNameAndOffsetForPC(uptr pc, const char **module_name,
-                                           uptr *module_address) {
-    return false;
-  }
-  virtual bool CanReturnFileLineInfo() {
-    return false;
+  SymbolizedStack *SymbolizePC(uptr address);
+  bool SymbolizeData(uptr address, DataInfo *info);
+  bool GetModuleNameAndOffsetForPC(uptr pc, const char **module_name,
+                                   uptr *module_address);
+  const char *GetModuleNameForPc(uptr pc) {
+    const char *module_name = 0;
+    uptr unused;
+    if (GetModuleNameAndOffsetForPC(pc, &module_name, &unused))
+      return module_name;
+    return nullptr;
   }
   // Release internal caches (if any).
-  virtual void Flush() {}
+  void Flush();
   // Attempts to demangle the provided C++ mangled name.
-  virtual const char *Demangle(const char *name) {
-    return name;
-  }
-  virtual void PrepareForSandboxing() {}
+  const char *Demangle(const char *name);
+  void PrepareForSandboxing();
 
   // Allow user to install hooks that would be called before/after Symbolizer
   // does the actual file/line info fetching. Specific sanitizers may need this
@@ -115,14 +112,28 @@ class Symbolizer {
  private:
   /// Platform-specific function for creating a Symbolizer object.
   static Symbolizer *PlatformInit();
-  /// Initialize the symbolizer in a disabled state.  Not thread safe.
-  static Symbolizer *Disable();
+
+  virtual bool PlatformFindModuleNameAndOffsetForAddress(
+      uptr address, const char **module_name, uptr *module_offset) {
+    UNIMPLEMENTED();
+  }
+  // Platform-specific default demangler, must not return nullptr.
+  virtual const char *PlatformDemangle(const char *name) { UNIMPLEMENTED(); }
+  virtual void PlatformPrepareForSandboxing() { UNIMPLEMENTED(); }
 
   static Symbolizer *symbolizer_;
   static StaticSpinMutex init_mu_;
 
+  // Mutex locked from public methods of |Symbolizer|, so that the internals
+  // (including individual symbolizer tools and platform-specific methods) are
+  // always synchronized.
+  BlockingMutex mu_;
+
+  typedef IntrusiveList<SymbolizerTool>::Iterator Iterator;
+  IntrusiveList<SymbolizerTool> tools_;
+
  protected:
-  Symbolizer();
+  explicit Symbolizer(IntrusiveList<SymbolizerTool> tools);
 
   static LowLevelAllocator symbolizer_allocator_;
 
@@ -135,61 +146,6 @@ class Symbolizer {
    private:
     const Symbolizer *sym_;
   };
-};
-
-class ExternalSymbolizerInterface {
- public:
-  // Can't declare pure virtual functions in sanitizer runtimes:
-  // __cxa_pure_virtual might be unavailable.
-  virtual char *SendCommand(bool is_data, const char *module_name,
-                            uptr module_offset) {
-    UNIMPLEMENTED();
-  }
-};
-
-// SymbolizerProcess encapsulates communication between the tool and
-// external symbolizer program, running in a different subprocess.
-// SymbolizerProcess may not be used from two threads simultaneously.
-class SymbolizerProcess : public ExternalSymbolizerInterface {
- public:
-  explicit SymbolizerProcess(const char *path);
-  char *SendCommand(bool is_data, const char *module_name,
-                    uptr module_offset) override;
-
- private:
-  bool Restart();
-  char *SendCommandImpl(bool is_data, const char *module_name,
-                        uptr module_offset);
-  bool ReadFromSymbolizer(char *buffer, uptr max_length);
-  bool WriteToSymbolizer(const char *buffer, uptr length);
-  bool StartSymbolizerSubprocess();
-
-  virtual bool RenderInputCommand(char *buffer, uptr max_length, bool is_data,
-                                  const char *module_name,
-                                  uptr module_offset) const {
-    UNIMPLEMENTED();
-  }
-
-  virtual bool ReachedEndOfOutput(const char *buffer, uptr length) const {
-    UNIMPLEMENTED();
-  }
-
-  virtual void ExecuteWithDefaultArgs(const char *path_to_binary) const {
-    UNIMPLEMENTED();
-  }
-
-  const char *path_;
-  int input_fd_;
-  int output_fd_;
-
-  static const uptr kBufferSize = 16 * 1024;
-  char buffer_[kBufferSize];
-
-  static const uptr kMaxTimesRestarted = 5;
-  static const int kSymbolizerStartupTimeMillis = 10;
-  uptr times_restarted_;
-  bool failed_to_start_;
-  bool reported_invalid_path_;
 };
 
 }  // namespace __sanitizer

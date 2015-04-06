@@ -1,7 +1,3 @@
-// Make sure everything works even if the main module doesn't have any stack
-// variables, thus doesn't explicitly reference any symbol exported by the
-// runtime thunk.
-//
 // RUN: %clang_cl_asan -LD -O0 -DDLL %s -Fe%t.dll
 // RUN: %clang_cl_asan -O0 -DEXE %s -Fe%te.exe
 // RUN: env ASAN_OPTIONS=report_globals=2 %run %te.exe %t.dll 2>&1 | FileCheck %s

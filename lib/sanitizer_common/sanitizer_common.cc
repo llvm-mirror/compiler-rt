@@ -16,6 +16,8 @@
 #include "sanitizer_flags.h"
 #include "sanitizer_libc.h"
 #include "sanitizer_placement_new.h"
+#include "sanitizer_stacktrace_printer.h"
+#include "sanitizer_symbolizer.h"
 
 namespace __sanitizer {
 
@@ -56,7 +58,7 @@ void ReportFile::ReopenIfNecessary() {
   }
 
   internal_snprintf(full_path, kMaxPathLength, "%s.%zu", path_prefix, pid);
-  uptr openrv = OpenFile(full_path, true);
+  uptr openrv = OpenFile(full_path, WrOnly);
   if (internal_iserror(openrv)) {
     const char *ErrorMsgPrefix = "ERROR: Can't open file: ";
     internal_write(kStderrFd, ErrorMsgPrefix, internal_strlen(ErrorMsgPrefix));
@@ -142,7 +144,7 @@ uptr ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
   *buff_size = 0;
   // The files we usually open are not seekable, so try different buffer sizes.
   for (uptr size = kMinFileLen; size <= max_len; size *= 2) {
-    uptr openrv = OpenFile(file_name, /*write*/ false);
+    uptr openrv = OpenFile(file_name, RdOnly);
     if (internal_iserror(openrv, errno_p)) return 0;
     fd_t fd = openrv;
     UnmapOrDie(*buff, *buff_size);
@@ -206,12 +208,12 @@ const char *StripPathPrefix(const char *filepath,
                             const char *strip_path_prefix) {
   if (filepath == 0) return 0;
   if (strip_path_prefix == 0) return filepath;
-  const char *pos = internal_strstr(filepath, strip_path_prefix);
-  if (pos == 0) return filepath;
-  pos += internal_strlen(strip_path_prefix);
-  if (pos[0] == '.' && pos[1] == '/')
-    pos += 2;
-  return pos;
+  const char *res = filepath;
+  if (const char *pos = internal_strstr(filepath, strip_path_prefix))
+    res = pos + internal_strlen(strip_path_prefix);
+  if (res[0] == '.' && res[1] == '/')
+    res += 2;
+  return res;
 }
 
 const char *StripModuleName(const char *module) {
@@ -230,17 +232,16 @@ void ReportErrorSummary(const char *error_message) {
   __sanitizer_report_error_summary(buff.data());
 }
 
-void ReportErrorSummary(const char *error_type, const char *file,
-                        int line, const char *function) {
+#ifndef SANITIZER_GO
+void ReportErrorSummary(const char *error_type, const AddressInfo &info) {
   if (!common_flags()->print_summary)
     return;
   InternalScopedString buff(kMaxSummaryLength);
-  buff.append("%s %s:%d %s", error_type,
-              file ? StripPathPrefix(file, common_flags()->strip_path_prefix)
-                   : "??",
-              line, function ? function : "??");
+  buff.append("%s ", error_type);
+  RenderFrame(&buff, "%L %F", 0, info, common_flags()->strip_path_prefix);
   ReportErrorSummary(buff.data());
 }
+#endif
 
 LoadedModule::LoadedModule(const char *module_name, uptr base_address) {
   full_name_ = internal_strdup(module_name);

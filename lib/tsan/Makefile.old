@@ -11,7 +11,9 @@ ifeq ($(DEBUG), 0)
 	CXXFLAGS += -O3
 endif
 ifeq ($(CXX), $(CLANG)++)
-  CXXFLAGS+= -Wno-unused-private-field -Wno-static-in-inline -Wgnu
+  CXXFLAGS += -Wno-unused-private-field -Wno-static-in-inline -Wgnu
+else
+  CXXFLAGS += -Wno-maybe-uninitialized
 endif
 
 LIBTSAN=rtl/libtsan.a

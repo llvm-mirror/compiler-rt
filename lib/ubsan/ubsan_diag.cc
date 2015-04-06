@@ -11,6 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ubsan_platform.h"
+#if CAN_SANITIZE_UB
 #include "ubsan_diag.h"
 #include "ubsan_init.h"
 #include "ubsan_flags.h"
@@ -49,8 +51,13 @@ static void MaybeReportErrorSummary(Location Loc) {
   if (Loc.isSourceLocation()) {
     SourceLocation SLoc = Loc.getSourceLocation();
     if (!SLoc.isInvalid()) {
-      ReportErrorSummary("undefined-behavior", SLoc.getFilename(),
-                         SLoc.getLine(), "");
+      AddressInfo AI;
+      AI.file = internal_strdup(SLoc.getFilename());
+      AI.line = SLoc.getLine();
+      AI.column = SLoc.getColumn();
+      AI.function = internal_strdup("");  // Avoid printing ?? as function name.
+      ReportErrorSummary("undefined-behavior", AI);
+      AI.Clear();
       return;
     }
   }
@@ -356,3 +363,5 @@ bool __ubsan::IsVptrCheckSuppressed(const char *TypeName) {
   Suppression *s;
   return suppression_ctx->Match(TypeName, kVptrCheck, &s);
 }
+
+#endif  // CAN_SANITIZE_UB

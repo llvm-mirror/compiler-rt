@@ -313,6 +313,19 @@ char *FindPathToBinary(const char *name) {
   return 0;
 }
 
+uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
+  // Nothing here for now.
+  return 0;
+}
+
+bool IsPathSeparator(const char c) {
+  return c == '\\' || c == '/';
+}
+
+bool IsAbsolutePath(const char *path) {
+  UNIMPLEMENTED();
+}
+
 void SleepForSeconds(int seconds) {
   Sleep(seconds * 1000);
 }
@@ -368,7 +381,7 @@ uptr internal_open(const char *filename, int flags, u32 mode) {
   UNIMPLEMENTED();
 }
 
-uptr OpenFile(const char *filename, bool write) {
+uptr OpenFile(const char *filename, FileAccessMode mode) {
   UNIMPLEMENTED();
 }
 
@@ -616,6 +629,23 @@ bool IsDeadlySignal(int signum) {
 bool IsAccessibleMemoryRange(uptr beg, uptr size) {
   // FIXME: Actually implement this function.
   return true;
+}
+
+SignalContext SignalContext::Create(void *siginfo, void *context) {
+  EXCEPTION_RECORD *exception_record = (EXCEPTION_RECORD*)siginfo;
+  CONTEXT *context_record = (CONTEXT*)context;
+
+  uptr pc = (uptr)exception_record->ExceptionAddress;
+#ifdef _WIN64
+  uptr bp = (uptr)context_record->Rbp;
+  uptr sp = (uptr)context_record->Rsp;
+#else
+  uptr bp = (uptr)context_record->Ebp;
+  uptr sp = (uptr)context_record->Esp;
+#endif
+  uptr access_addr = exception_record->ExceptionInformation[1];
+
+  return SignalContext(context, access_addr, pc, sp, bp);
 }
 
 }  // namespace __sanitizer
