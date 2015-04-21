@@ -129,42 +129,19 @@ const char *WinSymbolizerTool::Demangle(const char *name) {
     return name;
 }
 
-bool FindModuleNameAndOffsetForAddress(uptr addr, const char **module_name,
-                                       uptr *module_offset) {
-  InitializeDbgHelpIfNeeded();
-
-  IMAGEHLP_MODULE64 mod_info;
-  internal_memset(&mod_info, 0, sizeof(mod_info));
-  mod_info.SizeOfStruct = sizeof(mod_info);
-  if (SymGetModuleInfo64(GetCurrentProcess(), addr, &mod_info)) {
-    *module_name = mod_info.ImageName;
-    *module_offset = addr - (uptr)mod_info.BaseOfImage;
-    return true;
-  }
-  return false;
+const char *Symbolizer::PlatformDemangle(const char *name) {
+  return name;
 }
 
-// TODO(kuba.brecka): To be merged with POSIXSymbolizer.
-class WinSymbolizer : public Symbolizer {
- public:
-  explicit WinSymbolizer(IntrusiveList<SymbolizerTool> tools)
-      : Symbolizer(tools) {}
-
- private:
-  bool PlatformFindModuleNameAndOffsetForAddress(
-      uptr addr, const char **module_name, uptr *module_offset) override {
-    return ::FindModuleNameAndOffsetForAddress(addr, module_name,
-                                               module_offset);
-  }
-  const char *PlatformDemangle(const char *name) override { return name; }
-  void PlatformPrepareForSandboxing() override { }
-};
+void Symbolizer::PlatformPrepareForSandboxing() {
+  // Do nothing.
+}
 
 Symbolizer *Symbolizer::PlatformInit() {
   IntrusiveList<SymbolizerTool> list;
   list.clear();
   list.push_back(new(symbolizer_allocator_) WinSymbolizerTool());
-  return new(symbolizer_allocator_) WinSymbolizer(list);
+  return new(symbolizer_allocator_) Symbolizer(list);
 }
 
 }  // namespace __sanitizer

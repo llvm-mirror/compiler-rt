@@ -93,6 +93,9 @@ void *MmapOrDie(uptr size, const char *mem_type) {
 }
 
 void UnmapOrDie(void *addr, uptr size) {
+  if (!size || !addr)
+    return;
+
   if (VirtualFree(addr, size, MEM_DECOMMIT) == 0) {
     Report("ERROR: %s failed to "
            "deallocate 0x%zx (%zd) bytes at address %p (error code: %d)\n",
@@ -122,7 +125,7 @@ void *MmapNoReserveOrDie(uptr size, const char *mem_type) {
   return MmapOrDie(size, mem_type);
 }
 
-void *Mprotect(uptr fixed_addr, uptr size) {
+void *MmapNoAccess(uptr fixed_addr, uptr size) {
   void *res = VirtualAlloc((LPVOID)fixed_addr, size,
                            MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
   if (res == 0)
@@ -131,6 +134,12 @@ void *Mprotect(uptr fixed_addr, uptr size) {
            SanitizerToolName, size, size, fixed_addr, GetLastError());
   return res;
 }
+
+bool MprotectNoAccess(uptr addr, uptr size) {
+  DWORD old_protection;
+  return VirtualProtect((LPVOID)addr, size, PAGE_NOACCESS, &old_protection);
+}
+
 
 void FlushUnneededShadowMemory(uptr addr, uptr size) {
   // This is almost useless on 32-bits.
@@ -157,7 +166,7 @@ void *MapFileToMemory(const char *file_name, uptr *buff_size) {
   UNIMPLEMENTED();
 }
 
-void *MapWritableFileToMemory(void *addr, uptr size, uptr fd, uptr offset) {
+void *MapWritableFileToMemory(void *addr, uptr size, fd_t fd, uptr offset) {
   UNIMPLEMENTED();
 }
 
@@ -206,76 +215,46 @@ u32 GetUid() {
 
 namespace {
 struct ModuleInfo {
-  HMODULE handle;
+  const char *filepath;
   uptr base_address;
   uptr end_address;
 };
 
 int CompareModulesBase(const void *pl, const void *pr) {
-  const ModuleInfo &l = *(ModuleInfo *)pl, &r = *(ModuleInfo *)pr;
-  if (l.base_address < r.base_address)
+  const ModuleInfo *l = (ModuleInfo *)pl, *r = (ModuleInfo *)pr;
+  if (l->base_address < r->base_address)
     return -1;
-  return l.base_address > r.base_address;
+  return l->base_address > r->base_address;
 }
 }  // namespace
 
 #ifndef SANITIZER_GO
 void DumpProcessMap() {
   Report("Dumping process modules:\n");
-  HANDLE cur_process = GetCurrentProcess();
+  InternalScopedBuffer<LoadedModule> modules(kMaxNumberOfModules);
+  uptr num_modules =
+      GetListOfModules(modules.data(), kMaxNumberOfModules, nullptr);
 
-  // Query the list of modules.  Start by assuming there are no more than 256
-  // modules and retry if that's not sufficient.
-  ModuleInfo *modules;
-  size_t num_modules;
-  {
-    HMODULE *hmodules = 0;
-    uptr modules_buffer_size = sizeof(HMODULE) * 256;
-    DWORD bytes_required;
-    while (!hmodules) {
-      hmodules = (HMODULE *)MmapOrDie(modules_buffer_size, __FUNCTION__);
-      CHECK(EnumProcessModules(cur_process, hmodules, modules_buffer_size,
-                               &bytes_required));
-      if (bytes_required > modules_buffer_size) {
-        // Either there turned out to be more than 256 hmodules, or new hmodules
-        // could have loaded since the last try.  Retry.
-        UnmapOrDie(hmodules, modules_buffer_size);
-        hmodules = 0;
-        modules_buffer_size = bytes_required;
-      }
-    }
-
-    num_modules = bytes_required / sizeof(HMODULE);
-    modules =
-        (ModuleInfo *)MmapOrDie(num_modules * sizeof(ModuleInfo), __FUNCTION__);
-    for (size_t i = 0; i < num_modules; ++i) {
-      modules[i].handle = hmodules[i];
-      MODULEINFO mi;
-      if (!GetModuleInformation(cur_process, hmodules[i], &mi, sizeof(mi)))
-        continue;
-      modules[i].base_address = (uptr)mi.lpBaseOfDll;
-      modules[i].end_address = (uptr)mi.lpBaseOfDll + mi.SizeOfImage;
-    }
-    UnmapOrDie(hmodules, modules_buffer_size);
+  InternalScopedBuffer<ModuleInfo> module_infos(num_modules);
+  for (size_t i = 0; i < num_modules; ++i) {
+    module_infos[i].filepath = modules[i].full_name();
+    module_infos[i].base_address = modules[i].base_address();
+    module_infos[i].end_address = modules[i].ranges().next()->end;
   }
-
-  qsort(modules, num_modules, sizeof(ModuleInfo), CompareModulesBase);
+  qsort(module_infos.data(), num_modules, sizeof(ModuleInfo),
+        CompareModulesBase);
 
   for (size_t i = 0; i < num_modules; ++i) {
-    const ModuleInfo &mi = modules[i];
-    char module_name[MAX_PATH];
-    bool got_module_name = GetModuleFileNameA(
-        mi.handle, module_name, sizeof(module_name));
+    const ModuleInfo &mi = module_infos[i];
     if (mi.end_address != 0) {
       Printf("\t%p-%p %s\n", mi.base_address, mi.end_address,
-             got_module_name ? module_name : "[no name]");
-    } else if (got_module_name) {
-      Printf("\t??\?-??? %s\n", module_name);
+             mi.filepath[0] ? mi.filepath : "[no name]");
+    } else if (mi.filepath[0]) {
+      Printf("\t??\?-??? %s\n", mi.filepath);
     } else {
       Printf("\t???\n");
     }
   }
-  UnmapOrDie(modules, num_modules * sizeof(ModuleInfo));
 }
 #endif
 
@@ -346,117 +325,130 @@ void Abort() {
 
 uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
                       string_predicate_t filter) {
-  UNIMPLEMENTED();
-};
+  HANDLE cur_process = GetCurrentProcess();
 
-#ifndef SANITIZER_GO
-int Atexit(void (*function)(void)) {
-  return atexit(function);
-}
-#endif
-
-// ------------------ sanitizer_libc.h
-uptr internal_mmap(void *addr, uptr length, int prot, int flags,
-                   int fd, u64 offset) {
-  UNIMPLEMENTED();
-}
-
-uptr internal_munmap(void *addr, uptr length) {
-  UNIMPLEMENTED();
-}
-
-uptr internal_close(fd_t fd) {
-  UNIMPLEMENTED();
-}
-
-int internal_isatty(fd_t fd) {
-  return _isatty(fd);
-}
-
-uptr internal_open(const char *filename, int flags) {
-  UNIMPLEMENTED();
-}
-
-uptr internal_open(const char *filename, int flags, u32 mode) {
-  UNIMPLEMENTED();
-}
-
-uptr OpenFile(const char *filename, FileAccessMode mode) {
-  UNIMPLEMENTED();
-}
-
-uptr internal_read(fd_t fd, void *buf, uptr count) {
-  UNIMPLEMENTED();
-}
-
-uptr internal_write(fd_t fd, const void *buf, uptr count) {
-  if (fd != kStderrFd)
-    UNIMPLEMENTED();
-
-  static HANDLE output_stream = 0;
-  // Abort immediately if we know printing is not possible.
-  if (output_stream == INVALID_HANDLE_VALUE)
-    return 0;
-
-  // If called for the first time, try to use stderr to output stuff,
-  // falling back to stdout if anything goes wrong.
-  bool fallback_to_stdout = false;
-  if (output_stream == 0) {
-    output_stream = GetStdHandle(STD_ERROR_HANDLE);
-    // We don't distinguish "no such handle" from error.
-    if (output_stream == 0)
-      output_stream = INVALID_HANDLE_VALUE;
-
-    if (output_stream == INVALID_HANDLE_VALUE) {
-      // Retry with stdout?
-      output_stream = GetStdHandle(STD_OUTPUT_HANDLE);
-      if (output_stream == 0)
-        output_stream = INVALID_HANDLE_VALUE;
-      if (output_stream == INVALID_HANDLE_VALUE)
-        return 0;
-    } else {
-      // Successfully got an stderr handle.  However, if WriteFile() fails,
-      // we can still try to fallback to stdout.
-      fallback_to_stdout = true;
+  // Query the list of modules.  Start by assuming there are no more than 256
+  // modules and retry if that's not sufficient.
+  HMODULE *hmodules = 0;
+  uptr modules_buffer_size = sizeof(HMODULE) * 256;
+  DWORD bytes_required;
+  while (!hmodules) {
+    hmodules = (HMODULE *)MmapOrDie(modules_buffer_size, __FUNCTION__);
+    CHECK(EnumProcessModules(cur_process, hmodules, modules_buffer_size,
+                             &bytes_required));
+    if (bytes_required > modules_buffer_size) {
+      // Either there turned out to be more than 256 hmodules, or new hmodules
+      // could have loaded since the last try.  Retry.
+      UnmapOrDie(hmodules, modules_buffer_size);
+      hmodules = 0;
+      modules_buffer_size = bytes_required;
     }
   }
 
-  DWORD ret;
-  if (WriteFile(output_stream, buf, count, &ret, 0))
-    return ret;
+  // |num_modules| is the number of modules actually present,
+  // |count| is the number of modules we return.
+  size_t nun_modules = bytes_required / sizeof(HMODULE),
+         count = 0;
+  for (size_t i = 0; i < nun_modules && count < max_modules; ++i) {
+    HMODULE handle = hmodules[i];
+    MODULEINFO mi;
+    if (!GetModuleInformation(cur_process, handle, &mi, sizeof(mi)))
+      continue;
 
-  // Re-try with stdout if using a valid stderr handle fails.
-  if (fallback_to_stdout) {
-    output_stream = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (output_stream == 0)
-      output_stream = INVALID_HANDLE_VALUE;
-    if (output_stream != INVALID_HANDLE_VALUE)
-      return internal_write(fd, buf, count);
+    char module_name[MAX_PATH];
+    bool got_module_name =
+        GetModuleFileNameA(handle, module_name, sizeof(module_name));
+    if (!got_module_name)
+      module_name[0] = '\0';
+
+    if (filter && !filter(module_name))
+      continue;
+
+    uptr base_address = (uptr)mi.lpBaseOfDll;
+    uptr end_address = (uptr)mi.lpBaseOfDll + mi.SizeOfImage;
+    LoadedModule *cur_module = &modules[count];
+    cur_module->set(module_name, base_address);
+    // We add the whole module as one single address range.
+    cur_module->addAddressRange(base_address, end_address, /*executable*/ true);
+    count++;
   }
+  UnmapOrDie(hmodules, modules_buffer_size);
+
+  return count;
+};
+
+#ifndef SANITIZER_GO
+// We can't use atexit() directly at __asan_init time as the CRT is not fully
+// initialized at this point.  Place the functions into a vector and use
+// atexit() as soon as it is ready for use (i.e. after .CRT$XIC initializers).
+InternalMmapVectorNoCtor<void (*)(void)> atexit_functions;
+
+int Atexit(void (*function)(void)) {
+  atexit_functions.push_back(function);
   return 0;
 }
 
-uptr internal_stat(const char *path, void *buf) {
+static int RunAtexit() {
+  int ret = 0;
+  for (uptr i = 0; i < atexit_functions.size(); ++i) {
+    ret |= atexit(atexit_functions[i]);
+  }
+  return ret;
+}
+
+#pragma section(".CRT$XID", long, read)  // NOLINT
+static __declspec(allocate(".CRT$XID")) int (*__run_atexit)() = RunAtexit;
+#endif
+
+// ------------------ sanitizer_libc.h
+fd_t OpenFile(const char *filename, FileAccessMode mode, error_t *last_error) {
+  if (mode != WrOnly)
+    UNIMPLEMENTED();
+  fd_t res = CreateFile(filename, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+  CHECK(res != kStdoutFd || kStdoutFd == kInvalidFd);
+  CHECK(res != kStderrFd || kStderrFd == kInvalidFd);
+  return res;
+}
+
+void CloseFile(fd_t fd) {
+  CloseHandle(fd);
+}
+
+bool ReadFromFile(fd_t fd, void *buff, uptr buff_size, uptr *bytes_read,
+                  error_t *error_p) {
   UNIMPLEMENTED();
 }
 
-uptr internal_lstat(const char *path, void *buf) {
-  UNIMPLEMENTED();
+bool SupportsColoredOutput(fd_t fd) {
+  // FIXME: support colored output.
+  return false;
 }
 
-uptr internal_fstat(fd_t fd, void *buf) {
-  UNIMPLEMENTED();
+bool WriteToFile(fd_t fd, const void *buff, uptr buff_size, uptr *bytes_written,
+                 error_t *error_p) {
+  CHECK(fd != kInvalidFd);
+
+  if (fd == kStdoutFd) {
+    fd = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (fd == 0) fd = kInvalidFd;
+  } else if (fd == kStderrFd) {
+    fd = GetStdHandle(STD_ERROR_HANDLE);
+    if (fd == 0) fd = kInvalidFd;
+  }
+
+  DWORD internal_bytes_written;
+  if (fd == kInvalidFd ||
+      WriteFile(fd, buff, buff_size, &internal_bytes_written, 0)) {
+    if (error_p) *error_p = GetLastError();
+    return false;
+  } else {
+    if (bytes_written) *bytes_written = internal_bytes_written;
+    return true;
+  }
 }
 
-uptr internal_filesize(fd_t fd) {
-  UNIMPLEMENTED();
-}
-
-uptr internal_dup2(int oldfd, int newfd) {
-  UNIMPLEMENTED();
-}
-
-uptr internal_readlink(const char *path, char *buf, uptr bufsize) {
+bool RenameFile(const char *oldpath, const char *newpath, error_t *error_p) {
   UNIMPLEMENTED();
 }
 
@@ -470,10 +462,6 @@ void internal__exit(int exitcode) {
 }
 
 uptr internal_ftruncate(fd_t fd, uptr size) {
-  UNIMPLEMENTED();
-}
-
-uptr internal_rename(const char *oldpath, const char *newpath) {
   UNIMPLEMENTED();
 }
 
@@ -600,7 +588,7 @@ void BufferedStackTrace::SlowUnwindStackWithContext(uptr pc, void *context,
 void ReportFile::Write(const char *buffer, uptr length) {
   SpinMutexLock l(mu);
   ReopenIfNecessary();
-  if (length != internal_write(fd, buffer, length)) {
+  if (!WriteToFile(fd, buffer, length)) {
     // stderr may be closed, but we may be able to print to the debugger
     // instead.  This is the case when launching a program from Visual Studio,
     // and the following routine should write to its console.

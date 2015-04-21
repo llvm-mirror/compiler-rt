@@ -54,18 +54,17 @@ void ReportFile::ReopenIfNecessary() {
     if (fd_pid == pid)
       return;
     else
-      internal_close(fd);
+      CloseFile(fd);
   }
 
   internal_snprintf(full_path, kMaxPathLength, "%s.%zu", path_prefix, pid);
-  uptr openrv = OpenFile(full_path, WrOnly);
-  if (internal_iserror(openrv)) {
+  fd = OpenFile(full_path, WrOnly);
+  if (fd == kInvalidFd) {
     const char *ErrorMsgPrefix = "ERROR: Can't open file: ";
-    internal_write(kStderrFd, ErrorMsgPrefix, internal_strlen(ErrorMsgPrefix));
-    internal_write(kStderrFd, full_path, internal_strlen(full_path));
+    WriteToFile(kStderrFd, ErrorMsgPrefix, internal_strlen(ErrorMsgPrefix));
+    WriteToFile(kStderrFd, full_path, internal_strlen(full_path));
     Die();
   }
-  fd = openrv;
   fd_pid = pid;
 }
 
@@ -82,7 +81,7 @@ void ReportFile::SetReportPath(const char *path) {
 
   SpinMutexLock l(mu);
   if (fd != kStdoutFd && fd != kStderrFd && fd != kInvalidFd)
-    internal_close(fd);
+    CloseFile(fd);
   fd = kInvalidFd;
   if (internal_strcmp(path, "stdout") == 0) {
     fd = kStdoutFd;
@@ -136,7 +135,7 @@ void NORETURN CheckFailed(const char *file, int line, const char *cond,
 }
 
 uptr ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
-                      uptr max_len, int *errno_p) {
+                      uptr max_len, error_t *errno_p) {
   uptr PageSize = GetPageSizeCached();
   uptr kMinFileLen = PageSize;
   uptr read_len = 0;
@@ -144,9 +143,8 @@ uptr ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
   *buff_size = 0;
   // The files we usually open are not seekable, so try different buffer sizes.
   for (uptr size = kMinFileLen; size <= max_len; size *= 2) {
-    uptr openrv = OpenFile(file_name, RdOnly);
-    if (internal_iserror(openrv, errno_p)) return 0;
-    fd_t fd = openrv;
+    fd_t fd = OpenFile(file_name, RdOnly, errno_p);
+    if (fd == kInvalidFd) return 0;
     UnmapOrDie(*buff, *buff_size);
     *buff = (char*)MmapOrDie(size, __func__);
     *buff_size = size;
@@ -154,8 +152,8 @@ uptr ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
     read_len = 0;
     bool reached_eof = false;
     while (read_len + PageSize <= size) {
-      uptr just_read = internal_read(fd, *buff + read_len, PageSize);
-      if (internal_iserror(just_read, errno_p)) {
+      uptr just_read;
+      if (!ReadFromFile(fd, *buff + read_len, PageSize, &just_read, errno_p)) {
         UnmapOrDie(*buff, *buff_size);
         return 0;
       }
@@ -165,7 +163,7 @@ uptr ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
       }
       read_len += just_read;
     }
-    internal_close(fd);
+    CloseFile(fd);
     if (reached_eof)  // We've read the whole file.
       break;
   }
@@ -219,8 +217,15 @@ const char *StripPathPrefix(const char *filepath,
 const char *StripModuleName(const char *module) {
   if (module == 0)
     return 0;
-  if (const char *slash_pos = internal_strrchr(module, '/'))
+  if (SANITIZER_WINDOWS) {
+    // On Windows, both slash and backslash are possible.
+    // Pick the one that goes last.
+    if (const char *bslash_pos = internal_strrchr(module, '\\'))
+      return StripModuleName(bslash_pos + 1);
+  }
+  if (const char *slash_pos = internal_strrchr(module, '/')) {
     return slash_pos + 1;
+  }
   return module;
 }
 
@@ -243,14 +248,15 @@ void ReportErrorSummary(const char *error_type, const AddressInfo &info) {
 }
 #endif
 
-LoadedModule::LoadedModule(const char *module_name, uptr base_address) {
+void LoadedModule::set(const char *module_name, uptr base_address) {
+  clear();
   full_name_ = internal_strdup(module_name);
   base_address_ = base_address;
-  ranges_.clear();
 }
 
 void LoadedModule::clear() {
   InternalFree(full_name_);
+  full_name_ = nullptr;
   while (!ranges_.empty()) {
     AddressRange *r = ranges_.front();
     ranges_.pop_front();
