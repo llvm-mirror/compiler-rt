@@ -15,6 +15,7 @@
 #include "sanitizer_platform.h"
 #if SANITIZER_FREEBSD || SANITIZER_LINUX
 
+#include "sanitizer_atomic.h"
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_freebsd.h"
@@ -22,8 +23,6 @@
 #include "sanitizer_placement_new.h"
 #include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
-#include "sanitizer_atomic.h"
-#include "sanitizer_symbolizer.h"
 
 #if SANITIZER_ANDROID || SANITIZER_FREEBSD
 #include <dlfcn.h>  // for dlsym()
@@ -437,9 +436,8 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
     return 0;
   if (data->filter && !data->filter(module_name.data()))
     return 0;
-  void *mem = &data->modules[data->current_n];
-  LoadedModule *cur_module = new(mem) LoadedModule(module_name.data(),
-                                                   info->dlpi_addr);
+  LoadedModule *cur_module = &data->modules[data->current_n];
+  cur_module->set(module_name.data(), info->dlpi_addr);
   data->current_n++;
   for (int i = 0; i < info->dlpi_phnum; i++) {
     const Elf_Phdr *phdr = &info->dlpi_phdr[i];
@@ -462,19 +460,6 @@ uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
 }
 #endif  // SANITIZER_ANDROID
 
-void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
-  // Some kinds of sandboxes may forbid filesystem access, so we won't be able
-  // to read the file mappings from /proc/self/maps. Luckily, neither the
-  // process will be able to load additional libraries, so it's fine to use the
-  // cached mappings.
-  MemoryMappingLayout::CacheMemoryMappings();
-  // Same for /proc/self/exe in the symbolizer.
-#if !SANITIZER_GO
-  Symbolizer::GetOrInit()->PrepareForSandboxing();
-  CovPrepareForSandboxing(args);
-#endif
-}
-
 // getrusage does not give us the current RSS, only the max RSS.
 // Still, this is better than nothing if /proc/self/statm is not available
 // for some reason, e.g. due to a sandbox.
@@ -488,8 +473,8 @@ static uptr GetRSSFromGetrusage() {
 uptr GetRSS() {
   if (!common_flags()->can_use_proc_maps_statm)
     return GetRSSFromGetrusage();
-  uptr fd = OpenFile("/proc/self/statm", RdOnly);
-  if ((sptr)fd < 0)
+  fd_t fd = OpenFile("/proc/self/statm", RdOnly);
+  if (fd == kInvalidFd)
     return GetRSSFromGetrusage();
   char buf[64];
   uptr len = internal_read(fd, buf, sizeof(buf) - 1);

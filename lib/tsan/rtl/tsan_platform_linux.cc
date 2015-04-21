@@ -18,6 +18,7 @@
 
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_posix.h"
 #include "sanitizer_common/sanitizer_procmaps.h"
 #include "sanitizer_common/sanitizer_stoptheworld.h"
 #include "sanitizer_common/sanitizer_stackdepot.h"
@@ -135,7 +136,7 @@ static void ProtectRange(uptr beg, uptr end) {
   CHECK_LE(beg, end);
   if (beg == end)
     return;
-  if (beg != (uptr)Mprotect(beg, end - beg)) {
+  if (beg != (uptr)MmapNoAccess(beg, end - beg)) {
     Printf("FATAL: ThreadSanitizer can not protect [%zx,%zx]\n", beg, end);
     Printf("FATAL: Make sure you are not using unlimited stack\n");
     Die();
@@ -394,6 +395,8 @@ int ExtractRecvmsgFDs(void *msgp, int *fds, int nfd) {
   return res;
 }
 
+// Note: this function runs with async signals enabled,
+// so it must not touch any tsan state.
 int call_pthread_cancel_with_cleanup(int(*fn)(void *c, void *m,
     void *abstime), void *c, void *m, void *abstime,
     void(*cleanup)(void *arg), void *arg) {

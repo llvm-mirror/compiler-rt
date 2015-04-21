@@ -129,13 +129,13 @@ class LLVMSymbolizerProcess : public SymbolizerProcess {
   explicit LLVMSymbolizerProcess(const char *path) : SymbolizerProcess(path) {}
 
  private:
-  bool ReachedEndOfOutput(const char *buffer, uptr length) const {
+  bool ReachedEndOfOutput(const char *buffer, uptr length) const override {
     // Empty line marks the end of llvm-symbolizer output.
     return length >= 2 && buffer[length - 1] == '\n' &&
            buffer[length - 2] == '\n';
   }
 
-  void ExecuteWithDefaultArgs(const char *path_to_binary) const {
+  void ExecuteWithDefaultArgs(const char *path_to_binary) const override {
 #if defined(__x86_64__)
     const char* const kSymbolizerArch = "--default-arch=x86_64";
 #elif defined(__i386__)
@@ -202,7 +202,7 @@ class Addr2LineProcess : public SymbolizerProcess {
   const char *module_name() const { return module_name_; }
 
  private:
-  bool ReachedEndOfOutput(const char *buffer, uptr length) const {
+  bool ReachedEndOfOutput(const char *buffer, uptr length) const override {
     // Output should consist of two lines.
     int num_lines = 0;
     for (uptr i = 0; i < length; ++i) {
@@ -214,7 +214,7 @@ class Addr2LineProcess : public SymbolizerProcess {
     return false;
   }
 
-  void ExecuteWithDefaultArgs(const char *path_to_binary) const {
+  void ExecuteWithDefaultArgs(const char *path_to_binary) const override {
     execl(path_to_binary, path_to_binary, "-Cfe", module_name_, (char *)0);
   }
 
@@ -349,69 +349,16 @@ class InternalSymbolizer : public SymbolizerTool {
 
 #endif  // SANITIZER_SUPPORTS_WEAK_HOOKS
 
-class POSIXSymbolizer : public Symbolizer {
- public:
-  explicit POSIXSymbolizer(IntrusiveList<SymbolizerTool> tools)
-      : Symbolizer(tools), n_modules_(0), modules_fresh_(false) {}
+const char *Symbolizer::PlatformDemangle(const char *name) {
+  return DemangleCXXABI(name);
+}
 
- private:
-  const char *PlatformDemangle(const char *name) override {
-    return DemangleCXXABI(name);
-  }
-
-  void PlatformPrepareForSandboxing() override {
+void Symbolizer::PlatformPrepareForSandboxing() {
 #if SANITIZER_LINUX && !SANITIZER_ANDROID
-    // Cache /proc/self/exe on Linux.
-    CacheBinaryName();
+  // Cache /proc/self/exe on Linux.
+  CacheBinaryName();
 #endif
-  }
-
-  LoadedModule *FindModuleForAddress(uptr address) {
-    bool modules_were_reloaded = false;
-    if (!modules_fresh_) {
-      for (uptr i = 0; i < n_modules_; i++)
-        modules_[i].clear();
-      n_modules_ = GetListOfModules(modules_, kMaxNumberOfModuleContexts,
-                                    /* filter */ 0);
-      CHECK_GT(n_modules_, 0);
-      CHECK_LT(n_modules_, kMaxNumberOfModuleContexts);
-      modules_fresh_ = true;
-      modules_were_reloaded = true;
-    }
-    for (uptr i = 0; i < n_modules_; i++) {
-      if (modules_[i].containsAddress(address)) {
-        return &modules_[i];
-      }
-    }
-    // Reload the modules and look up again, if we haven't tried it yet.
-    if (!modules_were_reloaded) {
-      // FIXME: set modules_fresh_ from dlopen()/dlclose() interceptors.
-      // It's too aggressive to reload the list of modules each time we fail
-      // to find a module for a given address.
-      modules_fresh_ = false;
-      return FindModuleForAddress(address);
-    }
-    return 0;
-  }
-
-  bool PlatformFindModuleNameAndOffsetForAddress(uptr address,
-                                                 const char **module_name,
-                                                 uptr *module_offset) override {
-    LoadedModule *module = FindModuleForAddress(address);
-    if (module == 0)
-      return false;
-    *module_name = module->full_name();
-    *module_offset = address - module->base_address();
-    return true;
-  }
-
-  // 16K loaded modules should be enough for everyone.
-  static const uptr kMaxNumberOfModuleContexts = 1 << 14;
-  LoadedModule modules_[kMaxNumberOfModuleContexts];
-  uptr n_modules_;
-  // If stale, need to reload the modules before looking up addresses.
-  bool modules_fresh_;
-};
+}
 
 static SymbolizerTool *ChooseExternalSymbolizer(LowLevelAllocator *allocator) {
   const char *path = common_flags()->external_symbolizer_path;
@@ -494,7 +441,7 @@ Symbolizer *Symbolizer::PlatformInit() {
   IntrusiveList<SymbolizerTool> list;
   list.clear();
   ChooseSymbolizerTools(&list, &symbolizer_allocator_);
-  return new(symbolizer_allocator_) POSIXSymbolizer(list);
+  return new(symbolizer_allocator_) Symbolizer(list);
 }
 
 }  // namespace __sanitizer

@@ -18,7 +18,10 @@
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_platform_limits_posix.h"
+#include "sanitizer_posix.h"
+#include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
+#include "sanitizer_symbolizer.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -119,8 +122,8 @@ int Atexit(void (*function)(void)) {
 #endif
 }
 
-int internal_isatty(fd_t fd) {
-  return isatty(fd);
+bool SupportsColoredOutput(fd_t fd) {
+  return isatty(fd) != 0;
 }
 
 #ifndef SANITIZER_GO
@@ -198,6 +201,19 @@ bool IsAccessibleMemoryRange(uptr beg, uptr size) {
   internal_close(sock_pair[0]);
   internal_close(sock_pair[1]);
   return result;
+}
+
+void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
+  // Some kinds of sandboxes may forbid filesystem access, so we won't be able
+  // to read the file mappings from /proc/self/maps. Luckily, neither the
+  // process will be able to load additional libraries, so it's fine to use the
+  // cached mappings.
+  MemoryMappingLayout::CacheMemoryMappings();
+  // Same for /proc/self/exe in the symbolizer.
+#if !SANITIZER_GO
+  Symbolizer::GetOrInit()->PrepareForSandboxing();
+  CovPrepareForSandboxing(args);
+#endif
 }
 
 }  // namespace __sanitizer

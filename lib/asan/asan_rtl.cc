@@ -28,6 +28,8 @@
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 #include "lsan/lsan_common.h"
+#include "ubsan/ubsan_init.h"
+#include "ubsan/ubsan_platform.h"
 
 int __asan_option_detect_stack_use_after_return;  // Global interface symbol.
 uptr *__asan_test_only_reported_buggy_pointer;  // Used only for testing asan.
@@ -295,9 +297,9 @@ static void InitializeHighMemEnd() {
   CHECK_EQ((kHighMemBeg % GetPageSizeCached()), 0);
 }
 
-static void ProtectGap(uptr a, uptr size) {
-  void *res = Mprotect(a, size);
-  if (a == (uptr)res)
+static void ProtectGap(uptr addr, uptr size) {
+  void *res = MmapNoAccess(addr, size);
+  if (addr == (uptr)res)
     return;
   Report("ERROR: Failed to protect the shadow gap. "
          "ASan cannot proceed correctly. ABORTING.\n");
@@ -494,6 +496,10 @@ static void AsanInitInternal() {
     Atexit(__lsan::DoLeakCheck);
   }
 #endif  // CAN_SANITIZE_LEAKS
+
+#if CAN_SANITIZE_UB
+  __ubsan::InitAsPlugin();
+#endif
 
   InitializeSuppressions();
 

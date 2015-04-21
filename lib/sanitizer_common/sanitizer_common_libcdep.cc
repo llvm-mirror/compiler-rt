@@ -17,12 +17,16 @@
 #include "sanitizer_stacktrace.h"
 #include "sanitizer_symbolizer.h"
 
+#if SANITIZER_POSIX
+#include "sanitizer_posix.h"
+#endif
+
 namespace __sanitizer {
 
-bool ReportFile::PrintsToTty() {
+bool ReportFile::SupportsColors() {
   SpinMutexLock l(mu);
   ReopenIfNecessary();
-  return internal_isatty(fd) != 0;
+  return SupportsColoredOutput(fd);
 }
 
 bool ColorizeReports() {
@@ -33,7 +37,7 @@ bool ColorizeReports() {
 
   const char *flag = common_flags()->color;
   return internal_strcmp(flag, "always") == 0 ||
-         (internal_strcmp(flag, "auto") == 0 && report_file.PrintsToTty());
+         (internal_strcmp(flag, "auto") == 0 && report_file.SupportsColors());
 }
 
 static void (*sandboxing_callback)();
@@ -113,12 +117,13 @@ void BackgroundThread(void *arg) {
 }
 
 void MaybeStartBackgroudThread() {
-  if (!SANITIZER_LINUX) return;  // Need to implement/test on other platforms.
+#if SANITIZER_LINUX  // Need to implement/test on other platforms.
   // Start the background thread if one of the rss limits is given.
   if (!common_flags()->hard_rss_limit_mb &&
       !common_flags()->soft_rss_limit_mb) return;
   if (!&real_pthread_create) return;  // Can't spawn the thread anyway.
   internal_start_thread(BackgroundThread, nullptr);
+#endif
 }
 
 }  // namespace __sanitizer

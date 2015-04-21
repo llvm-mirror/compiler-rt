@@ -59,6 +59,10 @@ uptr internal_munmap(void *addr, uptr length) {
   return munmap(addr, length);
 }
 
+int internal_mprotect(void *addr, uptr length, int prot) {
+  return mprotect(addr, length, prot);
+}
+
 uptr internal_close(fd_t fd) {
   return close(fd);
 }
@@ -218,11 +222,6 @@ uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
 
 void ReExec() {
   UNIMPLEMENTED();
-}
-
-void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
-  (void)args;
-  // Nothing here for now.
 }
 
 uptr GetPageSize() {

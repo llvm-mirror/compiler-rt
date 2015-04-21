@@ -75,8 +75,29 @@ void Symbolizer::AddHooks(Symbolizer::StartSymbolizationHook start_hook,
   end_hook_ = end_hook;
 }
 
+const char *Symbolizer::ModuleNameOwner::GetOwnedCopy(const char *str) {
+  mu_->CheckLocked();
+
+  // 'str' will be the same string multiple times in a row, optimize this case.
+  if (last_match_ && !internal_strcmp(last_match_, str))
+    return last_match_;
+
+  // FIXME: this is linear search.
+  // We should optimize this further if this turns out to be a bottleneck later.
+  for (uptr i = 0; i < storage_.size(); ++i) {
+    if (!internal_strcmp(storage_[i], str)) {
+      last_match_ = storage_[i];
+      return last_match_;
+    }
+  }
+  last_match_ = internal_strdup(str);
+  storage_.push_back(last_match_);
+  return last_match_;
+}
+
 Symbolizer::Symbolizer(IntrusiveList<SymbolizerTool> tools)
-    : tools_(tools), start_hook_(0), end_hook_(0) {}
+    : module_names_(&mu_), n_modules_(0), modules_fresh_(false), tools_(tools),
+      start_hook_(0), end_hook_(0) {}
 
 Symbolizer::SymbolizerScope::SymbolizerScope(const Symbolizer *sym)
     : sym_(sym) {
@@ -87,78 +108,6 @@ Symbolizer::SymbolizerScope::SymbolizerScope(const Symbolizer *sym)
 Symbolizer::SymbolizerScope::~SymbolizerScope() {
   if (sym_->end_hook_)
     sym_->end_hook_();
-}
-
-SymbolizedStack *Symbolizer::SymbolizePC(uptr addr) {
-  BlockingMutexLock l(&mu_);
-  const char *module_name;
-  uptr module_offset;
-  SymbolizedStack *res = SymbolizedStack::New(addr);
-  if (!PlatformFindModuleNameAndOffsetForAddress(addr, &module_name,
-                                                 &module_offset))
-    return res;
-  // Always fill data about module name and offset.
-  res->info.FillModuleInfo(module_name, module_offset);
-  for (auto iter = Iterator(&tools_); iter.hasNext();) {
-    auto *tool = iter.next();
-    SymbolizerScope sym_scope(this);
-    if (tool->SymbolizePC(addr, res)) {
-      return res;
-    }
-  }
-  return res;
-}
-
-bool Symbolizer::SymbolizeData(uptr addr, DataInfo *info) {
-  BlockingMutexLock l(&mu_);
-  const char *module_name;
-  uptr module_offset;
-  if (!PlatformFindModuleNameAndOffsetForAddress(addr, &module_name,
-                                                 &module_offset))
-    return false;
-  info->Clear();
-  info->module = internal_strdup(module_name);
-  info->module_offset = module_offset;
-  for (auto iter = Iterator(&tools_); iter.hasNext();) {
-    auto *tool = iter.next();
-    SymbolizerScope sym_scope(this);
-    if (tool->SymbolizeData(addr, info)) {
-      return true;
-    }
-  }
-  return true;
-}
-
-bool Symbolizer::GetModuleNameAndOffsetForPC(uptr pc, const char **module_name,
-                                 uptr *module_address) {
-  BlockingMutexLock l(&mu_);
-  return PlatformFindModuleNameAndOffsetForAddress(pc, module_name,
-                                                   module_address);
-}
-
-void Symbolizer::Flush() {
-  BlockingMutexLock l(&mu_);
-  for (auto iter = Iterator(&tools_); iter.hasNext();) {
-    auto *tool = iter.next();
-    SymbolizerScope sym_scope(this);
-    tool->Flush();
-  }
-}
-
-const char *Symbolizer::Demangle(const char *name) {
-  BlockingMutexLock l(&mu_);
-  for (auto iter = Iterator(&tools_); iter.hasNext();) {
-    auto *tool = iter.next();
-    SymbolizerScope sym_scope(this);
-    if (const char *demangled = tool->Demangle(name))
-      return demangled;
-  }
-  return PlatformDemangle(name);
-}
-
-void Symbolizer::PrepareForSandboxing() {
-  BlockingMutexLock l(&mu_);
-  PlatformPrepareForSandboxing();
 }
 
 }  // namespace __sanitizer
