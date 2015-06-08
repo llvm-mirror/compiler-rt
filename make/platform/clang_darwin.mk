@@ -255,17 +255,31 @@ CFLAGS.ubsan_osx_dynamic += -isysroot $(OSX_SDK)
 LDFLAGS.ubsan_osx_dynamic += -isysroot $(OSX_SDK)
 endif
 
+ATOMIC_FUNCTIONS := \
+	atomic_flag_clear \
+	atomic_flag_clear_explicit \
+	atomic_flag_test_and_set \
+	atomic_flag_test_and_set_explicit \
+	atomic_signal_fence \
+	atomic_thread_fence
+
+FP16_FUNCTIONS := \
+	extendhfsf2 \
+	truncdfhf2 \
+	truncsfhf2
+
 FUNCTIONS.eprintf := eprintf
 FUNCTIONS.10.4 := eprintf floatundidf floatundisf floatundixf
 
-FUNCTIONS.ios	    := divmodsi4 udivmodsi4 mulosi4 mulodi4 muloti4
+FUNCTIONS.ios	    := divmodsi4 udivmodsi4 mulosi4 mulodi4 muloti4 \
+                       $(ATOMIC_FUNCTIONS) $(FP16_FUNCTIONS)
 # On x86, the divmod functions reference divsi.
 FUNCTIONS.ios.i386    := $(FUNCTIONS.ios) \
                          divsi3 udivsi3
 FUNCTIONS.ios.x86_64  := $(FUNCTIONS.ios.i386)
-FUNCTIONS.ios.arm64   := mulsc3 muldc3 divsc3 divdc3
+FUNCTIONS.ios.arm64   := mulsc3 muldc3 divsc3 divdc3 $(ATOMIC_FUNCTIONS)
 
-FUNCTIONS.osx	:= mulosi4 mulodi4 muloti4
+FUNCTIONS.osx	:= mulosi4 mulodi4 muloti4 $(ATOMIC_FUNCTIONS) $(FP16_FUNCTIONS)
 
 FUNCTIONS.profile_osx := GCDAProfiling InstrProfiling InstrProfilingBuffer \
                          InstrProfilingFile InstrProfilingPlatformDarwin \
@@ -319,6 +333,7 @@ CCKEXT_COMMON_FUNCTIONS := \
 	udivmodsi4 \
 	do_global_dtors \
 	eprintf \
+	extendhfsf2 \
 	ffsdi2 \
 	fixdfdi \
 	fixsfdi \
@@ -349,6 +364,8 @@ CCKEXT_COMMON_FUNCTIONS := \
 	powisf2 \
 	subvdi3 \
 	subvsi3 \
+	truncdfhf2 \
+	truncsfhf2 \
 	ucmpdi2 \
 	udiv_w_sdiv \
 	udivdi3 \
@@ -395,6 +412,7 @@ CCKEXT_ARM_FUNCTIONS := $(CCKEXT_COMMON_FUNCTIONS) \
 	modsi3 \
 	muldf3 \
 	mulsf3 \
+	mulodi4 \
 	negdf2 \
 	negsf2 \
 	subdf3 \

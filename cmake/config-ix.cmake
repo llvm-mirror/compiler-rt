@@ -4,6 +4,13 @@ include(CheckLibraryExists)
 include(CheckSymbolExists)
 include(TestBigEndian)
 
+function(check_linker_flag flag out_var)
+  cmake_push_check_state()
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${flag}")
+  check_cxx_compiler_flag("" ${out_var})
+  cmake_pop_check_state()
+endfunction()
+
 # CodeGen options.
 check_cxx_compiler_flag(-fPIC                COMPILER_RT_HAS_FPIC_FLAG)
 check_cxx_compiler_flag(-fPIE                COMPILER_RT_HAS_FPIE_FLAG)
@@ -55,9 +62,15 @@ check_symbol_exists(__func__ "" COMPILER_RT_HAS_FUNC_SYMBOL)
 # Libraries.
 check_library_exists(c printf "" COMPILER_RT_HAS_LIBC)
 check_library_exists(dl dlopen "" COMPILER_RT_HAS_LIBDL)
+check_library_exists(rt shm_open "" COMPILER_RT_HAS_LIBRT)
 check_library_exists(m pow "" COMPILER_RT_HAS_LIBM)
 check_library_exists(pthread pthread_create "" COMPILER_RT_HAS_LIBPTHREAD)
 check_library_exists(stdc++ __cxa_throw "" COMPILER_RT_HAS_LIBSTDCXX)
+
+# Linker flags.
+if(ANDROID)
+  check_linker_flag("-Wl,-z,global" COMPILER_RT_HAS_Z_GLOBAL)
+endif()
 
 # Architectures.
 
@@ -177,13 +190,18 @@ else()
       test_target_arch(powerpc64le "" "-m64")
     endif()
   elseif("${LLVM_NATIVE_ARCH}" STREQUAL "Mips")
+    # Gcc doesn't accept -m32/-m64 so we do the next best thing and use
+    # -mips32r2/-mips64r2. We don't use -mips1/-mips3 because we want to match
+    # clang's default CPU's. In the 64-bit case, we must also specify the ABI
+    # since the default ABI differs between gcc and clang.
+    # FIXME: Ideally, we would build the N32 library too.
     if("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "mipsel|mips64el")
       # regex for mipsel, mips64el
-      test_target_arch(mipsel "" "-m32")
-      test_target_arch(mips64el "" "-m64")
+      test_target_arch(mipsel "" "-mips32r2" "--target=mipsel-linux-gnu")
+      test_target_arch(mips64el "" "-mips64r2" "-mabi=n64")
     else()
-      test_target_arch(mips "" "-m32")
-      test_target_arch(mips64 "" "-m64")
+      test_target_arch(mips "" "-mips32r2" "--target=mips-linux-gnu")
+      test_target_arch(mips64 "" "-mips64r2" "-mabi=n64")
     endif()
   elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "arm")
     test_target_arch(arm "" "-march=armv7-a")
@@ -209,6 +227,7 @@ function(filter_available_targets out_var)
   set(${out_var} ${archs} PARENT_SCOPE)
 endfunction()
 
+# Returns a list of architecture specific target cflags in @out_var list.
 function(get_target_flags_for_arch arch out_var)
   list(FIND COMPILER_RT_SUPPORTED_ARCH ${arch} ARCH_INDEX)
   if(ARCH_INDEX EQUAL -1)
@@ -311,7 +330,7 @@ endif()
 # -msse3 flag is not valid for Mips therefore clang gives a warning
 # message with -msse3. But check_c_compiler_flags() checks only for
 # compiler error messages. Therefore COMPILER_RT_HAS_MSSE3_FLAG turns out to be
-# true on Mips. So we make it false here.
+# true on Mips, so we make it false here.
 if("${LLVM_NATIVE_ARCH}" STREQUAL "Mips")
   set(COMPILER_RT_HAS_MSSE3_FLAG FALSE)
 endif()

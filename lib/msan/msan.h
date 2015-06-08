@@ -20,9 +20,14 @@
 #include "sanitizer_common/sanitizer_stacktrace.h"
 #include "msan_interface_internal.h"
 #include "msan_flags.h"
+#include "ubsan/ubsan_platform.h"
 
 #ifndef MSAN_REPLACE_OPERATORS_NEW_AND_DELETE
 # define MSAN_REPLACE_OPERATORS_NEW_AND_DELETE 1
+#endif
+
+#ifndef MSAN_CONTAINS_UBSAN
+# define MSAN_CONTAINS_UBSAN CAN_SANITIZE_UB
 #endif
 
 struct MappingDesc {
@@ -120,7 +125,7 @@ extern bool msan_init_is_running;
 extern int msan_report_count;
 
 bool ProtectRange(uptr beg, uptr end);
-bool InitShadow(bool map_shadow, bool init_origins);
+bool InitShadow(bool init_origins);
 char *GetProcSelfMaps();
 void InitializeInterceptors();
 
@@ -131,7 +136,6 @@ void *MsanReallocate(StackTrace *stack, void *oldp, uptr size,
 void MsanDeallocate(StackTrace *stack, void *ptr);
 void InstallTrapHandler();
 void InstallAtExitHandler();
-void ReplaceOperatorsNewAndDelete();
 
 const char *GetStackOriginDescr(u32 id, uptr *pc);
 
