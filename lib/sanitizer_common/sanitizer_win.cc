@@ -295,11 +295,6 @@ char *FindPathToBinary(const char *name) {
   return 0;
 }
 
-uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
-  // Nothing here for now.
-  return 0;
-}
-
 bool IsPathSeparator(const char c) {
   return c == '\\' || c == '/';
 }
@@ -639,6 +634,13 @@ SignalContext SignalContext::Create(void *siginfo, void *context) {
   uptr access_addr = exception_record->ExceptionInformation[1];
 
   return SignalContext(context, access_addr, pc, sp, bp);
+}
+
+uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
+  // FIXME: Actually implement this function.
+  CHECK_GT(buf_len, 0);
+  buf[0] = 0;
+  return 0;
 }
 
 }  // namespace __sanitizer

@@ -51,6 +51,10 @@ COMMON_FLAG(
     "Write logs to \"log_path.pid\". The special values are \"stdout\" and "
     "\"stderr\". The default is \"stderr\".")
 COMMON_FLAG(
+    bool, log_exe_name, false,
+    "Mention name of executable when reporting error and "
+    "append executable name to logs (as in \"log_path.exe_name.pid\").")
+COMMON_FLAG(
     int, verbosity, 0,
     "Verbosity level (0 - silent, 1 - a bit of output, 2+ - more output).")
 COMMON_FLAG(bool, detect_leaks, true, "Enable memory leak detection.")
@@ -146,6 +150,9 @@ COMMON_FLAG(bool, use_madv_dontdump, true,
           "in core file.")
 COMMON_FLAG(bool, symbolize_inline_frames, true,
             "Print inlined frames in stacktraces. Defaults to true.")
+COMMON_FLAG(bool, symbolize_vs_style, false,
+            "Print file locations in Visual Studio style (e.g: "
+            " file(10,42): ...")
 COMMON_FLAG(const char *, stack_trace_format, "DEFAULT",
             "Format string used to render stack frames. "
             "See sanitizer_stacktrace_printer.h for the format description. "
