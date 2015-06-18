@@ -1,17 +1,17 @@
-// Test -mllvm -sanitizer-coverage-experimental-tracing
+// Test -fsanitize-coverage=trace-bb
 //
-// RUN: %clangxx_asan -O1 -fsanitize-coverage=1 -mllvm -sanitizer-coverage-experimental-tracing %s -o %t
+// RUN: %clangxx_asan -O1 -fsanitize-coverage=func,trace-bb %s -o %t
 // RUN: rm -rf   %T/coverage-tracing
 // RUN: mkdir %T/coverage-tracing
 // RUN: cd %T/coverage-tracing
-// RUN:  A=x;   ASAN_OPTIONS=coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK1; mv trace-points.*.sancov $A.points
-// RUN:  A=f;   ASAN_OPTIONS=coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK2; mv trace-points.*.sancov $A.points
-// RUN:  A=b;   ASAN_OPTIONS=coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK2; mv trace-points.*.sancov $A.points
-// RUN:  A=bf;  ASAN_OPTIONS=coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK3; mv trace-points.*.sancov $A.points
-// RUN:  A=fb;  ASAN_OPTIONS=coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK3; mv trace-points.*.sancov $A.points
-// RUN:  A=ffb; ASAN_OPTIONS=coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK4; mv trace-points.*.sancov $A.points
-// RUN:  A=fff; ASAN_OPTIONS=coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK4; mv trace-points.*.sancov $A.points
-// RUN:  A=bbf; ASAN_OPTIONS=coverage=1:verbosity=1 %run %t $A 100 2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK301; mv trace-points.*.sancov $A.points
+// RUN:  A=x;   ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK1; mv trace-points.*.sancov $A.points
+// RUN:  A=f;   ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK2; mv trace-points.*.sancov $A.points
+// RUN:  A=b;   ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK2; mv trace-points.*.sancov $A.points
+// RUN:  A=bf;  ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK3; mv trace-points.*.sancov $A.points
+// RUN:  A=fb;  ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK3; mv trace-points.*.sancov $A.points
+// RUN:  A=ffb; ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK4; mv trace-points.*.sancov $A.points
+// RUN:  A=fff; ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:verbosity=1 %run %t $A 1   2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK4; mv trace-points.*.sancov $A.points
+// RUN:  A=bbf; ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:verbosity=1 %run %t $A 100 2>&1 | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK301; mv trace-points.*.sancov $A.points
 // RUN: diff f.points fff.points
 // RUN: diff bf.points fb.points
 // RUN: diff bf.points ffb.points

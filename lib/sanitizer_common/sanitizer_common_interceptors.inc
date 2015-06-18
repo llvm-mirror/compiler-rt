@@ -47,6 +47,7 @@
 #define pthread_setname_np pthread_set_name_np
 #define inet_aton __inet_aton
 #define inet_pton __inet_pton
+#define iconv __bsd_iconv
 #endif
 
 #ifndef COMMON_INTERCEPTOR_INITIALIZE_RANGE
@@ -111,6 +112,10 @@
 
 #ifndef COMMON_INTERCEPTOR_ON_DLOPEN
 #define COMMON_INTERCEPTOR_ON_DLOPEN(filename, flag) {}
+#endif
+
+#ifndef COMMON_INTERCEPTOR_GET_TLS_RANGE
+#define COMMON_INTERCEPTOR_GET_TLS_RANGE(begin, end) *begin = *end = 0;
 #endif
 
 struct FileMetadata {
@@ -264,6 +269,97 @@ INTERCEPTOR(int, strncasecmp, const char *s1, const char *s2, SIZE_T n) {
 #else
 #define INIT_STRCASECMP
 #define INIT_STRNCASECMP
+#endif
+
+#if SANITIZER_INTERCEPT_STRSTR || SANITIZER_INTERCEPT_STRCASESTR
+static inline void StrstrCheck(void *ctx, char *r, const char *s1,
+                               const char *s2) {
+    uptr len1 = REAL(strlen)(s1);
+    uptr len2 = REAL(strlen)(s2);
+    COMMON_INTERCEPTOR_READ_STRING_OF_LEN(ctx, s1, len1,
+                                          r ? r - s1 + len2 : len1 + 1);
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, s2, len2 + 1);
+}
+#endif
+
+#if SANITIZER_INTERCEPT_STRSTR
+INTERCEPTOR(char*, strstr, const char *s1, const char *s2) {
+  if (COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED)
+    return internal_strstr(s1, s2);
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strstr, s1, s2);
+  char *r = REAL(strstr)(s1, s2);
+  if (common_flags()->intercept_strstr)
+    StrstrCheck(ctx, r, s1, s2);
+  return r;
+}
+
+#define INIT_STRSTR COMMON_INTERCEPT_FUNCTION(strstr);
+#else
+#define INIT_STRSTR
+#endif
+
+#if SANITIZER_INTERCEPT_STRCASESTR
+INTERCEPTOR(char*, strcasestr, const char *s1, const char *s2) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strcasestr, s1, s2);
+  char *r = REAL(strcasestr)(s1, s2);
+  if (common_flags()->intercept_strstr)
+    StrstrCheck(ctx, r, s1, s2);
+  return r;
+}
+
+#define INIT_STRCASESTR COMMON_INTERCEPT_FUNCTION(strcasestr);
+#else
+#define INIT_STRCASESTR
+#endif
+
+#if SANITIZER_INTERCEPT_STRSPN
+INTERCEPTOR(SIZE_T, strspn, const char *s1, const char *s2) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strspn, s1, s2);
+  SIZE_T r = REAL(strspn)(s1, s2);
+  if (common_flags()->intercept_strspn) {
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, s2, REAL(strlen)(s2) + 1);
+    COMMON_INTERCEPTOR_READ_STRING(ctx, s1, r + 1);
+  }
+  return r;
+}
+
+INTERCEPTOR(SIZE_T, strcspn, const char *s1, const char *s2) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strcspn, s1, s2);
+  SIZE_T r = REAL(strcspn)(s1, s2);
+  if (common_flags()->intercept_strspn) {
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, s2, REAL(strlen)(s2) + 1);
+    COMMON_INTERCEPTOR_READ_STRING(ctx, s1, r + 1);
+  }
+  return r;
+}
+
+#define INIT_STRSPN \
+  COMMON_INTERCEPT_FUNCTION(strspn); \
+  COMMON_INTERCEPT_FUNCTION(strcspn);
+#else
+#define INIT_STRSPN
+#endif
+
+#if SANITIZER_INTERCEPT_STRPBRK
+INTERCEPTOR(char *, strpbrk, const char *s1, const char *s2) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strpbrk, s1, s2);
+  char *r = REAL(strpbrk)(s1, s2);
+  if (common_flags()->intercept_strpbrk) {
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, s2, REAL(strlen)(s2) + 1);
+    COMMON_INTERCEPTOR_READ_STRING(ctx, s1,
+        r ? r - s1 + 1 : REAL(strlen)(s1) + 1);
+  }
+  return r;
+}
+
+#define INIT_STRPBRK COMMON_INTERCEPT_FUNCTION(strpbrk);
+#else
+#define INIT_STRPBRK
 #endif
 
 #if SANITIZER_INTERCEPT_MEMCHR
@@ -3903,25 +3999,33 @@ INTERCEPTOR(SSIZE_T, getline, char **lineptr, SIZE_T *n, void *stream) {
   }
   return res;
 }
-INTERCEPTOR(SSIZE_T, __getdelim, char **lineptr, SIZE_T *n, int delim,
-            void *stream) {
-  void *ctx;
-  COMMON_INTERCEPTOR_ENTER(ctx, __getdelim, lineptr, n, delim, stream);
-  // FIXME: under ASan the call below may write to freed memory and corrupt
-  // its metadata. See
-  // https://code.google.com/p/address-sanitizer/issues/detail?id=321.
-  SSIZE_T res = REAL(__getdelim)(lineptr, n, delim, stream);
-  if (res > 0) {
-    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, lineptr, sizeof(*lineptr));
-    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, n, sizeof(*n));
-    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, *lineptr, res + 1);
+
+// FIXME: under ASan the call below may write to freed memory and corrupt its
+// metadata. See
+// https://code.google.com/p/address-sanitizer/issues/detail?id=321.
+#define GETDELIM_INTERCEPTOR_IMPL(vname)                                       \
+  {                                                                            \
+    void *ctx;                                                                 \
+    COMMON_INTERCEPTOR_ENTER(ctx, vname, lineptr, n, delim, stream);           \
+    SSIZE_T res = REAL(vname)(lineptr, n, delim, stream);                      \
+    if (res > 0) {                                                             \
+      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, lineptr, sizeof(*lineptr));          \
+      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, n, sizeof(*n));                      \
+      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, *lineptr, res + 1);                  \
+    }                                                                          \
+    return res;                                                                \
   }
-  return res;
-}
+
+INTERCEPTOR(SSIZE_T, __getdelim, char **lineptr, SIZE_T *n, int delim,
+            void *stream)
+GETDELIM_INTERCEPTOR_IMPL(__getdelim)
+
+// There's no __getdelim() on FreeBSD so we supply the getdelim() interceptor
+// with its own body.
 INTERCEPTOR(SSIZE_T, getdelim, char **lineptr, SIZE_T *n, int delim,
-            void *stream) {
-  return __getdelim(lineptr, n, delim, stream);
-}
+            void *stream)
+GETDELIM_INTERCEPTOR_IMPL(getdelim)
+
 #define INIT_GETLINE                     \
   COMMON_INTERCEPT_FUNCTION(getline);    \
   COMMON_INTERCEPT_FUNCTION(__getdelim); \
@@ -3987,7 +4091,9 @@ INTERCEPTOR(void *, __tls_get_addr, void *arg) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, __tls_get_addr, arg);
   void *res = REAL(__tls_get_addr)(arg);
-  DTLS::DTV *dtv = DTLS_on_tls_get_addr(arg, res);
+  uptr tls_begin, tls_end;
+  COMMON_INTERCEPTOR_GET_TLS_RANGE(&tls_begin, &tls_end);
+  DTLS::DTV *dtv = DTLS_on_tls_get_addr(arg, res, tls_begin, tls_end);
   if (dtv) {
     // New DTLS block has been allocated.
     COMMON_INTERCEPTOR_INITIALIZE_RANGE((void *)dtv->beg, dtv->size);
@@ -4859,6 +4965,10 @@ static void InitializeCommonInterceptors() {
   INIT_STRNCMP;
   INIT_STRCASECMP;
   INIT_STRNCASECMP;
+  INIT_STRSTR;
+  INIT_STRCASESTR;
+  INIT_STRSPN;
+  INIT_STRPBRK;
   INIT_MEMCHR;
   INIT_MEMRCHR;
   INIT_READ;

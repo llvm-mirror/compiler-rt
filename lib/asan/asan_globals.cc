@@ -74,7 +74,7 @@ ALWAYS_INLINE void PoisonRedZones(const Global &g) {
 
 const uptr kMinimalDistanceFromAnotherGlobal = 64;
 
-bool IsAddressNearGlobal(uptr addr, const __asan_global &g) {
+static bool IsAddressNearGlobal(uptr addr, const __asan_global &g) {
   if (addr <= g.beg - kMinimalDistanceFromAnotherGlobal) return false;
   if (addr >= g.beg + g.size_with_redzone) return false;
   return true;
@@ -91,46 +91,8 @@ static void ReportGlobal(const Global &g, const char *prefix) {
   }
 }
 
-static bool DescribeOrGetInfoIfGlobal(uptr addr, uptr size, bool print,
-                                      Global *output_global) {
-  if (!flags()->report_globals) return false;
-  BlockingMutexLock lock(&mu_for_globals);
-  bool res = false;
-  for (ListOfGlobals *l = list_of_all_globals; l; l = l->next) {
-    const Global &g = *l->g;
-    if (print) {
-      if (flags()->report_globals >= 2)
-        ReportGlobal(g, "Search");
-      res |= DescribeAddressRelativeToGlobal(addr, size, g);
-    } else {
-      if (IsAddressNearGlobal(addr, g)) {
-        CHECK(output_global);
-        *output_global = g;
-        return true;
-      }
-    }
-  }
-  return res;
-}
-
-bool DescribeAddressIfGlobal(uptr addr, uptr size) {
-  return DescribeOrGetInfoIfGlobal(addr, size, /* print */ true,
-                                   /* output_global */ nullptr);
-}
-
-bool GetInfoForAddressIfGlobal(uptr addr, AddressDescription *descr) {
-  Global g = {};
-  if (DescribeOrGetInfoIfGlobal(addr, /* size */ 1, /* print */ false, &g)) {
-    internal_strncpy(descr->name, g.name, descr->name_size);
-    descr->region_address = g.beg;
-    descr->region_size = g.size;
-    descr->region_kind = "global";
-    return true;
-  }
-  return false;
-}
-
-u32 FindRegistrationSite(const Global *g) {
+static u32 FindRegistrationSite(const Global *g) {
+  mu_for_globals.CheckLocked();
   CHECK(global_registration_site_vector);
   for (uptr i = 0, n = global_registration_site_vector->size(); i < n; i++) {
     GlobalRegistrationSite &grs = (*global_registration_site_vector)[i];
@@ -138,6 +100,38 @@ u32 FindRegistrationSite(const Global *g) {
       return grs.stack_id;
   }
   return 0;
+}
+
+int GetGlobalsForAddress(uptr addr, Global *globals, u32 *reg_sites,
+                         int max_globals) {
+  if (!flags()->report_globals) return 0;
+  BlockingMutexLock lock(&mu_for_globals);
+  int res = 0;
+  for (ListOfGlobals *l = list_of_all_globals; l; l = l->next) {
+    const Global &g = *l->g;
+    if (flags()->report_globals >= 2)
+      ReportGlobal(g, "Search");
+    if (IsAddressNearGlobal(addr, g)) {
+      globals[res] = g;
+      if (reg_sites)
+        reg_sites[res] = FindRegistrationSite(&g);
+      res++;
+      if (res == max_globals) break;
+    }
+  }
+  return res;
+}
+
+bool GetInfoForAddressIfGlobal(uptr addr, AddressDescription *descr) {
+  Global g = {};
+  if (GetGlobalsForAddress(addr, &g, nullptr, 1)) {
+    internal_strncpy(descr->name, g.name, descr->name_size);
+    descr->region_address = g.beg;
+    descr->region_size = g.size;
+    descr->region_kind = "global";
+    return true;
+  }
+  return false;
 }
 
 // Register a global variable.

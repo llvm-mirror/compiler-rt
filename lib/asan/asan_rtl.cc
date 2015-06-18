@@ -89,12 +89,12 @@ void ShowStatsAndAbort() {
 // ---------------------- mmap -------------------- {{{1
 // Reserve memory range [beg, end].
 // We need to use inclusive range because end+1 may not be representable.
-void ReserveShadowMemoryRange(uptr beg, uptr end) {
+void ReserveShadowMemoryRange(uptr beg, uptr end, const char *name) {
   CHECK_EQ((beg % GetPageSizeCached()), 0);
   CHECK_EQ(((end + 1) % GetPageSizeCached()), 0);
   uptr size = end - beg + 1;
   DecreaseTotalMmap(size);  // Don't count the shadow against mmap_limit_mb.
-  void *res = MmapFixedNoReserve(beg, size);
+  void *res = MmapFixedNoReserve(beg, size, name);
   if (res != (void*)beg) {
     Report("ReserveShadowMemoryRange failed while trying to map 0x%zx bytes. "
            "Perhaps you're using ulimit -v\n", size);
@@ -298,7 +298,7 @@ static void InitializeHighMemEnd() {
 }
 
 static void ProtectGap(uptr addr, uptr size) {
-  void *res = MmapNoAccess(addr, size);
+  void *res = MmapNoAccess(addr, size, "shadow gap");
   if (addr == (uptr)res)
     return;
   Report("ERROR: Failed to protect the shadow gap. "
@@ -347,9 +347,9 @@ static void PrintAddressSpaceLayout() {
   Printf("malloc_context_size=%zu\n",
          (uptr)common_flags()->malloc_context_size);
 
-  Printf("SHADOW_SCALE: %zx\n", (uptr)SHADOW_SCALE);
-  Printf("SHADOW_GRANULARITY: %zx\n", (uptr)SHADOW_GRANULARITY);
-  Printf("SHADOW_OFFSET: %zx\n", (uptr)SHADOW_OFFSET);
+  Printf("SHADOW_SCALE: %d\n", (int)SHADOW_SCALE);
+  Printf("SHADOW_GRANULARITY: %d\n", (int)SHADOW_GRANULARITY);
+  Printf("SHADOW_OFFSET: 0x%zx\n", (uptr)SHADOW_OFFSET);
   CHECK(SHADOW_SCALE >= 3 && SHADOW_SCALE <= 7);
   if (kMidMemBeg)
     CHECK(kMidShadowBeg > kLowShadowEnd &&
@@ -366,6 +366,11 @@ static void AsanInitInternal() {
   // Initialize flags. This must be done early, because most of the
   // initialization steps look at flags().
   InitializeFlags();
+
+  CacheBinaryName();
+
+  AsanCheckIncompatibleRT();
+  AsanCheckDynamicRTPrereqs();
 
   SetCanPoisonMemory(flags()->poison_heap);
   SetMallocContextSize(common_flags()->malloc_context_size);
@@ -422,9 +427,9 @@ static void AsanInitInternal() {
   if (full_shadow_is_available) {
     // mmap the low shadow plus at least one page at the left.
     if (kLowShadowBeg)
-      ReserveShadowMemoryRange(shadow_start, kLowShadowEnd);
+      ReserveShadowMemoryRange(shadow_start, kLowShadowEnd, "low shadow");
     // mmap the high shadow.
-    ReserveShadowMemoryRange(kHighShadowBeg, kHighShadowEnd);
+    ReserveShadowMemoryRange(kHighShadowBeg, kHighShadowEnd, "high shadow");
     // protect the gap.
     ProtectGap(kShadowGapBeg, kShadowGapEnd - kShadowGapBeg + 1);
     CHECK_EQ(kShadowGapEnd, kHighShadowBeg - 1);
@@ -433,11 +438,11 @@ static void AsanInitInternal() {
       MemoryRangeIsAvailable(kMidMemEnd + 1, kHighShadowEnd)) {
     CHECK(kLowShadowBeg != kLowShadowEnd);
     // mmap the low shadow plus at least one page at the left.
-    ReserveShadowMemoryRange(shadow_start, kLowShadowEnd);
+    ReserveShadowMemoryRange(shadow_start, kLowShadowEnd, "low shadow");
     // mmap the mid shadow.
-    ReserveShadowMemoryRange(kMidShadowBeg, kMidShadowEnd);
+    ReserveShadowMemoryRange(kMidShadowBeg, kMidShadowEnd, "mid shadow");
     // mmap the high shadow.
-    ReserveShadowMemoryRange(kHighShadowBeg, kHighShadowEnd);
+    ReserveShadowMemoryRange(kHighShadowBeg, kHighShadowEnd, "high shadow");
     // protect the gaps.
     ProtectGap(kShadowGapBeg, kShadowGapEnd - kShadowGapBeg + 1);
     ProtectGap(kShadowGap2Beg, kShadowGap2End - kShadowGap2Beg + 1);
@@ -514,13 +519,11 @@ void AsanInitFromRtl() {
 
 #if ASAN_DYNAMIC
 // Initialize runtime in case it's LD_PRELOAD-ed into unsanitized executable
-// (and thus normal initializer from .preinit_array haven't run).
+// (and thus normal initializers from .preinit_array or modules haven't run).
 
 class AsanInitializer {
 public:  // NOLINT
   AsanInitializer() {
-    AsanCheckIncompatibleRT();
-    AsanCheckDynamicRTPrereqs();
     AsanInitFromRtl();
   }
 };
@@ -572,7 +575,6 @@ void NOINLINE __asan_set_death_callback(void (*callback)(void)) {
 // Initialize as requested from instrumented application code.
 // We use this call as a trigger to wake up ASan from deactivated state.
 void __asan_init() {
-  AsanCheckIncompatibleRT();
   AsanActivate();
   AsanInitInternal();
 }

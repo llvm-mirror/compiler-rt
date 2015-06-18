@@ -41,6 +41,9 @@ set(TSAN_SOURCES
   rtl/tsan_symbolize.cc
   rtl/tsan_sync.cc)
 
+set(TSAN_CXX_SOURCES
+  rtl/tsan_new_delete.cc)
+
 if(APPLE)
   list(APPEND TSAN_SOURCES rtl/tsan_platform_mac.cc)
 elseif(UNIX)
@@ -57,6 +60,7 @@ set(TSAN_HEADERS
   rtl/tsan_flags.h
   rtl/tsan_flags.inc
   rtl/tsan_ignoreset.h
+  rtl/tsan_interceptors.h
   rtl/tsan_interface_ann.h
   rtl/tsan_interface.h
   rtl/tsan_interface_inl.h
@@ -103,12 +107,20 @@ if(UNIX AND NOT APPLE)
               $<TARGET_OBJECTS:RTInterception.${arch}>
               $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
               $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>
-      CFLAGS ${TSAN_RTL_CFLAGS}
-      DEFS ${TSAN_COMMON_DEFINITIONS})
-    list(APPEND TSAN_RUNTIME_LIBRARIES clang_rt.tsan-${arch})
+              $<TARGET_OBJECTS:RTUbsan.${arch}>
+      CFLAGS ${TSAN_RTL_CFLAGS})
+    add_compiler_rt_runtime(clang_rt.tsan_cxx-${arch} ${arch} STATIC
+      SOURCES ${TSAN_CXX_SOURCES}
+              $<TARGET_OBJECTS:RTUbsan_cxx.${arch}>
+      CFLAGS ${TSAN_RTL_CFLAGS})
+    list(APPEND TSAN_RUNTIME_LIBRARIES clang_rt.tsan-${arch}
+                                       clang_rt.tsan_cxx-${arch})
     add_sanitizer_rt_symbols(clang_rt.tsan-${arch} rtl/tsan.syms.extra)
+    add_sanitizer_rt_symbols(clang_rt.tsan_cxx-${arch} rtl/tsan.syms.extra)
     add_dependencies(tsan clang_rt.tsan-${arch}
-      clang_rt.tsan-${arch}-symbols)
+                          clang_rt.tsan_cxx-${arch}
+                          clang_rt.tsan-${arch}-symbols
+                          clang_rt.tsan_cxx-${arch}-symbols)
   endforeach()
 endif()
 

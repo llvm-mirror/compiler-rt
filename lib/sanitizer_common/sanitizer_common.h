@@ -69,10 +69,11 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
 // Memory management
 void *MmapOrDie(uptr size, const char *mem_type);
 void UnmapOrDie(void *addr, uptr size);
-void *MmapFixedNoReserve(uptr fixed_addr, uptr size);
+void *MmapFixedNoReserve(uptr fixed_addr, uptr size,
+                         const char *name = nullptr);
 void *MmapNoReserveOrDie(uptr size, const char *mem_type);
 void *MmapFixedOrDie(uptr fixed_addr, uptr size);
-void *MmapNoAccess(uptr fixed_addr, uptr size);
+void *MmapNoAccess(uptr fixed_addr, uptr size, const char *name = nullptr);
 // Map aligned chunk of address space; size and alignment are powers of two.
 void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type);
 // Disallow access to a memory range.  Use MmapNoAccess to allocate an
@@ -237,6 +238,10 @@ const char *StripPathPrefix(const char *filepath,
 const char *StripModuleName(const char *module);
 
 // OS
+uptr ReadBinaryName(/*out*/char *buf, uptr buf_len);
+const char *GetBinaryName();
+const char *GetBinaryBasename();
+void CacheBinaryName();
 void DisableCoreDumperIfNecessary();
 void DumpProcessMap();
 bool FileExists(const char *filename);
@@ -247,8 +252,6 @@ char *FindPathToBinary(const char *name);
 bool IsPathSeparator(const char c);
 bool IsAbsolutePath(const char *path);
 
-// Returns the path to the main executable.
-uptr ReadBinaryName(/*out*/char *buf, uptr buf_len);
 u32 GetUid();
 void ReExec();
 bool StackSizeIsUnlimited();
@@ -622,11 +625,13 @@ void AndroidLogInit();
 void AndroidLogWrite(const char *buffer);
 void GetExtraActivationFlags(char *buf, uptr size);
 void SanitizerInitializeUnwinder();
+u32 AndroidGetApiLevel();
 #else
 INLINE void AndroidLogInit() {}
 INLINE void AndroidLogWrite(const char *buffer_unused) {}
 INLINE void GetExtraActivationFlags(char *buf, uptr size) { *buf = '\0'; }
 INLINE void SanitizerInitializeUnwinder() {}
+INLINE u32 AndroidGetApiLevel() { return 0; }
 #endif
 
 void *internal_start_thread(void(*func)(void*), void *arg);

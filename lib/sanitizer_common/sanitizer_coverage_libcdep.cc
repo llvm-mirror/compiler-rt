@@ -109,8 +109,9 @@ class CoverageData {
 
   // Maximal size pc array may ever grow.
   // We MmapNoReserve this space to ensure that the array is contiguous.
-  static const uptr kPcArrayMaxSize =
-      FIRST_32_SECOND_64(1 << (SANITIZER_ANDROID ? 24 : 26), 1 << 27);
+  static const uptr kPcArrayMaxSize = FIRST_32_SECOND_64(
+      1 << (SANITIZER_ANDROID ? 24 : (SANITIZER_WINDOWS ? 27 : 26)),
+      1 << 27);
   // The amount file mapping for the pc array is grown by.
   static const uptr kPcArrayMmapSize = 64 * 1024;
 
@@ -265,8 +266,9 @@ void CoverageData::ReInit() {
       // In memory-mapped mode we must extend the new file to the known array
       // size.
       uptr size = atomic_load(&pc_array_size, memory_order_relaxed);
+      uptr npcs = size / sizeof(uptr);
       Enable();
-      if (size) Extend(size);
+      if (size) Extend(npcs);
       if (coverage_enabled) CovUpdateMapping(coverage_dir);
     } else {
       Enable();
@@ -571,9 +573,11 @@ static fd_t CovOpenFile(InternalScopedString *path, bool packed,
     else
       path->append("%s/%s.%s.packed", coverage_dir, name, extension);
   }
-  fd_t fd = OpenFile(path->data(), WrOnly);
+  error_t err;
+  fd_t fd = OpenFile(path->data(), WrOnly, &err);
   if (fd == kInvalidFd)
-    Report("SanitizerCoverage: failed to open %s for writing\n", path->data());
+    Report("SanitizerCoverage: failed to open %s for writing (reason: %d)\n",
+           path->data(), err);
   return fd;
 }
 
@@ -927,4 +931,7 @@ SANITIZER_INTERFACE_ATTRIBUTE
 uptr __sanitizer_update_counter_bitset_and_clear_counters(u8 *bitset) {
   return coverage_data.Update8bitCounterBitsetAndClearCounters(bitset);
 }
+// Default empty implementation (weak). Users should redefine it.
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_cmp() {}
 }  // extern "C"

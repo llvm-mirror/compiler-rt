@@ -2,18 +2,18 @@
 // Current implementation maps output file in chunks of 64K. This test overflows
 // 1 chunk.
 
-// RUN: %clangxx_asan -fsanitize-coverage=1 -O0 -DSHARED %s -shared -o %dynamiclib -fPIC
-// RUN: %clangxx_asan -fsanitize-coverage=1 -O0 %s %libdl -o %t
+// RUN: %clangxx_asan -fsanitize-coverage=func -O0 -DSHARED %s -shared -o %dynamiclib -fPIC
+// RUN: %clangxx_asan -fsanitize-coverage=func -O0 %s %libdl -o %t
 
 // RUN: rm -rf %T/coverage-direct-large
 
 // RUN: mkdir -p %T/coverage-direct-large/normal && cd %T/coverage-direct-large/normal
-// RUN: ASAN_OPTIONS=coverage=1:coverage_direct=0:verbosity=1 %run %t %dynamiclib
+// RUN: env ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:coverage_direct=0:verbosity=1 %run %t %dynamiclib
 // RUN: %sancov print *.sancov >out.txt
 // RUN: cd ../..
 
 // RUN: mkdir -p %T/coverage-direct-large/direct && cd %T/coverage-direct-large/direct
-// RUN: ASAN_OPTIONS=coverage=1:coverage_direct=1:verbosity=1 %run %t %dynamiclib
+// RUN: env ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:coverage_direct=1:verbosity=1 %run %t %dynamiclib
 // RUN: %sancov rawunpack *.sancov.raw
 // RUN: %sancov print *.sancov >out.txt
 // RUN: cd ../..

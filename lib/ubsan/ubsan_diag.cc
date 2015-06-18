@@ -46,8 +46,7 @@ static void MaybePrintStackTrace(uptr pc, uptr bp) {
 static void MaybeReportErrorSummary(Location Loc) {
   if (!common_flags()->print_summary)
     return;
-  // Don't try to unwind the stack trace in UBSan summaries: just use the
-  // provided location.
+  const char *ErrorType = "undefined-behavior";
   if (Loc.isSourceLocation()) {
     SourceLocation SLoc = Loc.getSourceLocation();
     if (!SLoc.isInvalid()) {
@@ -56,12 +55,16 @@ static void MaybeReportErrorSummary(Location Loc) {
       AI.line = SLoc.getLine();
       AI.column = SLoc.getColumn();
       AI.function = internal_strdup("");  // Avoid printing ?? as function name.
-      ReportErrorSummary("undefined-behavior", AI);
+      ReportErrorSummary(ErrorType, AI);
       AI.Clear();
       return;
     }
+  } else if (Loc.isSymbolizedStack()) {
+    const AddressInfo &AI = Loc.getSymbolizedStack()->info;
+    ReportErrorSummary(ErrorType, AI);
+    return;
   }
-  ReportErrorSummary("undefined-behavior");
+  ReportErrorSummary(ErrorType);
 }
 
 namespace {
@@ -118,7 +121,8 @@ static void renderLocation(Location Loc) {
       LocBuffer.append("<unknown>");
     else
       RenderSourceLocation(&LocBuffer, SLoc.getFilename(), SLoc.getLine(),
-                           SLoc.getColumn(), common_flags()->strip_path_prefix);
+                           SLoc.getColumn(), common_flags()->symbolize_vs_style,
+                           common_flags()->strip_path_prefix);
     break;
   }
   case Location::LK_Memory:
@@ -128,6 +132,7 @@ static void renderLocation(Location Loc) {
     const AddressInfo &Info = Loc.getSymbolizedStack()->info;
     if (Info.file) {
       RenderSourceLocation(&LocBuffer, Info.file, Info.line, Info.column,
+                           common_flags()->symbolize_vs_style,
                            common_flags()->strip_path_prefix);
     } else if (Info.module) {
       RenderModuleLocation(&LocBuffer, Info.module, Info.module_offset,

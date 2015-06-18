@@ -1,7 +1,6 @@
-// FIXME: run this (and other) UBSan tests in both 32- and 64-bit modes (?).
-// RUN: %clangxx -fsanitize=float-cast-overflow %s -o %t
+// RUN: %clangxx -fsanitize=float-cast-overflow -g %s -o %t
 // RUN: %run %t _
-// RUN: %run %t 0 2>&1 | FileCheck %s --check-prefix=CHECK-0
+// RUN: env UBSAN_OPTIONS=print_summary=1 %run %t 0 2>&1 | FileCheck %s --check-prefix=CHECK-0
 // RUN: %run %t 1 2>&1 | FileCheck %s --check-prefix=CHECK-1
 // RUN: %run %t 2 2>&1 | FileCheck %s --check-prefix=CHECK-2
 // RUN: %run %t 3 2>&1 | FileCheck %s --check-prefix=CHECK-3
@@ -85,11 +84,14 @@ int main(int argc, char **argv) {
     // successfully round-trip, depending on the rounding mode.
     // CHECK-0: runtime error: value 2.14748{{.*}} is outside the range of representable values of type 'int'
     static int test_int = MaxFloatRepresentableAsInt + 0x80;
+    // CHECK-0: SUMMARY: {{.*}}Sanitizer: undefined-behavior {{.*}}cast-overflow.cpp:[[@LINE-1]]
     return 0;
     }
-  case '1':
+  case '1': {
     // CHECK-1: runtime error: value -2.14748{{.*}} is outside the range of representable values of type 'int'
-    return MinFloatRepresentableAsInt - 0x100;
+    static int test_int = MinFloatRepresentableAsInt - 0x100;
+    return 0;
+  }
   case '2': {
     // CHECK-2: runtime error: value -1 is outside the range of representable values of type 'unsigned int'
     volatile float f = -1.0;
@@ -107,9 +109,11 @@ int main(int argc, char **argv) {
     static int test_int = Inf;
     return 0;
   }
-  case '5':
+  case '5': {
     // CHECK-5: runtime error: value {{.*}} is outside the range of representable values of type 'int'
-    return NaN;
+    static int test_int = NaN;
+    return 0;
+  }
 
     // Integer -> floating point overflow.
   case '6': {

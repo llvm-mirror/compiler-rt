@@ -51,11 +51,16 @@ set(SANITIZER_TEST_CFLAGS_COMMON
   -Werror=sign-compare
   -Wno-non-virtual-dtor)
 
+if(MSVC)
+  # Disable exceptions on Windows until they work reliably.
+  list(APPEND SANITIZER_TEST_CFLAGS_COMMON -fno-exceptions -DGTEST_HAS_SEH=0)
+endif()
+
 # -gline-tables-only must be enough for these tests, so use it if possible.
 if(COMPILER_RT_TEST_COMPILER_ID MATCHES "Clang")
-  list(APPEND ASAN_UNITTEST_COMMON_CFLAGS -gline-tables-only)
+  list(APPEND SANITIZER_TEST_CFLAGS_COMMON -gline-tables-only)
 else()
-  list(APPEND ASAN_UNITTEST_COMMON_CFLAGS -g)
+  list(APPEND SANITIZER_TEST_CFLAGS_COMMON -g)
 endif()
 
 if(NOT MSVC)
@@ -68,6 +73,7 @@ append_list_if(ANDROID log SANITIZER_TEST_LINK_LIBS)
 append_list_if(ANDROID atomic SANITIZER_TEST_LINK_LIBS)
 
 append_list_if(COMPILER_RT_HAS_LIBDL -ldl SANITIZER_TEST_LINK_FLAGS_COMMON)
+append_list_if(COMPILER_RT_HAS_LIBRT -lrt SANITIZER_TEST_LINK_FLAGS_COMMON)
 append_list_if(COMPILER_RT_HAS_LIBPTHREAD -pthread SANITIZER_TEST_LINK_FLAGS_COMMON)
 # x86_64 FreeBSD 9.2 additionally requires libc++ to build the tests. Also,
 # 'libm' shall be specified explicitly to build i386 tests.

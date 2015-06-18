@@ -57,7 +57,13 @@ void ReportFile::ReopenIfNecessary() {
       CloseFile(fd);
   }
 
-  internal_snprintf(full_path, kMaxPathLength, "%s.%zu", path_prefix, pid);
+  const char *exe_name = GetBinaryBasename();
+  if (common_flags()->log_exe_name && exe_name) {
+    internal_snprintf(full_path, kMaxPathLength, "%s.%s.%zu", path_prefix,
+                      exe_name, pid);
+  } else {
+    internal_snprintf(full_path, kMaxPathLength, "%s.%zu", path_prefix, pid);
+  }
   fd = OpenFile(full_path, WrOnly);
   if (fd == kInvalidFd) {
     const char *ErrorMsgPrefix = "ERROR: Can't open file: ";
@@ -243,7 +249,8 @@ void ReportErrorSummary(const char *error_type, const AddressInfo &info) {
     return;
   InternalScopedString buff(kMaxSummaryLength);
   buff.append("%s ", error_type);
-  RenderFrame(&buff, "%L %F", 0, info, common_flags()->strip_path_prefix);
+  RenderFrame(&buff, "%L %F", 0, info, common_flags()->symbolize_vs_style,
+              common_flags()->strip_path_prefix);
   ReportErrorSummary(buff.data());
 }
 #endif
@@ -335,6 +342,24 @@ bool TemplateMatch(const char *templ, const char *str) {
     asterisk = false;
   }
   return true;
+}
+
+static char binary_name_cache_str[kMaxPathLength];
+static const char *binary_basename_cache_str;
+
+const char *GetBinaryName() {
+  return binary_name_cache_str;
+}
+
+const char *GetBinaryBasename() {
+  return binary_basename_cache_str;
+}
+
+// Call once to make sure that binary_name_cache_str is initialized
+void CacheBinaryName() {
+  CHECK_EQ('\0', binary_name_cache_str[0]);
+  ReadBinaryName(binary_name_cache_str, sizeof(binary_name_cache_str));
+  binary_basename_cache_str = StripModuleName(binary_name_cache_str);
 }
 
 }  // namespace __sanitizer
