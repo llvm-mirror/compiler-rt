@@ -1,6 +1,6 @@
 // Test for "sancov.py missing ...".
 
-// RUN: env ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:coverage_dir=%T/coverage-missing
+// RUN: export ASAN_OPTIONS=$ASAN_OPTIONS:coverage=1:coverage_dir=%T/coverage-missing
 
 // First case: coverage from executable. main() is called on every code path.
 // RUN: %clangxx_asan -fsanitize-coverage=func %s -o %t -DFOOBAR -DMAIN
@@ -30,7 +30,7 @@
 // cd %T
 // RUN: %clangxx_asan -fsanitize-coverage=func %s -o %dynamiclib -DFOOBAR -shared -fPIC
 // RUN: %clangxx_asan -fsanitize-coverage=func %s %dynamiclib -o %t -DMAIN
-// RUN: env LIBNAME=`basename %dynamiclib`
+// RUN: export LIBNAME=`basename %dynamiclib`
 // RUN: rm -rf %T/coverage-missing
 // RUN: mkdir -p %T/coverage-missing
 // RUN: cd %T/coverage-missing

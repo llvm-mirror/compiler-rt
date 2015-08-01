@@ -55,6 +55,10 @@ COMMON_FLAG(
     "Mention name of executable when reporting error and "
     "append executable name to logs (as in \"log_path.exe_name.pid\").")
 COMMON_FLAG(
+    bool, log_to_syslog, SANITIZER_ANDROID,
+    "Write all sanitizer output to syslog in addition to other means of "
+    "logging.")
+COMMON_FLAG(
     int, verbosity, 0,
     "Verbosity level (0 - silent, 1 - a bit of output, 2+ - more output).")
 COMMON_FLAG(bool, detect_leaks, true, "Enable memory leak detection.")
@@ -170,6 +174,12 @@ COMMON_FLAG(bool, intercept_strspn, true,
 COMMON_FLAG(bool, intercept_strpbrk, true,
             "If set, uses custom wrappers for strpbrk function "
             "to find more errors.")
+COMMON_FLAG(bool, intercept_memcmp, true,
+            "If set, uses custom wrappers for memcmp function "
+            "to find more errors.")
+COMMON_FLAG(bool, strict_memcmp, true,
+          "If true, assume that memcmp(p1, p2, n) always reads n bytes before "
+          "comparing p1 and p2.")
 COMMON_FLAG(bool, decorate_proc_maps, false, "If set, decorate sanitizer "
                                              "mappings in /proc/self/maps with "
                                              "user-readable names")

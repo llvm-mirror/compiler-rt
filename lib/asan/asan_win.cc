@@ -16,7 +16,6 @@
 #if SANITIZER_WINDOWS
 #include <windows.h>
 
-#include <dbghelp.h>
 #include <stdlib.h>
 
 #include "asan_interceptors.h"
@@ -193,10 +192,6 @@ void *AsanDoesNotSupportStaticLinkage() {
 void AsanCheckDynamicRTPrereqs() {}
 
 void AsanCheckIncompatibleRT() {}
-
-void AsanPlatformThreadInit() {
-  // Nothing here for now.
-}
 
 void ReadContextStack(void *context, uptr *stack, uptr *ssize) {
   UNIMPLEMENTED();

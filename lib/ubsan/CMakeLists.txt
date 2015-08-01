@@ -15,6 +15,8 @@ set(UBSAN_STANDALONE_SOURCES
 set(UBSAN_CXX_SOURCES
   ubsan_handlers_cxx.cc
   ubsan_type_hash.cc
+  ubsan_type_hash_itanium.cc
+  ubsan_type_hash_win.cc
   )
 
 include_directories(..)
@@ -28,23 +30,28 @@ set(UBSAN_CXXFLAGS ${SANITIZER_COMMON_CFLAGS})
 add_custom_target(ubsan)
 
 if(APPLE)
+  set(UBSAN_COMMON_SOURCES ${UBSAN_SOURCES})
+  if(SANITIZER_CAN_USE_CXXABI)
+    list(APPEND UBSAN_COMMON_SOURCES ${UBSAN_CXX_SOURCES})
+  endif()
+
   # Common parts of UBSan runtime.
   add_compiler_rt_object_libraries(RTUbsan
     OS ${SANITIZER_COMMON_SUPPORTED_OS}
-    ARCH ${UBSAN_COMMON_SUPPORTED_ARCH}
-    SOURCES ${UBSAN_SOURCES} ${UBSAN_CXX_SOURCES}
+    ARCHS ${UBSAN_COMMON_SUPPORTED_ARCH}
+    SOURCES ${UBSAN_COMMON_SOURCES}
     CFLAGS ${UBSAN_CXXFLAGS})
 
   if(COMPILER_RT_HAS_UBSAN)
     # Initializer of standalone UBSan runtime.
     add_compiler_rt_object_libraries(RTUbsan_standalone
       OS ${SANITIZER_COMMON_SUPPORTED_OS}
-      ARCH ${UBSAN_SUPPORTED_ARCH}
+      ARCHS ${UBSAN_SUPPORTED_ARCH}
       SOURCES ${UBSAN_STANDALONE_SOURCES}
       CFLAGS ${UBSAN_STANDALONE_CFLAGS})
     foreach(os ${SANITIZER_COMMON_SUPPORTED_OS})
       add_compiler_rt_darwin_dynamic_runtime(clang_rt.ubsan_${os}_dynamic ${os}
-        ARCH ${UBSAN_SUPPORTED_ARCH}
+        ARCHS ${UBSAN_SUPPORTED_ARCH}
         SOURCES $<TARGET_OBJECTS:RTUbsan.${os}>
                 $<TARGET_OBJECTS:RTUbsan_standalone.${os}>
                 $<TARGET_OBJECTS:RTSanitizerCommon.${os}>)
@@ -56,17 +63,17 @@ if(APPLE)
 else()
   # Common parts of UBSan runtime.
   add_compiler_rt_object_libraries(RTUbsan
-    ARCH ${UBSAN_COMMON_SUPPORTED_ARCH}
+    ARCHS ${UBSAN_COMMON_SUPPORTED_ARCH}
     SOURCES ${UBSAN_SOURCES} CFLAGS ${UBSAN_CFLAGS})
   # C++-specific parts of UBSan runtime. Requires a C++ ABI library.
   add_compiler_rt_object_libraries(RTUbsan_cxx
-    ARCH ${UBSAN_COMMON_SUPPORTED_ARCH}
+    ARCHS ${UBSAN_COMMON_SUPPORTED_ARCH}
     SOURCES ${UBSAN_CXX_SOURCES} CFLAGS ${UBSAN_CXXFLAGS})
 
   if(COMPILER_RT_HAS_UBSAN)
     # Initializer of standalone UBSan runtime.
     add_compiler_rt_object_libraries(RTUbsan_standalone
-      ARCH ${UBSAN_SUPPORTED_ARCH}
+      ARCHS ${UBSAN_SUPPORTED_ARCH}
       SOURCES ${UBSAN_STANDALONE_SOURCES} CFLAGS ${UBSAN_STANDALONE_CFLAGS})
     
     foreach(arch ${UBSAN_SUPPORTED_ARCH})

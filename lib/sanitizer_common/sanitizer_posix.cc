@@ -240,14 +240,14 @@ void *MapFileToMemory(const char *file_name, uptr *buff_size) {
   return internal_iserror(map) ? 0 : (void *)map;
 }
 
-void *MapWritableFileToMemory(void *addr, uptr size, fd_t fd, uptr offset) {
+void *MapWritableFileToMemory(void *addr, uptr size, fd_t fd, OFF_T offset) {
   uptr flags = MAP_SHARED;
   if (addr) flags |= MAP_FIXED;
   uptr p = internal_mmap(addr, size, PROT_READ | PROT_WRITE, flags, fd, offset);
   int mmap_errno = 0;
   if (internal_iserror(p, &mmap_errno)) {
-    Printf("could not map writable file (%d, %zu, %zu): %zd, errno: %d\n",
-           fd, offset, size, p, mmap_errno);
+    Printf("could not map writable file (%d, %lld, %zu): %zd, errno: %d\n",
+           fd, (long long)offset, size, p, mmap_errno);
     return 0;
   }
   return (void *)p;
@@ -270,6 +270,7 @@ bool MemoryRangeIsAvailable(uptr range_start, uptr range_end) {
   while (proc_maps.Next(&start, &end,
                         /*offset*/0, /*filename*/0, /*filename_size*/0,
                         /*protection*/0)) {
+    if (start == end) continue;  // Empty range.
     CHECK_NE(0, end);
     if (!IntervalsAreSeparate(start, end - 1, range_start, range_end))
       return false;

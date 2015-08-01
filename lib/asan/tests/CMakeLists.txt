@@ -106,7 +106,7 @@ append_list_if(COMPILER_RT_HAS_LIBPTHREAD -pthread
 
 # TODO(eugenis): move all -l flags above to _LIBS?
 set(ASAN_UNITTEST_NOINST_LIBS)
-append_list_if(ANDROID log ASAN_UNITTEST_NOINST_LIBS)
+append_list_if(COMPILER_RT_HAS_LIBLOG log ASAN_UNITTEST_NOINST_LIBS)
 # NDK r10 requires -latomic almost always.
 append_list_if(ANDROID atomic ASAN_UNITTEST_NOINST_LIBS)
 
@@ -129,7 +129,7 @@ endmacro()
 # Link ASan unit test for a given architecture from a set
 # of objects in with given linker flags.
 macro(add_asan_test test_suite test_name arch kind)
-  parse_arguments(TEST "OBJECTS;LINKFLAGS;SUBDIR" "WITH_TEST_RUNTIME" ${ARGN})
+  cmake_parse_arguments(TEST "WITH_TEST_RUNTIME" "" "OBJECTS;LINKFLAGS;SUBDIR" ${ARGN})
   get_target_flags_for_arch(${arch} TARGET_LINK_FLAGS)
   set(TEST_DEPS ${TEST_OBJECTS})
   if(NOT COMPILER_RT_STANDALONE_BUILD)

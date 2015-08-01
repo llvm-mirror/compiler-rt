@@ -210,13 +210,17 @@ extern "C" {
     // __asan_init is expected to be called by only one thread.
     if (fn) return;
 
-    fn = (fntype)getRealProcAddressOrDie(__asan_init_name);
+    fn = (fntype)getRealProcAddressOrDie("__asan_init");
     fn();
     __asan_option_detect_stack_use_after_return =
         (__asan_should_detect_stack_use_after_return() != 0);
 
     InterceptHooks();
   }
+}
+
+extern "C" void __asan_version_mismatch_check() {
+  // Do nothing.
 }
 
 INTERFACE_FUNCTION(__asan_handle_no_return)
@@ -304,6 +308,7 @@ INTERFACE_FUNCTION(__sanitizer_cov_module_init)
 INTERFACE_FUNCTION(__sanitizer_cov_trace_basic_block)
 INTERFACE_FUNCTION(__sanitizer_cov_trace_func_enter)
 INTERFACE_FUNCTION(__sanitizer_cov_trace_cmp)
+INTERFACE_FUNCTION(__sanitizer_cov_trace_switch)
 INTERFACE_FUNCTION(__sanitizer_cov_with_check)
 INTERFACE_FUNCTION(__sanitizer_get_allocated_size)
 INTERFACE_FUNCTION(__sanitizer_get_coverage_guards)

@@ -38,6 +38,13 @@ using namespace __tsan;  // NOLINT
 #define stderr __stderrp
 #endif
 
+#if SANITIZER_LINUX || SANITIZER_FREEBSD
+#define PTHREAD_CREATE_DETACHED 1
+#elif SANITIZER_MAC
+#define PTHREAD_CREATE_DETACHED 2
+#endif
+
+
 #ifdef __mips__
 const int kSigCount = 129;
 #else
@@ -599,20 +606,6 @@ TSAN_INTERCEPTOR(void*, memcpy, void *dst, const void *src, uptr size) {
   return internal_memcpy(dst, src, size);
 }
 
-TSAN_INTERCEPTOR(int, memcmp, const void *s1, const void *s2, uptr n) {
-  SCOPED_TSAN_INTERCEPTOR(memcmp, s1, s2, n);
-  int res = 0;
-  uptr len = 0;
-  for (; len < n; len++) {
-    if ((res = ((const unsigned char *)s1)[len] -
-               ((const unsigned char *)s2)[len]))
-      break;
-  }
-  MemoryAccessRange(thr, pc, (uptr)s1, len < n ? len + 1 : n, false);
-  MemoryAccessRange(thr, pc, (uptr)s2, len < n ? len + 1 : n, false);
-  return res;
-}
-
 TSAN_INTERCEPTOR(void*, memmove, void *dst, void *src, uptr n) {
   SCOPED_TSAN_INTERCEPTOR(memmove, dst, src, n);
   MemoryAccessRange(thr, pc, (uptr)dst, n, true);
@@ -826,7 +819,7 @@ extern "C" void *__tsan_thread_start_func(void *arg) {
     ScopedIgnoreInterceptors ignore;
     ThreadIgnoreBegin(thr, 0);
     if (pthread_setspecific(g_thread_finalize_key,
-                            (void *)kPthreadDestructorIterations)) {
+                            (void *)GetPthreadDestructorIterations())) {
       Printf("ThreadSanitizer: failed to set thread key\n");
       Die();
     }
@@ -880,7 +873,8 @@ TSAN_INTERCEPTOR(int, pthread_create,
     ThreadIgnoreEnd(thr, pc);
   }
   if (res == 0) {
-    int tid = ThreadCreate(thr, pc, *(uptr*)th, detached);
+    int tid = ThreadCreate(thr, pc, *(uptr*)th,
+                           detached == PTHREAD_CREATE_DETACHED);
     CHECK_NE(tid, 0);
     // Synchronization on p.tid serves two purposes:
     // 1. ThreadCreate must finish before the new thread starts.
@@ -992,8 +986,8 @@ INTERCEPTOR(int, pthread_cond_init, void *c, void *a) {
 INTERCEPTOR(int, pthread_cond_wait, void *c, void *m) {
   void *cond = init_cond(c);
   SCOPED_TSAN_INTERCEPTOR(pthread_cond_wait, cond, m);
-  MutexUnlock(thr, pc, (uptr)m);
   MemoryAccessRange(thr, pc, (uptr)c, sizeof(uptr), false);
+  MutexUnlock(thr, pc, (uptr)m);
   CondMutexUnlockCtx arg = {&si, thr, pc, m};
   int res = 0;
   // This ensures that we handle mutex lock even in case of pthread_cancel.
@@ -1014,8 +1008,8 @@ INTERCEPTOR(int, pthread_cond_wait, void *c, void *m) {
 INTERCEPTOR(int, pthread_cond_timedwait, void *c, void *m, void *abstime) {
   void *cond = init_cond(c);
   SCOPED_TSAN_INTERCEPTOR(pthread_cond_timedwait, cond, m, abstime);
-  MutexUnlock(thr, pc, (uptr)m);
   MemoryAccessRange(thr, pc, (uptr)c, sizeof(uptr), false);
+  MutexUnlock(thr, pc, (uptr)m);
   CondMutexUnlockCtx arg = {&si, thr, pc, m};
   int res = 0;
   // This ensures that we handle mutex lock even in case of pthread_cancel.
@@ -1519,7 +1513,7 @@ TSAN_INTERCEPTOR(int, dup, int oldfd) {
   SCOPED_TSAN_INTERCEPTOR(dup, oldfd);
   int newfd = REAL(dup)(oldfd);
   if (oldfd >= 0 && newfd >= 0 && newfd != oldfd)
-    FdDup(thr, pc, oldfd, newfd);
+    FdDup(thr, pc, oldfd, newfd, true);
   return newfd;
 }
 
@@ -1527,7 +1521,7 @@ TSAN_INTERCEPTOR(int, dup2, int oldfd, int newfd) {
   SCOPED_TSAN_INTERCEPTOR(dup2, oldfd, newfd);
   int newfd2 = REAL(dup2)(oldfd, newfd);
   if (oldfd >= 0 && newfd2 >= 0 && newfd2 != oldfd)
-    FdDup(thr, pc, oldfd, newfd2);
+    FdDup(thr, pc, oldfd, newfd2, false);
   return newfd2;
 }
 
@@ -1535,7 +1529,7 @@ TSAN_INTERCEPTOR(int, dup3, int oldfd, int newfd, int flags) {
   SCOPED_TSAN_INTERCEPTOR(dup3, oldfd, newfd, flags);
   int newfd2 = REAL(dup3)(oldfd, newfd, flags);
   if (oldfd >= 0 && newfd2 >= 0 && newfd2 != oldfd)
-    FdDup(thr, pc, oldfd, newfd2);
+    FdDup(thr, pc, oldfd, newfd2, false);
   return newfd2;
 }
 
@@ -2144,6 +2138,50 @@ TSAN_INTERCEPTOR(int, vfork, int fake) {
   return WRAP(fork)(fake);
 }
 
+typedef int (*dl_iterate_phdr_cb_t)(__sanitizer_dl_phdr_info *info, SIZE_T size,
+                                    void *data);
+struct dl_iterate_phdr_data {
+  ThreadState *thr;
+  uptr pc;
+  dl_iterate_phdr_cb_t cb;
+  void *data;
+};
+
+static bool IsAppNotRodata(uptr addr) {
+  return IsAppMem(addr) && *(u64*)MemToShadow(addr) != kShadowRodata;
+}
+
+static int dl_iterate_phdr_cb(__sanitizer_dl_phdr_info *info, SIZE_T size,
+                              void *data) {
+  dl_iterate_phdr_data *cbdata = (dl_iterate_phdr_data *)data;
+  // dlopen/dlclose allocate/free dynamic-linker-internal memory, which is later
+  // accessible in dl_iterate_phdr callback. But we don't see synchronization
+  // inside of dynamic linker, so we "unpoison" it here in order to not
+  // produce false reports. Ignoring malloc/free in dlopen/dlclose is not enough
+  // because some libc functions call __libc_dlopen.
+  if (info && IsAppNotRodata((uptr)info->dlpi_name))
+    MemoryResetRange(cbdata->thr, cbdata->pc, (uptr)info->dlpi_name,
+                     internal_strlen(info->dlpi_name));
+  int res = cbdata->cb(info, size, cbdata->data);
+  // Perform the check one more time in case info->dlpi_name was overwritten
+  // by user callback.
+  if (info && IsAppNotRodata((uptr)info->dlpi_name))
+    MemoryResetRange(cbdata->thr, cbdata->pc, (uptr)info->dlpi_name,
+                     internal_strlen(info->dlpi_name));
+  return res;
+}
+
+TSAN_INTERCEPTOR(int, dl_iterate_phdr, dl_iterate_phdr_cb_t cb, void *data) {
+  SCOPED_TSAN_INTERCEPTOR(dl_iterate_phdr, cb, data);
+  dl_iterate_phdr_data cbdata;
+  cbdata.thr = thr;
+  cbdata.pc = pc;
+  cbdata.cb = cb;
+  cbdata.data = data;
+  int res = REAL(dl_iterate_phdr)(dl_iterate_phdr_cb, &cbdata);
+  return res;
+}
+
 static int OnExit(ThreadState *thr) {
   int status = Finalize(thr);
   FlushStreams();
@@ -2417,7 +2455,6 @@ void InitializeInterceptors() {
   // We need to setup it early, because functions like dlsym() can call it.
   REAL(memset) = internal_memset;
   REAL(memcpy) = internal_memcpy;
-  REAL(memcmp) = internal_memcmp;
 
   // Instruct libc malloc to consume less memory.
 #if !SANITIZER_FREEBSD
@@ -2456,7 +2493,6 @@ void InitializeInterceptors() {
   TSAN_INTERCEPT(memset);
   TSAN_INTERCEPT(memcpy);
   TSAN_INTERCEPT(memmove);
-  TSAN_INTERCEPT(memcmp);
   TSAN_INTERCEPT(strchr);
   TSAN_INTERCEPT(strchrnul);
   TSAN_INTERCEPT(strrchr);
@@ -2577,6 +2613,7 @@ void InitializeInterceptors() {
 
   TSAN_INTERCEPT(fork);
   TSAN_INTERCEPT(vfork);
+  TSAN_INTERCEPT(dl_iterate_phdr);
   TSAN_INTERCEPT(on_exit);
   TSAN_INTERCEPT(__cxa_atexit);
   TSAN_INTERCEPT(_exit);

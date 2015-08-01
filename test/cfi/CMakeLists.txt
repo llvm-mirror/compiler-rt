@@ -3,12 +3,11 @@ configure_lit_site_cfg(
   ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg
   )
 
-set(CFI_TEST_DEPS)
+set(CFI_TEST_DEPS ${SANITIZER_COMMON_LIT_TEST_DEPS})
 if(NOT COMPILER_RT_STANDALONE_BUILD)
   list(APPEND CFI_TEST_DEPS
-    FileCheck
-    clang
-    not
+    opt
+    ubsan
   )
   if(LLVM_ENABLE_PIC AND LLVM_BINUTILS_INCDIR)
     list(APPEND CFI_TEST_DEPS
@@ -18,6 +17,11 @@ if(NOT COMPILER_RT_STANDALONE_BUILD)
   if(APPLE)
     list(APPEND CFI_TEST_DEPS
       LTO
+    )
+  endif()
+  if(WIN32 AND EXISTS ${CMAKE_SOURCE_DIR}/tools/lld)
+    list(APPEND CFI_TEST_DEPS
+      lld
     )
   endif()
 endif()
