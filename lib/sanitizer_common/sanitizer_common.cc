@@ -57,7 +57,7 @@ void ReportFile::ReopenIfNecessary() {
       CloseFile(fd);
   }
 
-  const char *exe_name = GetBinaryBasename();
+  const char *exe_name = GetProcessName();
   if (common_flags()->log_exe_name && exe_name) {
     internal_snprintf(full_path, kMaxPathLength, "%s.%s.%zu", path_prefix,
                       exe_name, pid);
@@ -140,40 +140,40 @@ void NORETURN CheckFailed(const char *file, int line, const char *cond,
   Die();
 }
 
-uptr ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
-                      uptr max_len, error_t *errno_p) {
+bool ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
+                      uptr *read_len, uptr max_len, error_t *errno_p) {
   uptr PageSize = GetPageSizeCached();
   uptr kMinFileLen = PageSize;
-  uptr read_len = 0;
-  *buff = 0;
+  *buff = nullptr;
   *buff_size = 0;
+  *read_len = 0;
   // The files we usually open are not seekable, so try different buffer sizes.
   for (uptr size = kMinFileLen; size <= max_len; size *= 2) {
     fd_t fd = OpenFile(file_name, RdOnly, errno_p);
-    if (fd == kInvalidFd) return 0;
+    if (fd == kInvalidFd) return false;
     UnmapOrDie(*buff, *buff_size);
     *buff = (char*)MmapOrDie(size, __func__);
     *buff_size = size;
+    *read_len = 0;
     // Read up to one page at a time.
-    read_len = 0;
     bool reached_eof = false;
-    while (read_len + PageSize <= size) {
+    while (*read_len + PageSize <= size) {
       uptr just_read;
-      if (!ReadFromFile(fd, *buff + read_len, PageSize, &just_read, errno_p)) {
+      if (!ReadFromFile(fd, *buff + *read_len, PageSize, &just_read, errno_p)) {
         UnmapOrDie(*buff, *buff_size);
-        return 0;
+        return false;
       }
       if (just_read == 0) {
         reached_eof = true;
         break;
       }
-      read_len += just_read;
+      *read_len += just_read;
     }
     CloseFile(fd);
     if (reached_eof)  // We've read the whole file.
       break;
   }
-  return read_len;
+  return true;
 }
 
 typedef bool UptrComparisonFunction(const uptr &a, const uptr &b);
@@ -345,21 +345,44 @@ bool TemplateMatch(const char *templ, const char *str) {
 }
 
 static char binary_name_cache_str[kMaxPathLength];
-static const char *binary_basename_cache_str;
+static char process_name_cache_str[kMaxPathLength];
 
-const char *GetBinaryName() {
-  return binary_name_cache_str;
+const char *GetProcessName() {
+  return process_name_cache_str;
 }
 
-const char *GetBinaryBasename() {
-  return binary_basename_cache_str;
+static uptr ReadProcessName(/*out*/ char *buf, uptr buf_len) {
+  ReadLongProcessName(buf, buf_len);
+  char *s = const_cast<char *>(StripModuleName(buf));
+  uptr len = internal_strlen(s);
+  if (s != buf) {
+    internal_memmove(buf, s, len);
+    buf[len] = '\0';
+  }
+  return len;
+}
+
+void UpdateProcessName() {
+  ReadProcessName(process_name_cache_str, sizeof(process_name_cache_str));
 }
 
 // Call once to make sure that binary_name_cache_str is initialized
 void CacheBinaryName() {
-  CHECK_EQ('\0', binary_name_cache_str[0]);
+  if (binary_name_cache_str[0] != '\0')
+    return;
   ReadBinaryName(binary_name_cache_str, sizeof(binary_name_cache_str));
-  binary_basename_cache_str = StripModuleName(binary_name_cache_str);
+  ReadProcessName(process_name_cache_str, sizeof(process_name_cache_str));
+}
+
+uptr ReadBinaryNameCached(/*out*/char *buf, uptr buf_len) {
+  CacheBinaryName();
+  uptr name_len = internal_strlen(binary_name_cache_str);
+  name_len = (name_len < buf_len - 1) ? name_len : buf_len - 1;
+  if (buf_len == 0)
+    return 0;
+  internal_memcpy(buf, binary_name_cache_str, name_len);
+  buf[name_len] = '\0';
+  return name_len;
 }
 
 }  // namespace __sanitizer

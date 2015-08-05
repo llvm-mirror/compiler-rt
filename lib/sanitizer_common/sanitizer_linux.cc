@@ -15,7 +15,6 @@
 #include "sanitizer_platform.h"
 #if SANITIZER_FREEBSD || SANITIZER_LINUX
 
-#include "sanitizer_allocator_internal.h"
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_internal_defs.h"
@@ -74,11 +73,6 @@ extern char **environ;  // provided by crt1
 #include <sys/signal.h>
 #endif
 
-#if SANITIZER_ANDROID
-#include <android/log.h>
-#include <sys/system_properties.h>
-#endif
-
 #if SANITIZER_LINUX
 // <linux/time.h>
 struct kernel_timeval {
@@ -110,7 +104,7 @@ namespace __sanitizer {
 
 // --------------- sanitizer_libc.h
 uptr internal_mmap(void *addr, uptr length, int prot, int flags, int fd,
-                   u64 offset) {
+                   OFF_T offset) {
 #if SANITIZER_FREEBSD || SANITIZER_LINUX_USES_64BIT_SYSCALLS
   return internal_syscall(SYSCALL(mmap), (uptr)addr, length, prot, flags, fd,
                           offset);
@@ -375,8 +369,8 @@ const char *GetEnv(const char *name) {
   if (!inited) {
     inited = true;
     uptr environ_size;
-    len = ReadFileToBuffer("/proc/self/environ",
-                           &environ, &environ_size, 1 << 26);
+    if (!ReadFileToBuffer("/proc/self/environ", &environ, &environ_size, &len))
+      environ = nullptr;
   }
   if (!environ || len == 0) return 0;
   uptr namelen = internal_strlen(name);
@@ -405,9 +399,13 @@ extern "C" {
 static void ReadNullSepFileToArray(const char *path, char ***arr,
                                    int arr_size) {
   char *buff;
-  uptr buff_size = 0;
+  uptr buff_size;
+  uptr buff_len;
   *arr = (char **)MmapOrDie(arr_size * sizeof(char *), "NullSepFileArray");
-  ReadFileToBuffer(path, &buff, &buff_size, 1024 * 1024);
+  if (!ReadFileToBuffer(path, &buff, &buff_size, &buff_len, 1024 * 1024)) {
+    (*arr)[0] = nullptr;
+    return;
+  }
   (*arr)[0] = buff;
   int count, i;
   for (count = 1, i = 1; ; i++) {
@@ -418,7 +416,7 @@ static void ReadNullSepFileToArray(const char *path, char ***arr,
       count++;
     }
   }
-  (*arr)[count] = 0;
+  (*arr)[count] = nullptr;
 }
 #endif
 
@@ -732,6 +730,21 @@ uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
   return module_name_len;
 }
 
+uptr ReadLongProcessName(/*out*/ char *buf, uptr buf_len) {
+#if SANITIZER_LINUX
+  char *tmpbuf;
+  uptr tmpsize;
+  uptr tmplen;
+  if (ReadFileToBuffer("/proc/self/cmdline", &tmpbuf, &tmpsize, &tmplen,
+                       1024 * 1024)) {
+    internal_strncpy(buf, tmpbuf, buf_len);
+    UnmapOrDie(tmpbuf, tmpsize);
+    return internal_strlen(buf);
+  }
+#endif
+  return ReadBinaryName(buf, buf_len);
+}
+
 // Match full names of the form /path/to/base_name{-,.}*
 bool LibraryNameIs(const char *full_name, const char *base_name) {
   const char *name = full_name;
@@ -916,35 +929,12 @@ uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
 #endif  // defined(__x86_64__) && SANITIZER_LINUX
 
 #if SANITIZER_ANDROID
-static atomic_uint8_t android_log_initialized;
-
-void AndroidLogInit() {
-  atomic_store(&android_log_initialized, 1, memory_order_release);
-}
-// This thing is not, strictly speaking, async signal safe, but it does not seem
-// to cause any issues. Alternative is writing to log devices directly, but
-// their location and message format might change in the future, so we'd really
-// like to avoid that.
-void AndroidLogWrite(const char *buffer) {
-  if (!atomic_load(&android_log_initialized, memory_order_acquire))
-    return;
-
-  char *copy = internal_strdup(buffer);
-  char *p = copy;
-  char *q;
-  // __android_log_write has an implicit message length limit.
-  // Print one line at a time.
-  do {
-    q = internal_strchr(p, '\n');
-    if (q) *q = '\0';
-    __android_log_write(ANDROID_LOG_INFO, NULL, p);
-    if (q) p = q + 1;
-  } while (q);
-  InternalFree(copy);
-}
-
+#define PROP_VALUE_MAX 92
+extern "C" SANITIZER_WEAK_ATTRIBUTE int __system_property_get(const char *name,
+                                                              char *value);
 void GetExtraActivationFlags(char *buf, uptr size) {
   CHECK(size > PROP_VALUE_MAX);
+  CHECK(&__system_property_get);
   __system_property_get("asan.options", buf);
 }
 
@@ -955,7 +945,7 @@ extern "C" __attribute__((weak)) int dl_iterate_phdr(
 
 static int dl_iterate_phdr_test_cb(struct dl_phdr_info *info, size_t size,
                                    void *data) {
-  // Any name starting with "lib" indicated a bug in L where library base names
+  // Any name starting with "lib" indicates a bug in L where library base names
   // are returned instead of paths.
   if (info->dlpi_name && info->dlpi_name[0] == 'l' &&
       info->dlpi_name[1] == 'i' && info->dlpi_name[2] == 'b') {
@@ -967,20 +957,21 @@ static int dl_iterate_phdr_test_cb(struct dl_phdr_info *info, size_t size,
 
 static atomic_uint32_t android_api_level;
 
-static u32 AndroidDetectApiLevel() {
+static AndroidApiLevel AndroidDetectApiLevel() {
   if (!&dl_iterate_phdr)
-    return 19; // K or lower
+    return ANDROID_KITKAT; // K or lower
   bool base_name_seen = false;
   dl_iterate_phdr(dl_iterate_phdr_test_cb, &base_name_seen);
   if (base_name_seen)
-    return 22; // L MR1
-  return 23;   // post-L
+    return ANDROID_LOLLIPOP_MR1; // L MR1
+  return ANDROID_POST_LOLLIPOP;   // post-L
   // Plain L (API level 21) is completely broken wrt ASan and not very
   // interesting to detect.
 }
 
-u32 AndroidGetApiLevel() {
-  u32 level = atomic_load(&android_api_level, memory_order_relaxed);
+AndroidApiLevel AndroidGetApiLevel() {
+  AndroidApiLevel level =
+      (AndroidApiLevel)atomic_load(&android_api_level, memory_order_relaxed);
   if (level) return level;
   level = AndroidDetectApiLevel();
   atomic_store(&android_api_level, level, memory_order_relaxed);
@@ -1000,7 +991,7 @@ void *internal_start_thread(void(*func)(void *arg), void *arg) {
   // Start the thread with signals blocked, otherwise it can steal user signals.
   __sanitizer_sigset_t set, old;
   internal_sigfillset(&set);
-#if SANITIZER_LINUX
+#if SANITIZER_LINUX && !SANITIZER_ANDROID
   // Glibc uses SIGSETXID signal during setuid call. If this signal is blocked
   // on any thread, setuid call hangs (see test/tsan/setuid.c).
   internal_sigdelset(&set, 33);

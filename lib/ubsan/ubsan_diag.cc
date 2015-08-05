@@ -165,8 +165,12 @@ static void renderText(const char *Message, const Diag::Arg *Args) {
       case Diag::AK_String:
         Printf("%s", A.String);
         break;
-      case Diag::AK_Mangled: {
-        Printf("'%s'", Symbolizer::GetOrInit()->Demangle(A.String));
+      case Diag::AK_TypeName: {
+        if (SANITIZER_WINDOWS)
+          // The Windows implementation demangles names early.
+          Printf("'%s'", A.String);
+        else
+          Printf("'%s'", Symbolizer::GetOrInit()->Demangle(A.String));
         break;
       }
       case Diag::AK_SInt:
@@ -186,7 +190,11 @@ static void renderText(const char *Message, const Diag::Arg *Args) {
         // FIXME: Support floating-point formatting in sanitizer_common's
         //        printf, and stop using snprintf here.
         char Buffer[32];
+#if SANITIZER_WINDOWS
+        sprintf_s(Buffer, sizeof(Buffer), "%Lg", (long double)A.Float);
+#else
         snprintf(Buffer, sizeof(Buffer), "%Lg", (long double)A.Float);
+#endif
         Printf("%s", Buffer);
         break;
       }

@@ -71,6 +71,7 @@ check_library_exists(stdc++ __cxa_throw "" COMPILER_RT_HAS_LIBSTDCXX)
 # Linker flags.
 if(ANDROID)
   check_linker_flag("-Wl,-z,global" COMPILER_RT_HAS_Z_GLOBAL)
+  check_library_exists(log __android_log_write "" COMPILER_RT_HAS_LIBLOG)
 endif()
 
 # Architectures.
@@ -120,7 +121,8 @@ macro(test_target_arch arch def)
   endif()
   if(${CAN_TARGET_${arch}})
     list(APPEND COMPILER_RT_SUPPORTED_ARCH ${arch})
-  elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "${arch}")
+  elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "${arch}" AND
+         COMPILER_RT_HAS_EXPLICIT_TEST_TARGET_TRIPLE)
     # Bail out if we cannot target the architecture we plan to test.
     message(FATAL_ERROR "Cannot compile for ${arch}:\n${TARGET_${arch}_OUTPUT}")
   endif()
@@ -181,7 +183,11 @@ else()
       test_target_arch(i686 __i686__ "-m32")
       test_target_arch(i386 __i386__ "-m32")
     else()
-      test_target_arch(i386 "" "")
+      if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+        test_target_arch(i386 "" "")
+      else()
+        test_target_arch(x86_64 "" "")
+      endif()
     endif()
   elseif("${LLVM_NATIVE_ARCH}" STREQUAL "PowerPC")
     TEST_BIG_ENDIAN(HOST_IS_BIG_ENDIAN)
@@ -218,7 +224,7 @@ message(STATUS "Compiler-RT supported architectures: ${COMPILER_RT_SUPPORTED_ARC
 
 # Takes ${ARGN} and puts only supported architectures in @out_var list.
 function(filter_available_targets out_var)
-  set(archs)
+  set(archs ${${out_var}})
   foreach(arch ${ARGN})
     list(FIND COMPILER_RT_SUPPORTED_ARCH ${arch} ARCH_INDEX)
     if(NOT (ARCH_INDEX EQUAL -1) AND CAN_TARGET_${arch})
@@ -249,7 +255,10 @@ filter_available_targets(UBSAN_COMMON_SUPPORTED_ARCH
   ${SANITIZER_COMMON_SUPPORTED_ARCH})
 filter_available_targets(ASAN_SUPPORTED_ARCH
   x86_64 i386 i686 powerpc64 powerpc64le arm mips mipsel mips64 mips64el)
-filter_available_targets(DFSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
+if(ANDROID)
+  filter_available_targets(ASAN_SUPPORTED_ARCH aarch64)
+endif()
+filter_available_targets(DFSAN_SUPPORTED_ARCH x86_64 mips64 mips64el aarch64)
 filter_available_targets(LSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
 filter_available_targets(MSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
 filter_available_targets(PROFILE_SUPPORTED_ARCH x86_64 i386 i686 arm mips mips64
@@ -267,13 +276,21 @@ endif()
 
 if (SANITIZER_COMMON_SUPPORTED_ARCH AND NOT LLVM_USE_SANITIZER AND
     (OS_NAME MATCHES "Android|Darwin|Linux|FreeBSD" OR
-    (OS_NAME MATCHES "Windows" AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)))
+    (OS_NAME MATCHES "Windows" AND MSVC)))
   set(COMPILER_RT_HAS_SANITIZER_COMMON TRUE)
 else()
   set(COMPILER_RT_HAS_SANITIZER_COMMON FALSE)
 endif()
 
-if (COMPILER_RT_HAS_SANITIZER_COMMON AND ASAN_SUPPORTED_ARCH)
+if (COMPILER_RT_HAS_SANITIZER_COMMON AND
+    (NOT OS_NAME MATCHES "Windows" OR CMAKE_SIZEOF_VOID_P EQUAL 4))
+  set(COMPILER_RT_HAS_INTERCEPTION TRUE)
+else()
+  set(COMPILER_RT_HAS_INTERCEPTION FALSE)
+endif()
+
+if (COMPILER_RT_HAS_SANITIZER_COMMON AND ASAN_SUPPORTED_ARCH AND
+    (NOT OS_NAME MATCHES "Windows" OR CMAKE_SIZEOF_VOID_P EQUAL 4))
   set(COMPILER_RT_HAS_ASAN TRUE)
 else()
   set(COMPILER_RT_HAS_ASAN FALSE)
@@ -295,7 +312,7 @@ else()
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND LSAN_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Darwin|Linux|FreeBSD")
+    OS_NAME MATCHES "Linux|FreeBSD")
   set(COMPILER_RT_HAS_LSAN TRUE)
 else()
   set(COMPILER_RT_HAS_LSAN FALSE)
@@ -323,7 +340,7 @@ else()
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND UBSAN_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Darwin|Linux|FreeBSD")
+    OS_NAME MATCHES "Darwin|Linux|FreeBSD|Windows")
   set(COMPILER_RT_HAS_UBSAN TRUE)
 else()
   set(COMPILER_RT_HAS_UBSAN FALSE)
@@ -337,7 +354,7 @@ if("${LLVM_NATIVE_ARCH}" STREQUAL "Mips")
   set(COMPILER_RT_HAS_MSSE3_FLAG FALSE)
 endif()
 
-if (SAFESTACK_SUPPORTED_ARCH AND
+if (COMPILER_RT_HAS_SANITIZER_COMMON AND SAFESTACK_SUPPORTED_ARCH AND
     OS_NAME MATCHES "Darwin|Linux|FreeBSD")
   set(COMPILER_RT_HAS_SAFESTACK TRUE)
 else()

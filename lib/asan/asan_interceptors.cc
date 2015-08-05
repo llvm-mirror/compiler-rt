@@ -263,7 +263,7 @@ DEFINE_REAL_PTHREAD_FUNCTIONS
 
 #if ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
 
-#if SANITIZER_ANDROID
+#if SANITIZER_ANDROID && !defined(_LP64)
 INTERCEPTOR(void*, bsd_signal, int signum, void *handler) {
   if (!IsDeadlySignal(signum) || common_flags()->allow_user_segv_handler) {
     return REAL(bsd_signal)(signum, handler);
@@ -362,40 +362,6 @@ INTERCEPTOR(void, __cxa_throw, void *a, void *b, void *c) {
   REAL(__cxa_throw)(a, b, c);
 }
 #endif
-
-static inline int CharCmp(unsigned char c1, unsigned char c2) {
-  return (c1 == c2) ? 0 : (c1 < c2) ? -1 : 1;
-}
-
-INTERCEPTOR(int, memcmp, const void *a1, const void *a2, uptr size) {
-  void *ctx;
-  ASAN_INTERCEPTOR_ENTER(ctx, memcmp);
-  if (UNLIKELY(!asan_inited)) return internal_memcmp(a1, a2, size);
-  ENSURE_ASAN_INITED();
-  if (flags()->replace_intrin) {
-    if (flags()->strict_memcmp) {
-      // Check the entire regions even if the first bytes of the buffers are
-      // different.
-      ASAN_READ_RANGE(ctx, a1, size);
-      ASAN_READ_RANGE(ctx, a2, size);
-      // Fallthrough to REAL(memcmp) below.
-    } else {
-      unsigned char c1 = 0, c2 = 0;
-      const unsigned char *s1 = (const unsigned char*)a1;
-      const unsigned char *s2 = (const unsigned char*)a2;
-      uptr i;
-      for (i = 0; i < size; i++) {
-        c1 = s1[i];
-        c2 = s2[i];
-        if (c1 != c2) break;
-      }
-      ASAN_READ_RANGE(ctx, s1, Min(i + 1, size));
-      ASAN_READ_RANGE(ctx, s2, Min(i + 1, size));
-      return CharCmp(c1, c2);
-    }
-  }
-  return REAL(memcmp(a1, a2, size));
-}
 
 // memcpy is called during __asan_init() from the internals of printf(...).
 // We do not treat memcpy with to==from as a bug.
@@ -767,7 +733,6 @@ void InitializeAsanInterceptors() {
   InitializeCommonInterceptors();
 
   // Intercept mem* functions.
-  ASAN_INTERCEPT_FUNC(memcmp);
   ASAN_INTERCEPT_FUNC(memmove);
   ASAN_INTERCEPT_FUNC(memset);
   if (PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE) {
@@ -804,7 +769,7 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(longjmp);
 #if ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
   ASAN_INTERCEPT_FUNC(sigaction);
-#if SANITIZER_ANDROID
+#if SANITIZER_ANDROID && !defined(_LP64)
   ASAN_INTERCEPT_FUNC(bsd_signal);
 #else
   ASAN_INTERCEPT_FUNC(signal);

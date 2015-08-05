@@ -78,7 +78,7 @@ ASAN_FLAG(bool, check_malloc_usable_size, true,
 ASAN_FLAG(bool, unmap_shadow_on_exit, false,
           "If set, explicitly unmaps the (huge) shadow at exit.")
 ASAN_FLAG(
-    bool, abort_on_error, false,
+    bool, abort_on_error, SANITIZER_MAC,
     "If set, the tool calls abort() instead of _exit() after printing the "
     "error report.")
 ASAN_FLAG(bool, print_stats, false,
@@ -113,9 +113,6 @@ ASAN_FLAG(bool, alloc_dealloc_mismatch,
 
 ASAN_FLAG(bool, new_delete_type_mismatch, true,
           "Report errors on mismatch betwen size of new and delete.")
-ASAN_FLAG(bool, strict_memcmp, true,
-          "If true, assume that memcmp(p1, p2, n) always reads n bytes before "
-          "comparing p1 and p2.")
 ASAN_FLAG(
     bool, strict_init_order, false,
     "If true, assume that dynamic initializers can never access globals from "

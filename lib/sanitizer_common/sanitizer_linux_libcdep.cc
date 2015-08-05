@@ -15,6 +15,7 @@
 #include "sanitizer_platform.h"
 #if SANITIZER_FREEBSD || SANITIZER_LINUX
 
+#include "sanitizer_allocator_internal.h"
 #include "sanitizer_atomic.h"
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
@@ -45,6 +46,12 @@
 
 #if SANITIZER_ANDROID
 #include <android/api-level.h>
+#endif
+
+#if SANITIZER_ANDROID && __ANDROID_API__ < 21
+#include <android/log.h>
+#else
+#include <syslog.h>
 #endif
 
 #if !SANITIZER_ANDROID
@@ -161,7 +168,7 @@ bool SanitizerGetThreadName(char *name, int max_len) {
 #endif
 }
 
-#if !SANITIZER_FREEBSD
+#if !SANITIZER_FREEBSD && !SANITIZER_ANDROID && !SANITIZER_GO
 static uptr g_tls_size;
 #endif
 
@@ -198,7 +205,7 @@ void InitTlsSize() {
   size_t tls_align = 0;
   get_tls(&tls_size, &tls_align);
   g_tls_size = tls_size;
-#endif  // !SANITIZER_FREEBSD && !SANITIZER_ANDROID
+#endif  // !SANITIZER_FREEBSD && !SANITIZER_ANDROID && !SANITIZER_GO
 }
 
 #if (defined(__x86_64__) || defined(__i386__) || defined(__mips__)) \
@@ -341,7 +348,7 @@ static void GetTls(uptr *addr, uptr *size) {
 
 #if !SANITIZER_GO
 uptr GetTlsSize() {
-#if SANITIZER_FREEBSD
+#if SANITIZER_FREEBSD || SANITIZER_ANDROID
   uptr addr, size;
   GetTls(&addr, &size);
   return size;
@@ -376,6 +383,7 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
 #endif
 }
 
+#if !SANITIZER_GO
 void AdjustStackSize(void *attr_) {
   pthread_attr_t *attr = (pthread_attr_t *)attr_;
   uptr stackaddr = 0;
@@ -400,6 +408,7 @@ void AdjustStackSize(void *attr_) {
     }
   }
 }
+#endif // !SANITIZER_GO
 
 # if !SANITIZER_FREEBSD
 typedef ElfW(Phdr) Elf_Phdr;
@@ -425,7 +434,7 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
   if (data->first) {
     data->first = false;
     // First module is the binary itself.
-    ReadBinaryName(module_name.data(), module_name.size());
+    ReadBinaryNameCached(module_name.data(), module_name.size());
   } else if (info->dlpi_name) {
     module_name.append("%s", info->dlpi_name);
   }
@@ -460,7 +469,7 @@ uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
   // Fall back to /proc/maps if dl_iterate_phdr is unavailable or broken.
   // The runtime check allows the same library to work with
   // both K and L (and future) Android releases.
-  if (api_level <= 22) { // L or earlier
+  if (api_level <= ANDROID_LOLLIPOP_MR1) { // L or earlier
     MemoryMappingLayout memory_mapping(false);
     return memory_mapping.DumpListOfModules(modules, max_modules, filter);
   }
@@ -509,6 +518,52 @@ uptr GetRSS() {
     rss = rss * 10 + *pos++ - '0';
   return rss * GetPageSizeCached();
 }
+
+// 64-bit Android targets don't provide the deprecated __android_log_write.
+// Starting with the L release, syslog() works and is preferable to
+// __android_log_write.
+#if SANITIZER_LINUX
+#if SANITIZER_ANDROID && __ANDROID_API__ < 21
+static atomic_uint8_t android_log_initialized;
+
+void AndroidLogInit() {
+  atomic_store(&android_log_initialized, 1, memory_order_release);
+}
+
+static bool IsSyslogAvailable() {
+  return atomic_load(&android_log_initialized, memory_order_acquire);
+}
+
+static void WriteOneLineToSyslog(const char *s) {
+  __android_log_write(ANDROID_LOG_INFO, NULL, s);
+}
+#else
+void AndroidLogInit() {}
+
+static bool IsSyslogAvailable() { return true; }
+
+static void WriteOneLineToSyslog(const char *s) { syslog(LOG_INFO, "%s", s); }
+#endif
+
+void WriteToSyslog(const char *buffer) {
+  if (!IsSyslogAvailable())
+    return;
+  char *copy = internal_strdup(buffer);
+  char *p = copy;
+  char *q;
+  // syslog, at least on Android, has an implicit message length limit.
+  // Print one line at a time.
+  do {
+    q = internal_strchr(p, '\n');
+    if (q)
+      *q = '\0';
+    WriteOneLineToSyslog(p);
+    if (q)
+      p = q + 1;
+  } while (q);
+  InternalFree(copy);
+}
+#endif  // SANITIZER_LINUX
 
 }  // namespace __sanitizer
 
