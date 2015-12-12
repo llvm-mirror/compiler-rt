@@ -14,6 +14,7 @@
 
 #include "sanitizer_common/sanitizer_platform.h"
 #if SANITIZER_WINDOWS
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include <stdlib.h>
@@ -174,14 +175,6 @@ void PlatformTSDDtor(void *tsd) {
 // }}}
 
 // ---------------------- Various stuff ---------------- {{{
-void DisableReexec() {
-  // No need to re-exec on Windows.
-}
-
-void MaybeReexec() {
-  // No need to re-exec on Windows.
-}
-
 void *AsanDoesNotSupportStaticLinkage() {
 #if defined(_DEBUG)
 #error Please build the runtime with a non-debug CRT: /MD or /MT
@@ -197,7 +190,7 @@ void ReadContextStack(void *context, uptr *stack, uptr *ssize) {
   UNIMPLEMENTED();
 }
 
-void AsanOnSIGSEGV(int, void *siginfo, void *context) {
+void AsanOnDeadlySignal(int, void *siginfo, void *context) {
   UNIMPLEMENTED();
 }
 
@@ -214,7 +207,7 @@ static long WINAPI SEHHandler(EXCEPTION_POINTERS *info) {
             ? "access-violation"
             : "in-page-error";
     SignalContext sig = SignalContext::Create(exception_record, context);
-    ReportSIGSEGV(description, sig);
+    ReportDeadlySignal(description, sig);
   }
 
   // FIXME: Handle EXCEPTION_STACK_OVERFLOW here.
@@ -252,7 +245,7 @@ int __asan_set_seh_filter() {
 // Put a pointer to __asan_set_seh_filter at the end of the global list
 // of C initializers, after the default EH is set by the CRT.
 #pragma section(".CRT$XIZ", long, read)  // NOLINT
-static __declspec(allocate(".CRT$XIZ"))
+__declspec(allocate(".CRT$XIZ"))
     int (*__intercept_seh)() = __asan_set_seh_filter;
 #endif
 // }}}

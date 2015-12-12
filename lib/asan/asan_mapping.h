@@ -17,7 +17,7 @@
 #include "asan_internal.h"
 
 // The full explanation of the memory mapping could be found here:
-// http://code.google.com/p/address-sanitizer/wiki/AddressSanitizerAlgorithm
+// https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm
 //
 // Typical shadow mapping on Linux/x86_64 with SHADOW_OFFSET == 0x00007fff8000:
 // || `[0x10007fff8000, 0x7fffffffffff]` || HighMem    ||
@@ -72,6 +72,20 @@
 // || `[0x2400000000, 0x27ffffffff]` || ShadowGap  ||
 // || `[0x2000000000, 0x23ffffffff]` || LowShadow  ||
 // || `[0x0000000000, 0x1fffffffff]` || LowMem     ||
+//
+// Default Linux/AArch64 (39-bit VMA) mapping:
+// || `[0x2000000000, 0x7fffffffff]` || highmem    ||
+// || `[0x1400000000, 0x1fffffffff]` || highshadow ||
+// || `[0x1200000000, 0x13ffffffff]` || shadowgap  ||
+// || `[0x1000000000, 0x11ffffffff]` || lowshadow  ||
+// || `[0x0000000000, 0x0fffffffff]` || lowmem     ||
+//
+// Default Linux/AArch64 (42-bit VMA) mapping:
+// || `[0x10000000000, 0x3ffffffffff]` || highmem    ||
+// || `[0x0a000000000, 0x0ffffffffff]` || highshadow ||
+// || `[0x09000000000, 0x09fffffffff]` || shadowgap  ||
+// || `[0x08000000000, 0x08fffffffff]` || lowshadow  ||
+// || `[0x00000000000, 0x07fffffffff]` || lowmem     ||
 //
 // Shadow mapping on FreeBSD/x86-64 with SHADOW_OFFSET == 0x400000000000:
 // || `[0x500000000000, 0x7fffffffffff]` || HighMem    ||
@@ -171,7 +185,8 @@ static const u64 kWindowsShadowOffset32 = 3ULL << 28;  // 0x30000000
 
 // With the zero shadow base we can not actually map pages starting from 0.
 // This constant is somewhat arbitrary.
-#define kZeroBaseShadowStart (1 << 18)
+#define kZeroBaseShadowStart 0
+#define kZeroBaseMaxShadowStart (1 << 18)
 
 #define kShadowGapBeg   (kLowShadowEnd ? kLowShadowEnd + 1 \
                                        : kZeroBaseShadowStart)

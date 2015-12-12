@@ -14,14 +14,16 @@
 #define SANITIZER_SUPPRESSIONS_H
 
 #include "sanitizer_common.h"
+#include "sanitizer_atomic.h"
 #include "sanitizer_internal_defs.h"
 
 namespace __sanitizer {
 
 struct Suppression {
+  Suppression() { internal_memset(this, 0, sizeof(*this)); }
   const char *type;
   char *templ;
-  unsigned hit_count;
+  atomic_uint32_t hit_count;
   uptr weight;
 };
 
