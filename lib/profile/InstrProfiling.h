@@ -10,47 +10,7 @@
 #ifndef PROFILE_INSTRPROFILING_H_
 #define PROFILE_INSTRPROFILING_H_
 
-#ifdef _MSC_VER
-# define LLVM_ALIGNAS(x) __declspec(align(x))
-#elif __GNUC__
-#define LLVM_ALIGNAS(x) __attribute__((aligned(x)))
-#endif
-
-#define LLVM_LIBRARY_VISIBILITY __attribute__((visibility("hidden")))
-#define LLVM_SECTION(Sect) __attribute__((section(Sect)))
-
-#define PROF_ERR(Format, ...)                                                  \
-  if (GetEnvHook && GetEnvHook("LLVM_PROFILE_VERBOSE_ERRORS"))                 \
-    fprintf(stderr, Format, __VA_ARGS__);
-
-extern char *(*GetEnvHook)(const char *);
-
-#if defined(__FreeBSD__) && defined(__i386__)
-
-/* System headers define 'size_t' incorrectly on x64 FreeBSD (prior to
- * FreeBSD 10, r232261) when compiled in 32-bit mode.
- */
-#define PRIu64 "llu"
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-typedef uint32_t uintptr_t;
-#elif defined(__FreeBSD__) && defined(__x86_64__)
-#define PRIu64 "lu"
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-typedef unsigned long int uintptr_t;
-
-#else /* defined(__FreeBSD__) && defined(__i386__) */
-
-#include <inttypes.h>
-#include <stdint.h>
-
-#endif /* defined(__FreeBSD__) && defined(__i386__) */
-
+#include "InstrProfilingPort.h"
 #include "InstrProfData.inc"
 
 enum ValueKind {
@@ -59,7 +19,8 @@ enum ValueKind {
 };
 
 typedef void *IntPtrT;
-typedef struct LLVM_ALIGNAS(INSTR_PROF_DATA_ALIGNMENT) __llvm_profile_data {
+typedef struct COMPILER_RT_ALIGNAS(INSTR_PROF_DATA_ALIGNMENT)
+    __llvm_profile_data {
 #define INSTR_PROF_DATA(Type, LLVMType, Name, Initializer) Type Name;
 #include "InstrProfData.inc"
 } __llvm_profile_data;
@@ -117,15 +78,16 @@ void INSTR_PROF_VALUE_PROF_FUNC(
 /*!
  * \brief Prepares the value profiling data for output.
  *
- * Prepares a single __llvm_profile_value_data array out of the many
- * ValueProfNode trees (one per instrumented function).
+ * Returns an array of pointers to value profile data.
  */
-uint64_t __llvm_profile_gather_value_data(uint8_t **DataArray);
+struct ValueProfData;
+struct ValueProfData **__llvm_profile_gather_value_data(uint64_t *Size);
 
 /*!
  * \brief Write instrumentation data to the current file.
  *
- * Writes to the file with the last name given to \a __llvm_profile_set_filename(),
+ * Writes to the file with the last name given to \a *
+ * __llvm_profile_set_filename(),
  * or if it hasn't been called, the \c LLVM_PROFILE_FILE environment variable,
  * or if that's not set, the last name given to
  * \a __llvm_profile_override_default_filename(), or if that's not set,

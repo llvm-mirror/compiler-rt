@@ -79,6 +79,8 @@ COMMON_FLAG(bool, handle_segv, SANITIZER_NEEDS_SEGV,
             "If set, registers the tool's custom SIGSEGV/SIGBUS handler.")
 COMMON_FLAG(bool, handle_abort, false,
             "If set, registers the tool's custom SIGABRT handler.")
+COMMON_FLAG(bool, handle_sigill, false,
+            "If set, registers the tool's custom SIGILL handler.")
 COMMON_FLAG(bool, handle_sigfpe, true,
             "If set, registers the tool's custom SIGFPE handler.")
 COMMON_FLAG(bool, allow_user_segv_handler, false,
@@ -142,6 +144,9 @@ COMMON_FLAG(bool, coverage_direct, SANITIZER_ANDROID,
 COMMON_FLAG(const char *, coverage_dir, ".",
             "Target directory for coverage dumps. Defaults to the current "
             "directory.")
+COMMON_FLAG(bool, coverage_pc_buffer, true,
+            "If set (and if 'coverage' is set too), the pcs would be collected "
+            "in a buffer.")
 COMMON_FLAG(bool, full_address_space, false,
             "Sanitize complete address space; "
             "by default kernel area on 32-bit platforms will not be sanitized")

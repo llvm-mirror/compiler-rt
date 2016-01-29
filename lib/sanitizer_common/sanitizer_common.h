@@ -628,8 +628,7 @@ class LoadedModule {
         : next(nullptr), beg(beg), end(end), executable(executable) {}
   };
 
-  typedef IntrusiveList<AddressRange>::ConstIterator Iterator;
-  Iterator ranges() const { return Iterator(&ranges_); }
+  const IntrusiveList<AddressRange> &ranges() const { return ranges_; }
 
  private:
   char *full_name_;  // Owned.
@@ -665,17 +664,17 @@ INLINE void LogFullErrorReport(const char *buffer) {}
 
 #if SANITIZER_LINUX || SANITIZER_MAC
 void WriteOneLineToSyslog(const char *s);
+void LogMessageOnPrintf(const char *str);
 #else
 INLINE void WriteOneLineToSyslog(const char *s) {}
+INLINE void LogMessageOnPrintf(const char *str) {}
 #endif
 
 #if SANITIZER_LINUX
 // Initialize Android logging. Any writes before this are silently lost.
 void AndroidLogInit();
-bool ShouldLogAfterPrintf();
 #else
 INLINE void AndroidLogInit() {}
-INLINE bool ShouldLogAfterPrintf() { return false; }
 #endif
 
 #if SANITIZER_ANDROID

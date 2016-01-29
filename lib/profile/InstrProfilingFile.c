@@ -17,6 +17,10 @@
 
 #define UNCONST(ptr) ((void *)(uintptr_t)(ptr))
 
+#ifdef _MSC_VER
+#define snprintf _snprintf
+#endif
+
 /* Return 1 if there is an error, otherwise return  0.  */
 static uint32_t fileWriter(ProfDataIOVec *IOVecs, uint32_t NumIOVecs,
                            void **WriterCtx) {
@@ -30,13 +34,24 @@ static uint32_t fileWriter(ProfDataIOVec *IOVecs, uint32_t NumIOVecs,
   return 0;
 }
 
+COMPILER_RT_VISIBILITY ProfBufferIO *
+llvmCreateBufferIOInternal(void *File, uint32_t BufferSz) {
+  CallocHook = calloc;
+  FreeHook = free;
+  return llvmCreateBufferIO(fileWriter, File, BufferSz);
+}
+
 static int writeFile(FILE *File) {
-  uint8_t *ValueDataBegin = NULL;
-  const uint64_t ValueDataSize =
-      __llvm_profile_gather_value_data(&ValueDataBegin);
-  int r = llvmWriteProfData(fileWriter, File, ValueDataBegin, ValueDataSize);
-  free(ValueDataBegin);
-  return r;
+  const char *BufferSzStr = 0;
+  uint64_t ValueDataSize = 0;
+  struct ValueProfData **ValueDataArray =
+      __llvm_profile_gather_value_data(&ValueDataSize);
+  FreeHook = &free;
+  CallocHook = &calloc;
+  BufferSzStr = getenv("LLVM_VP_BUFFER_SIZE");
+  if (BufferSzStr && BufferSzStr[0])
+    VPBufferSize = atoi(BufferSzStr);
+  return llvmWriteProfData(fileWriter, File, ValueDataArray, ValueDataSize);
 }
 
 static int writeFileWithName(const char *OutputName) {
@@ -46,7 +61,7 @@ static int writeFileWithName(const char *OutputName) {
     return -1;
 
   /* Append to the file to support profiling multiple shared objects. */
-  OutputFile = fopen(OutputName, "a");
+  OutputFile = fopen(OutputName, "ab");
   if (!OutputFile)
     return -1;
 
@@ -56,8 +71,8 @@ static int writeFileWithName(const char *OutputName) {
   return RetVal;
 }
 
-__attribute__((weak)) int __llvm_profile_OwnsFilename = 0;
-__attribute__((weak)) const char *__llvm_profile_CurrentFilename = NULL;
+COMPILER_RT_WEAK int __llvm_profile_OwnsFilename = 0;
+COMPILER_RT_WEAK const char *__llvm_profile_CurrentFilename = NULL;
 
 static void truncateCurrentFile(void) {
   const char *Filename;
@@ -164,7 +179,7 @@ static void setFilenameAutomatically(void) {
   resetFilenameToDefault();
 }
 
-LLVM_LIBRARY_VISIBILITY
+COMPILER_RT_VISIBILITY
 void __llvm_profile_initialize_file(void) {
   /* Check if the filename has been initialized. */
   if (__llvm_profile_CurrentFilename)
@@ -174,12 +189,12 @@ void __llvm_profile_initialize_file(void) {
   setFilenameAutomatically();
 }
 
-LLVM_LIBRARY_VISIBILITY
+COMPILER_RT_VISIBILITY
 void __llvm_profile_set_filename(const char *Filename) {
   setFilenamePossiblyWithPid(Filename);
 }
 
-LLVM_LIBRARY_VISIBILITY
+COMPILER_RT_VISIBILITY
 void __llvm_profile_override_default_filename(const char *Filename) {
   /* If the env var is set, skip setting filename from argument. */
   const char *Env_Filename = getenv("LLVM_PROFILE_FILE");
@@ -188,7 +203,7 @@ void __llvm_profile_override_default_filename(const char *Filename) {
   setFilenamePossiblyWithPid(Filename);
 }
 
-LLVM_LIBRARY_VISIBILITY
+COMPILER_RT_VISIBILITY
 int __llvm_profile_write_file(void) {
   int rc;
 
@@ -196,6 +211,15 @@ int __llvm_profile_write_file(void) {
   /* Check the filename. */
   if (!__llvm_profile_CurrentFilename) {
     PROF_ERR("LLVM Profile: Failed to write file : %s\n", "Filename not set");
+    return -1;
+  }
+
+  /* Check if there is llvm/runtime version mismatch.  */
+  if (GET_VERSION(__llvm_profile_get_version()) != INSTR_PROF_RAW_VERSION) {
+    PROF_ERR("LLVM Profile: runtime and instrumentation version mismatch : "
+             "expected %d, but get %d\n",
+             INSTR_PROF_RAW_VERSION,
+             (int)GET_VERSION(__llvm_profile_get_version()));
     return -1;
   }
 
@@ -209,7 +233,7 @@ int __llvm_profile_write_file(void) {
 
 static void writeFileWithoutReturn(void) { __llvm_profile_write_file(); }
 
-LLVM_LIBRARY_VISIBILITY
+COMPILER_RT_VISIBILITY
 int __llvm_profile_register_write_file_atexit(void) {
   static int HasBeenRegistered = 0;
 
