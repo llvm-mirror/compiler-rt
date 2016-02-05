@@ -14,7 +14,6 @@
 // inside it.
 //===----------------------------------------------------------------------===//
 
-
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_libc.h"
@@ -98,7 +97,7 @@ static int AppendSignedDecimal(char **buff, const char *buff_end, s64 num,
 
 static int AppendString(char **buff, const char *buff_end, int precision,
                         const char *s) {
-  if (s == 0)
+  if (!s)
     s = "<null>";
   int result = 0;
   for (; *s; s++) {
@@ -279,7 +278,7 @@ static void SharedPrintfCode(bool append_pid, const char *format,
 #   undef CHECK_NEEDED_LENGTH
   }
   RawWrite(buffer);
-  if (common_flags()->log_to_syslog)
+  if (common_flags()->log_to_syslog && ShouldLogAfterPrintf())
     WriteToSyslog(buffer);
   CallPrintfAndReportCallback(buffer);
   // If we had mapped any memory, clean up.
@@ -329,4 +328,4 @@ void InternalScopedString::append(const char *format, ...) {
   CHECK_LT(length_, size());
 }
 
-}  // namespace __sanitizer
+} // namespace __sanitizer

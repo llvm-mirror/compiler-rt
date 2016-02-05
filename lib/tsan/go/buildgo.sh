@@ -20,6 +20,7 @@ SRCS="
 	../rtl/tsan_sync.cc
 	../../sanitizer_common/sanitizer_allocator.cc
 	../../sanitizer_common/sanitizer_common.cc
+	../../sanitizer_common/sanitizer_common_libcdep.cc
 	../../sanitizer_common/sanitizer_deadlock_detector2.cc
 	../../sanitizer_common/sanitizer_flag_parser.cc
 	../../sanitizer_common/sanitizer_flags.cc
@@ -36,7 +37,7 @@ SRCS="
 if [ "`uname -a | grep Linux`" != "" ]; then
 	SUFFIX="linux_amd64"
 	OSCFLAGS="-fPIC -ffreestanding -Wno-maybe-uninitialized -Wno-unused-const-variable -Werror -Wno-unknown-warning-option"
-	OSLDFLAGS="-lpthread -lrt -fPIC -fpie"
+	OSLDFLAGS="-lpthread -fPIC -fpie"
 	SRCS="
 		$SRCS
 		../rtl/tsan_platform_linux.cc

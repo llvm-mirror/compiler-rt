@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_platform.h"
+
 #if SANITIZER_FREEBSD || SANITIZER_LINUX
 
 #include "sanitizer_common.h"
@@ -88,7 +89,8 @@ const int FUTEX_WAKE = 1;
 // Are we using 32-bit or 64-bit Linux syscalls?
 // x32 (which defines __x86_64__) has SANITIZER_WORDSIZE == 32
 // but it still needs to use 64-bit syscalls.
-#if SANITIZER_LINUX && (defined(__x86_64__) || SANITIZER_WORDSIZE == 64)
+#if SANITIZER_LINUX && (defined(__x86_64__) || defined(__powerpc64__) || \
+    SANITIZER_WORDSIZE == 64)
 # define SANITIZER_LINUX_USES_64BIT_SYSCALLS 1
 #else
 # define SANITIZER_LINUX_USES_64BIT_SYSCALLS 0
@@ -98,6 +100,8 @@ namespace __sanitizer {
 
 #if SANITIZER_LINUX && defined(__x86_64__)
 #include "sanitizer_syscall_linux_x86_64.inc"
+#elif SANITIZER_LINUX && defined(__aarch64__)
+#include "sanitizer_syscall_linux_aarch64.inc"
 #else
 #include "sanitizer_syscall_generic.inc"
 #endif
@@ -372,20 +376,20 @@ const char *GetEnv(const char *name) {
     if (!ReadFileToBuffer("/proc/self/environ", &environ, &environ_size, &len))
       environ = nullptr;
   }
-  if (!environ || len == 0) return 0;
+  if (!environ || len == 0) return nullptr;
   uptr namelen = internal_strlen(name);
   const char *p = environ;
   while (*p != '\0') {  // will happen at the \0\0 that terminates the buffer
     // proc file has the format NAME=value\0NAME=value\0NAME=value\0...
     const char* endp =
         (char*)internal_memchr(p, '\0', len - (p - environ));
-    if (endp == 0)  // this entry isn't NUL terminated
-      return 0;
+    if (!endp)  // this entry isn't NUL terminated
+      return nullptr;
     else if (!internal_memcmp(p, name, namelen) && p[namelen] == '=')  // Match.
       return p + namelen + 1;  // point after =
     p = endp + 1;
   }
-  return 0;  // Not found.
+  return nullptr;  // Not found.
 #else
 #error "Unsupported platform"
 #endif
@@ -494,7 +498,7 @@ void BlockingMutex::CheckLocked() {
 // Note that getdents64 uses a different structure format. We only provide the
 // 32-bit syscall here.
 struct linux_dirent {
-#if SANITIZER_X32
+#if SANITIZER_X32 || defined(__aarch64__)
   u64 d_ino;
   u64 d_off;
 #else
@@ -502,6 +506,9 @@ struct linux_dirent {
   unsigned long      d_off;
 #endif
   unsigned short     d_reclen;
+#ifdef __aarch64__
+  unsigned char      d_type;
+#endif
   char               d_name[256];
 };
 
@@ -583,8 +590,8 @@ int internal_sigaction_norestorer(int signum, const void *act, void *oldact) {
   }
 
   uptr result = internal_syscall(SYSCALL(rt_sigaction), (uptr)signum,
-      (uptr)(u_act ? &k_act : NULL),
-      (uptr)(u_oldact ? &k_oldact : NULL),
+      (uptr)(u_act ? &k_act : nullptr),
+      (uptr)(u_oldact ? &k_oldact : nullptr),
       (uptr)sizeof(__sanitizer_kernel_sigset_t));
 
   if ((result == 0) && u_oldact) {
@@ -926,18 +933,142 @@ uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
                        : "memory", "$29" );
   return res;
 }
+#elif defined(__aarch64__)
+uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+                    int *parent_tidptr, void *newtls, int *child_tidptr) {
+  long long res;
+  if (!fn || !child_stack)
+    return -EINVAL;
+  CHECK_EQ(0, (uptr)child_stack % 16);
+  child_stack = (char *)child_stack - 2 * sizeof(unsigned long long);
+  ((unsigned long long *)child_stack)[0] = (uptr)fn;
+  ((unsigned long long *)child_stack)[1] = (uptr)arg;
+
+  register int (*__fn)(void *)  __asm__("x0") = fn;
+  register void *__stack __asm__("x1") = child_stack;
+  register int   __flags __asm__("x2") = flags;
+  register void *__arg   __asm__("x3") = arg;
+  register int  *__ptid  __asm__("x4") = parent_tidptr;
+  register void *__tls   __asm__("x5") = newtls;
+  register int  *__ctid  __asm__("x6") = child_tidptr;
+
+  __asm__ __volatile__(
+                       "mov x0,x2\n" /* flags  */
+                       "mov x2,x4\n" /* ptid  */
+                       "mov x3,x5\n" /* tls  */
+                       "mov x4,x6\n" /* ctid  */
+                       "mov x8,%9\n" /* clone  */
+
+                       "svc 0x0\n"
+
+                       /* if (%r0 != 0)
+                        *   return %r0;
+                        */
+                       "cmp x0, #0\n"
+                       "bne 1f\n"
+
+                       /* In the child, now. Call "fn(arg)". */
+                       "ldp x1, x0, [sp], #16\n"
+                       "blr x1\n"
+
+                       /* Call _exit(%r0).  */
+                       "mov x8, %10\n"
+                       "svc 0x0\n"
+                     "1:\n"
+
+                       : "=r" (res)
+                       : "i"(-EINVAL),
+                         "r"(__fn), "r"(__stack), "r"(__flags), "r"(__arg),
+                         "r"(__ptid), "r"(__tls), "r"(__ctid),
+                         "i"(__NR_clone), "i"(__NR_exit)
+                       : "x30", "memory");
+  return res;
+}
+#elif defined(__powerpc64__)
+uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+                   int *parent_tidptr, void *newtls, int *child_tidptr) {
+  long long res;
+/* Stack frame offsets.  */
+#if _CALL_ELF != 2
+#define FRAME_MIN_SIZE         112
+#define FRAME_TOC_SAVE         40
+#else
+#define FRAME_MIN_SIZE         32
+#define FRAME_TOC_SAVE         24
+#endif
+  if (!fn || !child_stack)
+    return -EINVAL;
+  CHECK_EQ(0, (uptr)child_stack % 16);
+  child_stack = (char *)child_stack - 2 * sizeof(unsigned long long);
+  ((unsigned long long *)child_stack)[0] = (uptr)fn;
+  ((unsigned long long *)child_stack)[1] = (uptr)arg;
+
+  register int (*__fn)(void *) __asm__("r3") = fn;
+  register void *__cstack      __asm__("r4") = child_stack;
+  register int __flags         __asm__("r5") = flags;
+  register void * __arg        __asm__("r6") = arg;
+  register int * __ptidptr     __asm__("r7") = parent_tidptr;
+  register void * __newtls     __asm__("r8") = newtls;
+  register int * __ctidptr     __asm__("r9") = child_tidptr;
+
+ __asm__ __volatile__(
+           /* fn, arg, child_stack are saved acrVoss the syscall */
+           "mr 28, %5\n\t"
+           "mr 29, %6\n\t"
+           "mr 27, %8\n\t"
+
+           /* syscall
+             r3 == flags
+             r4 == child_stack
+             r5 == parent_tidptr
+             r6 == newtls
+             r7 == child_tidptr */
+           "mr 3, %7\n\t"
+           "mr 5, %9\n\t"
+           "mr 6, %10\n\t"
+           "mr 7, %11\n\t"
+           "li 0, %3\n\t"
+           "sc\n\t"
+
+           /* Test if syscall was successful */
+           "cmpdi  cr1, 3, 0\n\t"
+           "crandc cr1*4+eq, cr1*4+eq, cr0*4+so\n\t"
+           "bne-   cr1, 1f\n\t"
+
+           /* Do the function call */
+           "std   2, %13(1)\n\t"
+#if _CALL_ELF != 2
+           "ld    0, 0(28)\n\t"
+           "ld    2, 8(28)\n\t"
+           "mtctr 0\n\t"
+#else
+           "mr    12, 28\n\t"
+           "mtctr 12\n\t"
+#endif
+           "mr    3, 27\n\t"
+           "bctrl\n\t"
+           "ld    2, %13(1)\n\t"
+
+           /* Call _exit(r3) */
+           "li 0, %4\n\t"
+           "sc\n\t"
+
+           /* Return to parent */
+           "1:\n\t"
+           "mr %0, 3\n\t"
+             : "=r" (res)
+             : "0" (-1), "i" (EINVAL),
+               "i" (__NR_clone), "i" (__NR_exit),
+               "r" (__fn), "r" (__cstack), "r" (__flags),
+               "r" (__arg), "r" (__ptidptr), "r" (__newtls),
+               "r" (__ctidptr), "i" (FRAME_MIN_SIZE), "i" (FRAME_TOC_SAVE)
+             : "cr0", "cr1", "memory", "ctr",
+               "r0", "r29", "r27", "r28");
+  return res;
+}
 #endif  // defined(__x86_64__) && SANITIZER_LINUX
 
 #if SANITIZER_ANDROID
-#define PROP_VALUE_MAX 92
-extern "C" SANITIZER_WEAK_ATTRIBUTE int __system_property_get(const char *name,
-                                                              char *value);
-void GetExtraActivationFlags(char *buf, uptr size) {
-  CHECK(size > PROP_VALUE_MAX);
-  CHECK(&__system_property_get);
-  __system_property_get("asan.options", buf);
-}
-
 #if __ANDROID_API__ < 21
 extern "C" __attribute__((weak)) int dl_iterate_phdr(
     int (*)(struct dl_phdr_info *, size_t, void *), void *);
@@ -983,6 +1114,10 @@ AndroidApiLevel AndroidGetApiLevel() {
 bool IsDeadlySignal(int signum) {
   if (common_flags()->handle_abort && signum == SIGABRT)
     return true;
+  if (common_flags()->handle_sigill && signum == SIGILL)
+    return true;
+  if (common_flags()->handle_sigfpe && signum == SIGFPE)
+    return true;
   return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
 }
 
@@ -998,13 +1133,13 @@ void *internal_start_thread(void(*func)(void *arg), void *arg) {
 #endif
   internal_sigprocmask(SIG_SETMASK, &set, &old);
   void *th;
-  real_pthread_create(&th, 0, (void*(*)(void *arg))func, arg);
-  internal_sigprocmask(SIG_SETMASK, &old, 0);
+  real_pthread_create(&th, nullptr, (void*(*)(void *arg))func, arg);
+  internal_sigprocmask(SIG_SETMASK, &old, nullptr);
   return th;
 }
 
 void internal_join_thread(void *th) {
-  real_pthread_join(th, 0);
+  real_pthread_join(th, nullptr);
 }
 #else
 void *internal_start_thread(void (*func)(void *), void *arg) { return 0; }
@@ -1084,6 +1219,14 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 #endif
 }
 
-}  // namespace __sanitizer
+void DisableReexec() {
+  // No need to re-exec on Linux.
+}
 
-#endif  // SANITIZER_FREEBSD || SANITIZER_LINUX
+void MaybeReexec() {
+  // No need to re-exec on Linux.
+}
+
+} // namespace __sanitizer
+
+#endif // SANITIZER_FREEBSD || SANITIZER_LINUX
