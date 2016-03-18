@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if SANITIZER_FREEBSD
@@ -168,7 +169,7 @@ void UnsetAlternateSignalStack() {
 typedef void (*sa_sigaction_t)(int, siginfo_t *, void *);
 static void MaybeInstallSigaction(int signum,
                                   SignalHandlerType handler) {
-  if (!IsDeadlySignal(signum))
+  if (!IsHandledDeadlySignal(signum))
     return;
   struct sigaction sigact;
   internal_memset(&sigact, 0, sizeof(sigact));
@@ -319,6 +320,79 @@ void AdjustStackSize(void *attr_) {
   }
 }
 #endif // !SANITIZER_GO
+
+pid_t StartSubprocess(const char *program, const char *const argv[],
+                      fd_t stdin_fd, fd_t stdout_fd, fd_t stderr_fd) {
+  auto file_closer = at_scope_exit([&] {
+    if (stdin_fd != kInvalidFd) {
+      internal_close(stdin_fd);
+    }
+    if (stdout_fd != kInvalidFd) {
+      internal_close(stdout_fd);
+    }
+    if (stderr_fd != kInvalidFd) {
+      internal_close(stderr_fd);
+    }
+  });
+
+  int pid = internal_fork();
+
+  if (pid < 0) {
+    int rverrno;
+    if (internal_iserror(pid, &rverrno)) {
+      Report("WARNING: failed to fork (errno %d)\n", rverrno);
+    }
+    return pid;
+  }
+
+  if (pid == 0) {
+    // Child subprocess
+    if (stdin_fd != kInvalidFd) {
+      internal_close(STDIN_FILENO);
+      internal_dup2(stdin_fd, STDIN_FILENO);
+      internal_close(stdin_fd);
+    }
+    if (stdout_fd != kInvalidFd) {
+      internal_close(STDOUT_FILENO);
+      internal_dup2(stdout_fd, STDOUT_FILENO);
+      internal_close(stdout_fd);
+    }
+    if (stderr_fd != kInvalidFd) {
+      internal_close(STDERR_FILENO);
+      internal_dup2(stderr_fd, STDERR_FILENO);
+      internal_close(stderr_fd);
+    }
+
+    for (int fd = sysconf(_SC_OPEN_MAX); fd > 2; fd--) internal_close(fd);
+
+    execv(program, const_cast<char **>(&argv[0]));
+    internal__exit(1);
+  }
+
+  return pid;
+}
+
+bool IsProcessRunning(pid_t pid) {
+  int process_status;
+  uptr waitpid_status = internal_waitpid(pid, &process_status, WNOHANG);
+  int local_errno;
+  if (internal_iserror(waitpid_status, &local_errno)) {
+    VReport(1, "Waiting on the process failed (errno %d).\n", local_errno);
+    return false;
+  }
+  return waitpid_status == 0;
+}
+
+int WaitForProcess(pid_t pid) {
+  int process_status;
+  uptr waitpid_status = internal_waitpid(pid, &process_status, 0);
+  int local_errno;
+  if (internal_iserror(waitpid_status, &local_errno)) {
+    VReport(1, "Waiting on the process failed (errno %d).\n", local_errno);
+    return -1;
+  }
+  return process_status;
+}
 
 } // namespace __sanitizer
 

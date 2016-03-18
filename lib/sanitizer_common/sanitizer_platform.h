@@ -49,6 +49,18 @@
 # define SANITIZER_IOSSIM  0
 #endif
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && TARGET_OS_WATCH
+# define SANITIZER_WATCHOS 1
+#else
+# define SANITIZER_WATCHOS 0
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && TARGET_OS_TV
+# define SANITIZER_TVOS 1
+#else
+# define SANITIZER_TVOS 0
+#endif
+
 #if defined(_WIN32)
 # define SANITIZER_WINDOWS 1
 #else
@@ -79,6 +91,21 @@
 # define SANITIZER_X32 1
 #else
 # define SANITIZER_X32 0
+#endif
+
+#if defined(__mips__)
+# define SANITIZER_MIPS 1
+# if defined(__mips64)
+#  define SANITIZER_MIPS32 0
+#  define SANITIZER_MIPS64 1
+# else
+#  define SANITIZER_MIPS32 1
+#  define SANITIZER_MIPS64 0
+# endif
+#else
+# define SANITIZER_MIPS 0
+# define SANITIZER_MIPS32 0
+# define SANITIZER_MIPS64 0
 #endif
 
 // By default we allow to use SizeClassAllocator64 on 64-bit platform.
@@ -148,6 +175,12 @@
 # define MSC_PREREQ(version) (_MSC_VER >= (version))
 #else
 # define MSC_PREREQ(version) 0
+#endif
+
+#if defined(__arm64__) && SANITIZER_IOS
+# define SANITIZER_NON_UNIQUE_TYPEINFO 1
+#else
+# define SANITIZER_NON_UNIQUE_TYPEINFO 0
 #endif
 
 #endif // SANITIZER_PLATFORM_H

@@ -35,7 +35,11 @@
 #include <sys/file.h>
 #endif
 
-#define I386_FREEBSD (defined(__FreeBSD__) && defined(__i386__))
+#if defined(__FreeBSD__) && defined(__i386__)
+#define I386_FREEBSD 1
+#else
+#define I386_FREEBSD 0
+#endif
 
 #if !defined(_MSC_VER) && !I386_FREEBSD
 #include <stdint.h>
@@ -482,8 +486,8 @@ void llvm_gcda_end_file() {
       unmap_file();
     }
 
-    fclose(output_file);
     flock(fd, LOCK_UN);
+    fclose(output_file);
     output_file = NULL;
     write_buffer = NULL;
   }
@@ -507,7 +511,7 @@ void llvm_register_writeout_function(writeout_fn fn) {
   }
 }
 
-void llvm_writeout_files() {
+void llvm_writeout_files(void) {
   struct writeout_fn_node *curr = writeout_fn_head;
 
   while (curr) {
@@ -516,7 +520,7 @@ void llvm_writeout_files() {
   }
 }
 
-void llvm_delete_writeout_function_list() {
+void llvm_delete_writeout_function_list(void) {
   while (writeout_fn_head) {
     struct writeout_fn_node *node = writeout_fn_head;
     writeout_fn_head = writeout_fn_head->next;
@@ -548,7 +552,7 @@ void __gcov_flush() {
   }
 }
 
-void llvm_delete_flush_function_list() {
+void llvm_delete_flush_function_list(void) {
   while (flush_fn_head) {
     struct flush_fn_node *node = flush_fn_head;
     flush_fn_head = flush_fn_head->next;

@@ -1,4 +1,3 @@
-include(AddLLVM)
 include(ExternalProject)
 include(CompilerRTUtils)
 
@@ -19,7 +18,7 @@ function(add_compiler_rt_object_libraries name)
       set(libname "${name}.${os}")
       set(libnames ${libnames} ${libname})
       set(extra_cflags_${libname} ${DARWIN_${os}_CFLAGS})
-      list_union(LIB_ARCHS_${libname} DARWIN_${os}_ARCHS LIB_ARCHS)
+      list_intersect(LIB_ARCHS_${libname} DARWIN_${os}_ARCHS LIB_ARCHS)
     endforeach()
   else()
     foreach(arch ${LIB_ARCHS})
@@ -87,7 +86,7 @@ function(add_compiler_rt_runtime name type)
         set(libname "${name}_${os}_dynamic")
         set(extra_linkflags_${libname} ${DARWIN_${os}_LINKFLAGS} ${LIB_LINKFLAGS})
       endif()
-      list_union(LIB_ARCHS_${libname} DARWIN_${os}_ARCHS LIB_ARCHS)
+      list_intersect(LIB_ARCHS_${libname} DARWIN_${os}_ARCHS LIB_ARCHS)
       if(LIB_ARCHS_${libname})
         list(APPEND libnames ${libname})
         set(extra_cflags_${libname} ${DARWIN_${os}_CFLAGS} ${LIB_CFLAGS})
@@ -126,10 +125,31 @@ function(add_compiler_rt_runtime name type)
   endif()
 
   if(LIB_PARENT_TARGET)
-    set(COMPONENT_OPTION COMPONENT ${LIB_PARENT_TARGET})
+    # If the parent targets aren't created we should create them
+    if(NOT TARGET ${LIB_PARENT_TARGET})
+      add_custom_target(${LIB_PARENT_TARGET})
+    endif()
+    if(NOT TARGET install-${LIB_PARENT_TARGET})
+      # The parent install target specifies the parent component to scrape up
+      # anything not installed by the individual install targets, and to handle
+      # installation when running the multi-configuration generators.
+      add_custom_target(install-${LIB_PARENT_TARGET}
+                        DEPENDS ${LIB_PARENT_TARGET}
+                        COMMAND "${CMAKE_COMMAND}"
+                                -DCMAKE_INSTALL_COMPONENT=${LIB_PARENT_TARGET}
+                                -P "${CMAKE_BINARY_DIR}/cmake_install.cmake")
+    endif()
   endif()
 
   foreach(libname ${libnames})
+    # If you have are using a multi-configuration generator we don't generate
+    # per-library install rules, so we fall back to the parent target COMPONENT
+    if(CMAKE_CONFIGURATION_TYPES AND LIB_PARENT_TARGET)
+      set(COMPONENT_OPTION COMPONENT ${LIB_PARENT_TARGET})
+    else()
+      set(COMPONENT_OPTION COMPONENT ${libname})
+    endif()
+
     add_library(${libname} ${type} ${sources_${libname}})
     set_target_compile_flags(${libname} ${extra_cflags_${libname}})
     set_target_link_flags(${libname} ${extra_linkflags_${libname}})
@@ -151,6 +171,21 @@ function(add_compiler_rt_runtime name type)
               ${COMPONENT_OPTION}
       RUNTIME DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR}
               ${COMPONENT_OPTION})
+
+    # We only want to generate per-library install targets if you aren't using
+    # an IDE because the extra targets get cluttered in IDEs.
+    if(NOT CMAKE_CONFIGURATION_TYPES)
+      add_custom_target(install-${libname}
+                        DEPENDS ${libname}
+                        COMMAND "${CMAKE_COMMAND}"
+                                -DCMAKE_INSTALL_COMPONENT=${libname}
+                                -P "${CMAKE_BINARY_DIR}/cmake_install.cmake")
+      # If you have a parent target specified, we bind the new install target
+      # to the parent install target.
+      if(LIB_PARENT_TARGET)
+        add_dependencies(install-${LIB_PARENT_TARGET} install-${libname})
+      endif()
+    endif()
     if(APPLE)
       set_target_properties(${libname} PROPERTIES
       OSX_ARCHITECTURES "${LIB_ARCHS_${libname}}")
@@ -243,7 +278,7 @@ macro(add_compiler_rt_test test_suite test_name)
   add_dependencies(${test_suite} ${test_name})
 endmacro()
 
-macro(add_compiler_rt_resource_file target_name file_name)
+macro(add_compiler_rt_resource_file target_name file_name component)
   set(src_file "${CMAKE_CURRENT_SOURCE_DIR}/${file_name}")
   set(dst_file "${COMPILER_RT_OUTPUT_DIR}/${file_name}")
   add_custom_command(OUTPUT ${dst_file}
@@ -252,7 +287,10 @@ macro(add_compiler_rt_resource_file target_name file_name)
     COMMENT "Copying ${file_name}...")
   add_custom_target(${target_name} DEPENDS ${dst_file})
   # Install in Clang resource directory.
-  install(FILES ${file_name} DESTINATION ${COMPILER_RT_INSTALL_PATH})
+  install(FILES ${file_name}
+    DESTINATION ${COMPILER_RT_INSTALL_PATH}
+    COMPONENT ${component})
+  add_dependencies(${component} ${target_name})
 endmacro()
 
 macro(add_compiler_rt_script name)
@@ -293,11 +331,12 @@ macro(add_custom_libcxx name prefix)
     SOURCE_DIR ${COMPILER_RT_LIBCXX_PATH}
     CMAKE_ARGS -DCMAKE_MAKE_PROGRAM:STRING=${CMAKE_MAKE_PROGRAM}
                -DCMAKE_C_COMPILER=${COMPILER_RT_TEST_COMPILER}
-               -DCMAKE_CXX_COMPILER=${COMPILER_RT_TEST_COMPILER}
+               -DCMAKE_CXX_COMPILER=${COMPILER_RT_TEST_CXX_COMPILER}
                -DCMAKE_C_FLAGS=${LIBCXX_CFLAGS}
                -DCMAKE_CXX_FLAGS=${LIBCXX_CFLAGS}
                -DCMAKE_BUILD_TYPE=Release
                -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
+               -DLLVM_PATH=${LLVM_MAIN_SRC_DIR}
     LOG_BUILD 1
     LOG_CONFIGURE 1
     LOG_INSTALL 1

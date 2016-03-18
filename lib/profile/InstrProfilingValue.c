@@ -25,18 +25,6 @@
     return NULL;                                                               \
   }
 
-#if COMPILER_RT_HAS_ATOMICS != 1
-COMPILER_RT_VISIBILITY
-uint32_t BoolCmpXchg(void **Ptr, void *OldV, void *NewV) {
-  void *R = *Ptr;
-  if (R == OldV) {
-    *Ptr = NewV;
-    return 1;
-  }
-  return 0;
-}
-#endif
-
 /* This method is only used in value profiler mock testing.  */
 COMPILER_RT_VISIBILITY void
 __llvm_profile_set_num_value_sites(__llvm_profile_data *Data,
@@ -142,8 +130,8 @@ __llvm_profile_gather_value_data(uint64_t *ValueDataSize) {
   if (!ValueDataSize)
     return NULL;
 
-  ValueDataArray =
-      (ValueProfData **)calloc(DataEnd - DataBegin, sizeof(void *));
+  ValueDataArray = (ValueProfData **)calloc(
+      __llvm_profile_get_data_size(DataBegin, DataEnd), sizeof(void *));
   if (!ValueDataArray)
     PROF_OOM_RETURN("Failed to write value profile data ");
 
@@ -151,7 +139,7 @@ __llvm_profile_gather_value_data(uint64_t *ValueDataSize) {
    * Compute the total Size of the buffer to hold ValueProfData
    * structures for functions with value profile data.
    */
-  for (I = (__llvm_profile_data *)DataBegin; I != DataEnd; ++I) {
+  for (I = (__llvm_profile_data *)DataBegin; I < DataEnd; ++I) {
     ValueProfRuntimeRecord R;
     if (initializeValueProfRuntimeRecord(&R, I->NumValueSites, I->Values))
       PROF_OOM_RETURN("Failed to write value profile data ");

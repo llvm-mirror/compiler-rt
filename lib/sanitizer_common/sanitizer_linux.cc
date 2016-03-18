@@ -60,7 +60,10 @@
 #include <unistd.h>
 
 #if SANITIZER_FREEBSD
+#include <sys/exec.h>
 #include <sys/sysctl.h>
+#include <vm/vm_param.h>
+#include <vm/pmap.h>
 #include <machine/atomic.h>
 extern "C" {
 // <sys/umtx.h> must be included after <errno.h> and <sys/types.h> on
@@ -395,11 +398,13 @@ const char *GetEnv(const char *name) {
 #endif
 }
 
+#if !SANITIZER_FREEBSD
 extern "C" {
   SANITIZER_WEAK_ATTRIBUTE extern void *__libc_stack_end;
 }
+#endif
 
-#if !SANITIZER_GO
+#if !SANITIZER_GO && !SANITIZER_FREEBSD
 static void ReadNullSepFileToArray(const char *path, char ***arr,
                                    int arr_size) {
   char *buff;
@@ -424,7 +429,8 @@ static void ReadNullSepFileToArray(const char *path, char ***arr,
 }
 #endif
 
-static void GetArgsAndEnv(char*** argv, char*** envp) {
+static void GetArgsAndEnv(char ***argv, char ***envp) {
+#if !SANITIZER_FREEBSD
 #if !SANITIZER_GO
   if (&__libc_stack_end) {
 #endif
@@ -439,6 +445,24 @@ static void GetArgsAndEnv(char*** argv, char*** envp) {
     ReadNullSepFileToArray("/proc/self/environ", envp, kMaxEnvp);
   }
 #endif
+#else
+  // On FreeBSD, retrieving the argument and environment arrays is done via the
+  // kern.ps_strings sysctl, which returns a pointer to a structure containing
+  // this information.  If the sysctl is not available, a "hardcoded" address,
+  // PS_STRINGS, must be used instead.  See also <sys/exec.h>.
+  ps_strings *pss;
+  size_t sz = sizeof(pss);
+  if (sysctlbyname("kern.ps_strings", &pss, &sz, NULL, 0) == -1)
+    pss = (ps_strings*)PS_STRINGS;
+  *argv = pss->ps_argvstr;
+  *envp = pss->ps_envstr;
+#endif
+}
+
+char **GetArgv() {
+  char **argv, **envp;
+  GetArgsAndEnv(&argv, &envp);
+  return argv;
 }
 
 void ReExec() {
@@ -704,7 +728,9 @@ bool ThreadLister::GetDirectoryEntries() {
 }
 
 uptr GetPageSize() {
-#if SANITIZER_LINUX && (defined(__x86_64__) || defined(__i386__))
+// Android post-M sysconf(_SC_PAGESIZE) crashes if called from .preinit_array.
+#if (SANITIZER_LINUX && (defined(__x86_64__) || defined(__i386__))) || \
+    SANITIZER_ANDROID
   return EXEC_PAGESIZE;
 #else
   return sysconf(_SC_PAGESIZE);  // EXEC_PAGESIZE may not be trustworthy.
@@ -1111,7 +1137,7 @@ AndroidApiLevel AndroidGetApiLevel() {
 
 #endif
 
-bool IsDeadlySignal(int signum) {
+bool IsHandledDeadlySignal(int signum) {
   if (common_flags()->handle_abort && signum == SIGABRT)
     return true;
   if (common_flags()->handle_sigill && signum == SIGILL)
@@ -1146,6 +1172,58 @@ void *internal_start_thread(void (*func)(void *), void *arg) { return 0; }
 
 void internal_join_thread(void *th) {}
 #endif
+
+#if defined(__aarch64__)
+// Android headers in the older NDK releases miss this definition.
+struct __sanitizer_esr_context {
+  struct _aarch64_ctx head;
+  uint64_t esr;
+};
+
+static bool Aarch64GetESR(ucontext_t *ucontext, u64 *esr) {
+  static const u32 kEsrMagic = 0x45535201;
+  u8 *aux = ucontext->uc_mcontext.__reserved;
+  while (true) {
+    _aarch64_ctx *ctx = (_aarch64_ctx *)aux;
+    if (ctx->size == 0) break;
+    if (ctx->magic == kEsrMagic) {
+      *esr = ((__sanitizer_esr_context *)ctx)->esr;
+      return true;
+    }
+    aux += ctx->size;
+  }
+  return false;
+}
+#endif
+
+SignalContext::WriteFlag SignalContext::GetWriteFlag(void *context) {
+  ucontext_t *ucontext = (ucontext_t *)context;
+#if defined(__x86_64__) || defined(__i386__)
+  static const uptr PF_WRITE = 1U << 1;
+#if SANITIZER_FREEBSD
+  uptr err = ucontext->uc_mcontext.mc_err;
+#else
+  uptr err = ucontext->uc_mcontext.gregs[REG_ERR];
+#endif
+  return err & PF_WRITE ? WRITE : READ;
+#elif defined(__arm__)
+  static const uptr FSR_WRITE = 1U << 11;
+  uptr fsr = ucontext->uc_mcontext.error_code;
+  // FSR bits 5:0 describe the abort type, and are never 0 (or so it seems).
+  // Zero FSR indicates an older kernel that does not pass this information to
+  // the userspace.
+  if (fsr == 0) return UNKNOWN;
+  return fsr & FSR_WRITE ? WRITE : READ;
+#elif defined(__aarch64__)
+  static const u64 ESR_ELx_WNR = 1U << 6;
+  u64 esr;
+  if (!Aarch64GetESR(ucontext, &esr)) return UNKNOWN;
+  return esr & ESR_ELx_WNR ? WRITE : READ;
+#else
+  (void)ucontext;
+  return UNKNOWN;  // FIXME: Implement.
+#endif
+}
 
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 #if defined(__arm__)

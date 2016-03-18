@@ -21,6 +21,7 @@ check_cxx_compiler_flag(-funwind-tables      COMPILER_RT_HAS_FUNWIND_TABLES_FLAG
 check_cxx_compiler_flag(-fno-stack-protector COMPILER_RT_HAS_FNO_STACK_PROTECTOR_FLAG)
 check_cxx_compiler_flag(-fno-sanitize=safe-stack COMPILER_RT_HAS_FNO_SANITIZE_SAFE_STACK_FLAG)
 check_cxx_compiler_flag(-fvisibility=hidden  COMPILER_RT_HAS_FVISIBILITY_HIDDEN_FLAG)
+check_cxx_compiler_flag(-frtti               COMPILER_RT_HAS_FRTTI_FLAG)
 check_cxx_compiler_flag(-fno-rtti            COMPILER_RT_HAS_FNO_RTTI_FLAG)
 check_cxx_compiler_flag(-ffreestanding       COMPILER_RT_HAS_FFREESTANDING_FLAG)
 check_cxx_compiler_flag("-Werror -fno-function-sections" COMPILER_RT_HAS_FNO_FUNCTION_SECTIONS_FLAG)
@@ -92,48 +93,6 @@ set(COMPILER_RT_SUPPORTED_ARCH)
 # abilities.
 set(SIMPLE_SOURCE ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/simple.cc)
 file(WRITE ${SIMPLE_SOURCE} "#include <stdlib.h>\n#include <limits>\nint main() {}\n")
-
-function(check_compile_definition def argstring out_var)
-  if("${def}" STREQUAL "")
-    set(${out_var} TRUE PARENT_SCOPE)
-    return()
-  endif()
-  cmake_push_check_state()
-  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${argstring}")
-  check_symbol_exists(${def} "" ${out_var})
-  cmake_pop_check_state()
-endfunction()
-
-# test_target_arch(<arch> <def> <target flags...>)
-# Checks if architecture is supported: runs host compiler with provided
-# flags to verify that:
-#   1) <def> is defined (if non-empty)
-#   2) simple file can be successfully built.
-# If successful, saves target flags for this architecture.
-macro(test_target_arch arch def)
-  set(TARGET_${arch}_CFLAGS ${ARGN})
-  set(argstring "")
-  foreach(arg ${ARGN})
-    set(argstring "${argstring} ${arg}")
-  endforeach()
-  check_compile_definition("${def}" "${argstring}" HAS_${arch}_DEF)
-  if(NOT HAS_${arch}_DEF)
-    set(CAN_TARGET_${arch} FALSE)
-  else()
-    set(argstring "${CMAKE_EXE_LINKER_FLAGS} ${argstring}")
-    try_compile(CAN_TARGET_${arch} ${CMAKE_BINARY_DIR} ${SIMPLE_SOURCE}
-                COMPILE_DEFINITIONS "${TARGET_${arch}_CFLAGS}"
-                OUTPUT_VARIABLE TARGET_${arch}_OUTPUT
-                CMAKE_FLAGS "-DCMAKE_EXE_LINKER_FLAGS:STRING=${argstring}")
-  endif()
-  if(${CAN_TARGET_${arch}})
-    list(APPEND COMPILER_RT_SUPPORTED_ARCH ${arch})
-  elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "${arch}" AND
-         COMPILER_RT_HAS_EXPLICIT_DEFAULT_TARGET_TRIPLE)
-    # Bail out if we cannot target the architecture we plan to test.
-    message(FATAL_ERROR "Cannot compile for ${arch}:\n${TARGET_${arch}_OUTPUT}")
-  endif()
-endmacro()
 
 # Add $arch as supported with no additional flags.
 macro(add_default_target_arch arch)
@@ -234,18 +193,6 @@ elseif(NOT APPLE) # Supported archs for Apple platforms are generated later
   set(COMPILER_RT_OS_SUFFIX "")
 endif()
 
-# Takes ${ARGN} and puts only supported architectures in @out_var list.
-function(filter_available_targets out_var)
-  set(archs ${${out_var}})
-  foreach(arch ${ARGN})
-    list(FIND COMPILER_RT_SUPPORTED_ARCH ${arch} ARCH_INDEX)
-    if(NOT (ARCH_INDEX EQUAL -1) AND CAN_TARGET_${arch})
-      list(APPEND archs ${arch})
-    endif()
-  endforeach()
-  set(${out_var} ${archs} PARENT_SCOPE)
-endfunction()
-
 # Returns a list of architecture specific target cflags in @out_var list.
 function(get_target_flags_for_arch arch out_var)
   list(FIND COMPILER_RT_SUPPORTED_ARCH ${arch} ARCH_INDEX)
@@ -275,7 +222,7 @@ set(WASM64 wasm64)
 
 if(APPLE)
   set(ARM64 arm64)
-  set(ARM32 armv7 armv7s)
+  set(ARM32 armv7 armv7s armv7k)
   set(X86_64 x86_64 x86_64h)
 endif()
 
@@ -293,7 +240,7 @@ set(ALL_PROFILE_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64} ${PPC64}
 set(ALL_TSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64} ${PPC64})
 set(ALL_UBSAN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
     ${MIPS32} ${MIPS64} ${PPC64})
-set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM64})
+set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM64} ${MIPS32} ${MIPS64})
 set(ALL_CFI_SUPPORTED_ARCH ${X86} ${X86_64})
 
 if(APPLE)
@@ -310,7 +257,7 @@ if(APPLE)
     set(OSX_SYSROOT_FLAG "-isysroot${OSX_SYSROOT}")
   endif()
 
-  option(COMPILER_RT_ENABLE_IOS "Enable building for iOS - Experimental" Off)
+  option(COMPILER_RT_ENABLE_IOS "Enable building for iOS" Off)
   option(COMPILER_RT_ENABLE_WATCHOS "Enable building for watchOS - Experimental" Off)
   option(COMPILER_RT_ENABLE_TVOS "Enable building for tvOS - Experimental" Off)
 
@@ -488,42 +435,42 @@ if(APPLE)
     endforeach()
   endif()
 
-  # for list_union
+  # for list_intersect
   include(CompilerRTUtils)
 
-  list_union(BUILTIN_SUPPORTED_ARCH ALL_BUILTIN_SUPPORTED_ARCH toolchain_arches)
+  list_intersect(BUILTIN_SUPPORTED_ARCH ALL_BUILTIN_SUPPORTED_ARCH toolchain_arches)
 
-  list_union(SANITIZER_COMMON_SUPPORTED_ARCH
+  list_intersect(SANITIZER_COMMON_SUPPORTED_ARCH
     ALL_SANITIZER_COMMON_SUPPORTED_ARCH
     COMPILER_RT_SUPPORTED_ARCH
     )
   set(LSAN_COMMON_SUPPORTED_ARCH ${SANITIZER_COMMON_SUPPORTED_ARCH})
   set(UBSAN_COMMON_SUPPORTED_ARCH ${SANITIZER_COMMON_SUPPORTED_ARCH})
-  list_union(ASAN_SUPPORTED_ARCH
+  list_intersect(ASAN_SUPPORTED_ARCH
     ALL_ASAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(DFSAN_SUPPORTED_ARCH
+  list_intersect(DFSAN_SUPPORTED_ARCH
     ALL_DFSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(LSAN_SUPPORTED_ARCH
+  list_intersect(LSAN_SUPPORTED_ARCH
     ALL_LSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(MSAN_SUPPORTED_ARCH
+  list_intersect(MSAN_SUPPORTED_ARCH
     ALL_MSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(PROFILE_SUPPORTED_ARCH
+  list_intersect(PROFILE_SUPPORTED_ARCH
     ALL_PROFILE_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(TSAN_SUPPORTED_ARCH
+  list_intersect(TSAN_SUPPORTED_ARCH
     ALL_TSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(UBSAN_SUPPORTED_ARCH
+  list_intersect(UBSAN_SUPPORTED_ARCH
     ALL_UBSAN_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(SAFESTACK_SUPPORTED_ARCH
+  list_intersect(SAFESTACK_SUPPORTED_ARCH
     ALL_SAFESTACK_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
-  list_union(CFI_SUPPORTED_ARCH
+  list_intersect(CFI_SUPPORTED_ARCH
     ALL_CFI_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
 else()
@@ -548,6 +495,18 @@ else()
   filter_available_targets(SAFESTACK_SUPPORTED_ARCH
     ${ALL_SAFESTACK_SUPPORTED_ARCH})
   filter_available_targets(CFI_SUPPORTED_ARCH ${ALL_CFI_SUPPORTED_ARCH})
+endif()
+
+if (MSVC)
+  # See if the DIA SDK is available and usable.
+  set(MSVC_DIA_SDK_DIR "$ENV{VSINSTALLDIR}DIA SDK")
+  if (IS_DIRECTORY ${MSVC_DIA_SDK_DIR})
+    set(CAN_SYMBOLIZE 1)
+  else()
+    set(CAN_SYMBOLIZE 0)
+  endif()
+else()
+  set(CAN_SYMBOLIZE 1)
 endif()
 
 message(STATUS "Compiler-RT supported architectures: ${COMPILER_RT_SUPPORTED_ARCH}")

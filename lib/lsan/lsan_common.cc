@@ -34,6 +34,14 @@ BlockingMutex global_mutex(LINKER_INITIALIZED);
 
 THREADLOCAL int disable_counter;
 bool DisabledInThisThread() { return disable_counter > 0; }
+void DisableInThisThread() { disable_counter++; }
+void EnableInThisThread() {
+  if (!disable_counter && common_flags()->detect_leaks) {
+    Report("Unmatched call to __lsan_enable().\n");
+    Die();
+  }
+  disable_counter--;
+}
 
 Flags lsan_flags;
 
@@ -213,9 +221,18 @@ static void ProcessThreads(SuspendedThreadsList const &suspended_threads,
       LOG_THREADS("Stack at %p-%p (SP = %p).\n", stack_begin, stack_end, sp);
       if (sp < stack_begin || sp >= stack_end) {
         // SP is outside the recorded stack range (e.g. the thread is running a
-        // signal handler on alternate stack). Again, consider the entire stack
-        // range to be reachable.
+        // signal handler on alternate stack, or swapcontext was used).
+        // Again, consider the entire stack range to be reachable.
         LOG_THREADS("WARNING: stack pointer not in stack range.\n");
+        uptr page_size = GetPageSizeCached();
+        int skipped = 0;
+        while (stack_begin < stack_end &&
+               !IsAccessibleMemoryRange(stack_begin, 1)) {
+          skipped++;
+          stack_begin += page_size;
+        }
+        LOG_THREADS("Skipped %d guard page(s) to obtain stack %p-%p.\n",
+                    skipped, stack_begin, stack_end);
       } else {
         // Shrink the stack range to ignore out-of-scope values.
         stack_begin = sp;
@@ -429,6 +446,9 @@ static bool CheckForLeaks() {
 
   if (!param.success) {
     Report("LeakSanitizer has encountered a fatal error.\n");
+    Report(
+        "HINT: For debugging, try setting environment variable "
+        "LSAN_OPTIONS=verbosity=1:log_threads=1\n");
     Die();
   }
   param.leak_report.ApplySuppressions();
@@ -695,18 +715,14 @@ void __lsan_unregister_root_region(const void *begin, uptr size) {
 SANITIZER_INTERFACE_ATTRIBUTE
 void __lsan_disable() {
 #if CAN_SANITIZE_LEAKS
-  __lsan::disable_counter++;
+  __lsan::DisableInThisThread();
 #endif
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __lsan_enable() {
 #if CAN_SANITIZE_LEAKS
-  if (!__lsan::disable_counter && common_flags()->detect_leaks) {
-    Report("Unmatched call to __lsan_enable().\n");
-    Die();
-  }
-  __lsan::disable_counter--;
+  __lsan::EnableInThisThread();
 #endif
 }
 
