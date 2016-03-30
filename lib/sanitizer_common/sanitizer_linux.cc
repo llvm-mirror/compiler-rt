@@ -244,7 +244,15 @@ uptr internal_lstat(const char *path, void *buf) {
   return internal_syscall(SYSCALL(newfstatat), AT_FDCWD, (uptr)path,
                          (uptr)buf, AT_SYMLINK_NOFOLLOW);
 #elif SANITIZER_LINUX_USES_64BIT_SYSCALLS
+# if SANITIZER_MIPS64
+  // For mips64, lstat syscall fills buffer in the format of kernel_stat
+  struct kernel_stat kbuf;
+  int res = internal_syscall(SYSCALL(lstat), path, &kbuf);
+  kernel_stat_to_stat(&kbuf, (struct stat *)buf);
+  return res;
+# else
   return internal_syscall(SYSCALL(lstat), (uptr)path, (uptr)buf);
+# endif
 #else
   struct stat64 buf64;
   int res = internal_syscall(SYSCALL(lstat64), path, &buf64);
@@ -255,7 +263,15 @@ uptr internal_lstat(const char *path, void *buf) {
 
 uptr internal_fstat(fd_t fd, void *buf) {
 #if SANITIZER_FREEBSD || SANITIZER_LINUX_USES_64BIT_SYSCALLS
+# if SANITIZER_MIPS64
+  // For mips64, fstat syscall fills buffer in the format of kernel_stat
+  struct kernel_stat kbuf;
+  int res = internal_syscall(SYSCALL(fstat), fd, &kbuf);
+  kernel_stat_to_stat(&kbuf, (struct stat *)buf);
+  return res;
+# else
   return internal_syscall(SYSCALL(fstat), fd, (uptr)buf);
+# endif
 #else
   struct stat64 buf64;
   int res = internal_syscall(SYSCALL(fstat64), fd, &buf64);
@@ -610,7 +626,9 @@ int internal_sigaction_norestorer(int signum, const void *act, void *oldact) {
     // rt_sigaction, so we need to do the same (we'll need to reimplement the
     // restorers; for x86_64 the restorer address can be obtained from
     // oldact->sa_restorer upon a call to sigaction(xxx, NULL, oldact).
+#if !SANITIZER_ANDROID || !SANITIZER_MIPS32
     k_act.sa_restorer = u_act->sa_restorer;
+#endif
   }
 
   uptr result = internal_syscall(SYSCALL(rt_sigaction), (uptr)signum,
@@ -624,7 +642,9 @@ int internal_sigaction_norestorer(int signum, const void *act, void *oldact) {
     internal_memcpy(&u_oldact->sa_mask, &k_oldact.sa_mask,
                     sizeof(__sanitizer_kernel_sigset_t));
     u_oldact->sa_flags = k_oldact.sa_flags;
+#if !SANITIZER_ANDROID || !SANITIZER_MIPS32
     u_oldact->sa_restorer = k_oldact.sa_restorer;
+#endif
   }
   return result;
 }
@@ -1295,10 +1315,6 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 #else
 # error "Unsupported arch"
 #endif
-}
-
-void DisableReexec() {
-  // No need to re-exec on Linux.
 }
 
 void MaybeReexec() {

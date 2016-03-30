@@ -111,7 +111,7 @@ static inline bool RangesOverlap(const char *offset1, uptr length1,
 } while (0)
 
 static inline uptr MaybeRealStrnlen(const char *s, uptr maxlen) {
-#if ASAN_INTERCEPT_STRNLEN
+#if SANITIZER_INTERCEPT_STRNLEN
   if (REAL(strnlen)) {
     return REAL(strnlen)(s, maxlen);
   }
@@ -196,6 +196,10 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
   } else {                                                                     \
     *begin = *end = 0;                                                         \
   }
+// Asan needs custom handling of these:
+#undef SANITIZER_INTERCEPT_MEMSET
+#undef SANITIZER_INTERCEPT_MEMMOVE
+#undef SANITIZER_INTERCEPT_MEMCPY
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
 
 // Syscall interceptors don't have contexts, we don't support suppressions
@@ -467,25 +471,6 @@ INTERCEPTOR(void*, memset, void *block, int c, uptr size) {
   ASAN_MEMSET_IMPL(ctx, block, c, size);
 }
 
-INTERCEPTOR(char*, strchr, const char *str, int c) {
-  void *ctx;
-  ASAN_INTERCEPTOR_ENTER(ctx, strchr);
-  if (UNLIKELY(!asan_inited)) return internal_strchr(str, c);
-  // strchr is called inside create_purgeable_zone() when MallocGuardEdges=1 is
-  // used.
-  if (asan_init_is_running) {
-    return REAL(strchr)(str, c);
-  }
-  ENSURE_ASAN_INITED();
-  char *result = REAL(strchr)(str, c);
-  if (flags()->replace_str) {
-    uptr len = REAL(strlen)(str);
-    uptr bytes_read = (result ? result - str : len) + 1;
-    ASAN_READ_STRING_OF_LEN(ctx, str, len, bytes_read);
-  }
-  return result;
-}
-
 #if ASAN_INTERCEPT_INDEX
 # if ASAN_USE_ALIAS_ATTRIBUTE_FOR_INDEX
 INTERCEPTOR(char*, index, const char *string, int c)
@@ -563,7 +548,6 @@ INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
   return REAL(strcpy)(to, from);  // NOLINT
 }
 
-#if ASAN_INTERCEPT_STRDUP
 INTERCEPTOR(char*, strdup, const char *s) {
   void *ctx;
   ASAN_INTERCEPTOR_ENTER(ctx, strdup);
@@ -577,24 +561,6 @@ INTERCEPTOR(char*, strdup, const char *s) {
   void *new_mem = asan_malloc(length + 1, &stack);
   REAL(memcpy)(new_mem, s, length + 1);
   return reinterpret_cast<char*>(new_mem);
-}
-#endif
-
-INTERCEPTOR(SIZE_T, strlen, const char *s) {
-  void *ctx;
-  ASAN_INTERCEPTOR_ENTER(ctx, strlen);
-  if (UNLIKELY(!asan_inited)) return internal_strlen(s);
-  // strlen is called from malloc_default_purgeable_zone()
-  // in __asan::ReplaceSystemAlloc() on Mac.
-  if (asan_init_is_running) {
-    return REAL(strlen)(s);
-  }
-  ENSURE_ASAN_INITED();
-  SIZE_T length = REAL(strlen)(s);
-  if (flags()->replace_str) {
-    ASAN_READ_RANGE(ctx, s, length + 1);
-  }
-  return length;
 }
 
 INTERCEPTOR(SIZE_T, wcslen, const wchar_t *s) {
@@ -620,19 +586,6 @@ INTERCEPTOR(char*, strncpy, char *to, const char *from, uptr size) {
   }
   return REAL(strncpy)(to, from, size);
 }
-
-#if ASAN_INTERCEPT_STRNLEN
-INTERCEPTOR(uptr, strnlen, const char *s, uptr maxlen) {
-  void *ctx;
-  ASAN_INTERCEPTOR_ENTER(ctx, strnlen);
-  ENSURE_ASAN_INITED();
-  uptr length = REAL(strnlen)(s, maxlen);
-  if (flags()->replace_str) {
-    ASAN_READ_RANGE(ctx, s, Min(length + 1, maxlen));
-  }
-  return length;
-}
-#endif  // ASAN_INTERCEPT_STRNLEN
 
 INTERCEPTOR(long, strtol, const char *nptr,  // NOLINT
             char **endptr, int base) {
@@ -761,18 +714,11 @@ void InitializeAsanInterceptors() {
 
   // Intercept str* functions.
   ASAN_INTERCEPT_FUNC(strcat);  // NOLINT
-  ASAN_INTERCEPT_FUNC(strchr);
   ASAN_INTERCEPT_FUNC(strcpy);  // NOLINT
-  ASAN_INTERCEPT_FUNC(strlen);
   ASAN_INTERCEPT_FUNC(wcslen);
   ASAN_INTERCEPT_FUNC(strncat);
   ASAN_INTERCEPT_FUNC(strncpy);
-#if ASAN_INTERCEPT_STRDUP
   ASAN_INTERCEPT_FUNC(strdup);
-#endif
-#if ASAN_INTERCEPT_STRNLEN
-  ASAN_INTERCEPT_FUNC(strnlen);
-#endif
 #if ASAN_INTERCEPT_INDEX && ASAN_USE_ALIAS_ATTRIBUTE_FOR_INDEX
   ASAN_INTERCEPT_FUNC(index);
 #endif

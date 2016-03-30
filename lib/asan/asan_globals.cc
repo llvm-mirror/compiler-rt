@@ -178,7 +178,7 @@ static void CheckODRViolationViaPoisoning(const Global *g) {
 }
 
 // Clang provides two different ways for global variables protection:
-// it can poison the global itself or it's private alias. In former
+// it can poison the global itself or its private alias. In former
 // case we may poison same symbol multiple times, that can help us to
 // cheaply detect ODR violation: if we try to poison an already poisoned
 // global, we have ODR violation error.
@@ -283,6 +283,25 @@ void StopInitOrderChecking() {
 
 // ---------------------- Interface ---------------- {{{1
 using namespace __asan;  // NOLINT
+
+
+// Apply __asan_register_globals to all globals found in the same loaded
+// executable or shared library as `flag'. The flag tracks whether globals have
+// already been registered or not for this image.
+void __asan_register_image_globals(uptr *flag) {
+  if (*flag)
+    return;
+  AsanApplyToGlobals(__asan_register_globals, flag);
+  *flag = 1;
+}
+
+// This mirrors __asan_register_image_globals.
+void __asan_unregister_image_globals(uptr *flag) {
+  if (!*flag)
+    return;
+  AsanApplyToGlobals(__asan_unregister_globals, flag);
+  *flag = 0;
+}
 
 // Register an array of globals.
 void __asan_register_globals(__asan_global *globals, uptr n) {

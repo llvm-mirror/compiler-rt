@@ -11,7 +11,7 @@
 // ThreadSanitizer, MemorySanitizer, etc.
 //
 // This file should be included into the tool's interceptor file,
-// which has to define it's own macros:
+// which has to define its own macros:
 //   COMMON_INTERCEPTOR_ENTER
 //   COMMON_INTERCEPTOR_ENTER_NOIGNORE
 //   COMMON_INTERCEPTOR_READ_RANGE
@@ -89,6 +89,10 @@
 
 #ifndef COMMON_INTERCEPTOR_MUTEX_REPAIR
 #define COMMON_INTERCEPTOR_MUTEX_REPAIR(ctx, m) {}
+#endif
+
+#ifndef COMMON_INTERCEPTOR_MUTEX_INVALID
+#define COMMON_INTERCEPTOR_MUTEX_INVALID(ctx, m) {}
 #endif
 
 #ifndef COMMON_INTERCEPTOR_HANDLE_RECVMSG
@@ -199,6 +203,34 @@ UNUSED static void DeleteInterceptorMetadata(void *addr) {
   CHECK(h.exists());
 }
 #endif  // SI_NOT_WINDOWS
+
+#if SANITIZER_INTERCEPT_STRLEN
+INTERCEPTOR(SIZE_T, strlen, const char *s) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strlen, s);
+  SIZE_T result = REAL(strlen)(s);
+  if (common_flags()->intercept_strlen)
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, s, result + 1);
+  return result;
+}
+#define INIT_STRLEN COMMON_INTERCEPT_FUNCTION(strlen)
+#else
+#define INIT_STRLEN
+#endif
+
+#if SANITIZER_INTERCEPT_STRNLEN
+INTERCEPTOR(SIZE_T, strnlen, const char *s, SIZE_T maxlen) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strnlen, s, maxlen);
+  SIZE_T length = REAL(strnlen)(s, maxlen);
+  if (common_flags()->intercept_strlen)
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, s, Min(length + 1, maxlen));
+  return length;
+}
+#define INIT_STRNLEN COMMON_INTERCEPT_FUNCTION(strnlen)
+#else
+#define INIT_STRNLEN
+#endif
 
 #if SANITIZER_INTERCEPT_TEXTDOMAIN
 INTERCEPTOR(char*, textdomain, const char *domainname) {
@@ -360,6 +392,51 @@ INTERCEPTOR(char*, strcasestr, const char *s1, const char *s2) {
 #define INIT_STRCASESTR
 #endif
 
+#if SANITIZER_INTERCEPT_STRCHR
+INTERCEPTOR(char*, strchr, const char *s, int c) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strchr, s, c);
+  char *result = REAL(strchr)(s, c);
+  uptr len = internal_strlen(s);
+  uptr n = result ? result - s + 1 : len + 1;
+  if (common_flags()->intercept_strchr)
+    COMMON_INTERCEPTOR_READ_STRING_OF_LEN(ctx, s, len, n);
+  return result;
+}
+#define INIT_STRCHR COMMON_INTERCEPT_FUNCTION(strchr)
+#else
+#define INIT_STRCHR
+#endif
+
+#if SANITIZER_INTERCEPT_STRCHRNUL
+INTERCEPTOR(char*, strchrnul, const char *s, int c) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strchrnul, s, c);
+  char *result = REAL(strchrnul)(s, c);
+  uptr len = result - s + 1;
+  if (common_flags()->intercept_strchr)
+    COMMON_INTERCEPTOR_READ_STRING(ctx, s, len);
+  return result;
+}
+#define INIT_STRCHRNUL COMMON_INTERCEPT_FUNCTION(strchrnul)
+#else
+#define INIT_STRCHRNUL
+#endif
+
+#if SANITIZER_INTERCEPT_STRRCHR
+INTERCEPTOR(char*, strrchr, const char *s, int c) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strrchr, s, c);
+  uptr len = internal_strlen(s);
+  if (common_flags()->intercept_strchr)
+    COMMON_INTERCEPTOR_READ_STRING_OF_LEN(ctx, s, len, len + 1);
+  return REAL(strrchr)(s, c);
+}
+#define INIT_STRRCHR COMMON_INTERCEPT_FUNCTION(strrchr)
+#else
+#define INIT_STRRCHR
+#endif
+
 #if SANITIZER_INTERCEPT_STRSPN
 INTERCEPTOR(SIZE_T, strspn, const char *s1, const char *s2) {
   void *ctx;
@@ -406,6 +483,64 @@ INTERCEPTOR(char *, strpbrk, const char *s1, const char *s2) {
 #define INIT_STRPBRK COMMON_INTERCEPT_FUNCTION(strpbrk);
 #else
 #define INIT_STRPBRK
+#endif
+
+#if SANITIZER_INTERCEPT_MEMSET
+INTERCEPTOR(void*, memset, void *dst, int v, uptr size) {
+  if (COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED)
+    return internal_memset(dst, v, size);
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, memset, dst, v, size);
+  if (common_flags()->intercept_intrin)
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, dst, size);
+  return REAL(memset)(dst, v, size);
+}
+
+#define INIT_MEMSET COMMON_INTERCEPT_FUNCTION(memset)
+#else
+#define INIT_MEMSET
+#endif
+
+#if SANITIZER_INTERCEPT_MEMMOVE
+INTERCEPTOR(void*, memmove, void *dst, const void *src, uptr size) {
+  if (COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED)
+    return internal_memmove(dst, src, size);
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, memmove, dst, src, size);
+  if (common_flags()->intercept_intrin) {
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, dst, size);
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, src, size);
+  }
+  return REAL(memmove)(dst, src, size);
+}
+
+#define INIT_MEMMOVE COMMON_INTERCEPT_FUNCTION(memmove)
+#else
+#define INIT_MEMMOVE
+#endif
+
+#if SANITIZER_INTERCEPT_MEMCPY
+INTERCEPTOR(void*, memcpy, void *dst, const void *src, uptr size) {
+  if (COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED) {
+    // On OS X, calling internal_memcpy here will cause memory corruptions,
+    // because memcpy and memmove are actually aliases of the same
+    // implementation.  We need to use internal_memmove here.
+    return internal_memmove(dst, src, size);
+  }
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, memcpy, dst, src, size);
+  if (common_flags()->intercept_intrin) {
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, dst, size);
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, src, size);
+  }
+  // N.B.: If we switch this to internal_ we'll have to use internal_memmove
+  // due to memcpy being an alias of memmove on OS X.
+  return REAL(memcpy)(dst, src, size);
+}
+
+#define INIT_MEMCPY COMMON_INTERCEPT_FUNCTION(memcpy)
+#else
+#define INIT_MEMCPY
 #endif
 
 #if SANITIZER_INTERCEPT_MEMCMP
@@ -3332,6 +3467,8 @@ INTERCEPTOR(int, pthread_mutex_lock, void *m) {
     COMMON_INTERCEPTOR_MUTEX_REPAIR(ctx, m);
   if (res == 0 || res == errno_EOWNERDEAD)
     COMMON_INTERCEPTOR_MUTEX_LOCK(ctx, m);
+  if (res == errno_EINVAL)
+    COMMON_INTERCEPTOR_MUTEX_INVALID(ctx, m);
   return res;
 }
 
@@ -3339,7 +3476,10 @@ INTERCEPTOR(int, pthread_mutex_unlock, void *m) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pthread_mutex_unlock, m);
   COMMON_INTERCEPTOR_MUTEX_UNLOCK(ctx, m);
-  return REAL(pthread_mutex_unlock)(m);
+  int res = REAL(pthread_mutex_unlock)(m);
+  if (res == errno_EINVAL)
+    COMMON_INTERCEPTOR_MUTEX_INVALID(ctx, m);
+  return res;
 }
 
 #define INIT_PTHREAD_MUTEX_LOCK COMMON_INTERCEPT_FUNCTION(pthread_mutex_lock)
@@ -5376,14 +5516,22 @@ static void InitializeCommonInterceptors() {
   interceptor_metadata_map = new((void *)&metadata_mem) MetadataHashMap();
 
   INIT_TEXTDOMAIN;
+  INIT_STRLEN;
+  INIT_STRNLEN;
   INIT_STRCMP;
   INIT_STRNCMP;
   INIT_STRCASECMP;
   INIT_STRNCASECMP;
   INIT_STRSTR;
   INIT_STRCASESTR;
+  INIT_STRCHR;
+  INIT_STRCHRNUL;
+  INIT_STRRCHR;
   INIT_STRSPN;
   INIT_STRPBRK;
+  INIT_MEMSET;
+  INIT_MEMMOVE;
+  INIT_MEMCPY;
   INIT_MEMCHR;
   INIT_MEMCMP;
   INIT_MEMRCHR;

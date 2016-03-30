@@ -43,6 +43,9 @@ using __sanitizer::atomic_load;
 using __sanitizer::atomic_store;
 using __sanitizer::atomic_uintptr_t;
 
+DECLARE_REAL(SIZE_T, strlen, const char *s)
+DECLARE_REAL(SIZE_T, strnlen, const char *s, SIZE_T maxlen)
+
 #if SANITIZER_FREEBSD
 #define __errno_location __error
 #endif
@@ -279,23 +282,6 @@ INTERCEPTOR(void, malloc_stats, void) {
 #else
 #define MSAN_MAYBE_INTERCEPT_MALLOC_STATS
 #endif
-
-INTERCEPTOR(SIZE_T, strlen, const char *s) {
-  if (msan_init_is_running)
-    return REAL(strlen)(s);
-  ENSURE_MSAN_INITED();
-  SIZE_T res = REAL(strlen)(s);
-  CHECK_UNPOISONED(s, res + 1);
-  return res;
-}
-
-INTERCEPTOR(SIZE_T, strnlen, const char *s, SIZE_T n) {
-  ENSURE_MSAN_INITED();
-  SIZE_T res = REAL(strnlen)(s, n);
-  SIZE_T scan_size = (res == n) ? res : res + 1;
-  CHECK_UNPOISONED(s, scan_size);
-  return res;
-}
 
 INTERCEPTOR(char *, strcpy, char *dest, const char *src) {  // NOLINT
   ENSURE_MSAN_INITED();
@@ -1450,6 +1436,11 @@ int OnExit() {
     *begin = *end = 0;                                                         \
   }
 
+#include "sanitizer_common/sanitizer_platform_interceptors.h"
+// Msan needs custom handling of these:
+#undef SANITIZER_INTERCEPT_MEMSET
+#undef SANITIZER_INTERCEPT_MEMMOVE
+#undef SANITIZER_INTERCEPT_MEMCPY
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
 
 #define COMMON_SYSCALL_PRE_READ_RANGE(p, s) CHECK_UNPOISONED(p, s)
@@ -1562,8 +1553,6 @@ void InitializeInterceptors() {
   INTERCEPT_FUNCTION(strndup);
   MSAN_MAYBE_INTERCEPT___STRNDUP;
   INTERCEPT_FUNCTION(strncpy);  // NOLINT
-  INTERCEPT_FUNCTION(strlen);
-  INTERCEPT_FUNCTION(strnlen);
   INTERCEPT_FUNCTION(gcvt);
   INTERCEPT_FUNCTION(strcat);  // NOLINT
   INTERCEPT_FUNCTION(strncat);  // NOLINT
