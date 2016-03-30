@@ -65,6 +65,8 @@ struct DataInfo {
   // (de)allocated using sanitizer internal allocator.
   char *module;
   uptr module_offset;
+  char *file;
+  uptr line;
   char *name;
   uptr start;
   uptr size;
@@ -113,6 +115,8 @@ class Symbolizer final {
   void AddHooks(StartSymbolizationHook start_hook,
                 EndSymbolizationHook end_hook);
 
+  const LoadedModule *FindModuleForAddress(uptr address);
+
  private:
   // GetModuleNameAndOffsetForPC has to return a string to the caller.
   // Since the corresponding module might get unloaded later, we should create
@@ -139,9 +143,7 @@ class Symbolizer final {
 
   bool FindModuleNameAndOffsetForAddress(uptr address, const char **module_name,
                                          uptr *module_offset);
-  LoadedModule *FindModuleForAddress(uptr address);
-  LoadedModule modules_[kMaxNumberOfModules];
-  uptr n_modules_;
+  ListOfModules modules_;
   // If stale, need to reload the modules before looking up addresses.
   bool modules_fresh_;
 
@@ -157,7 +159,6 @@ class Symbolizer final {
   // always synchronized.
   BlockingMutex mu_;
 
-  typedef IntrusiveList<SymbolizerTool>::Iterator Iterator;
   IntrusiveList<SymbolizerTool> tools_;
 
   explicit Symbolizer(IntrusiveList<SymbolizerTool> tools);

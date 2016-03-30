@@ -144,6 +144,9 @@ COMMON_FLAG(bool, coverage_direct, SANITIZER_ANDROID,
 COMMON_FLAG(const char *, coverage_dir, ".",
             "Target directory for coverage dumps. Defaults to the current "
             "directory.")
+COMMON_FLAG(bool, coverage_pc_buffer, true,
+            "If set (and if 'coverage' is set too), the pcs would be collected "
+            "in a buffer.")
 COMMON_FLAG(bool, full_address_space, false,
             "Sanitize complete address space; "
             "by default kernel area on 32-bit platforms will not be sanitized")
@@ -197,3 +200,7 @@ COMMON_FLAG(
 COMMON_FLAG(bool, suppress_equal_pcs, true,
             "Deduplicate multiple reports for single source location in "
             "halt_on_error=false mode (asan only).")
+COMMON_FLAG(bool, print_cmdline, false, "Print command line on crash "
+            "(asan only).")
+COMMON_FLAG(bool, html_cov_report, false, "Generate html coverage report.")
+COMMON_FLAG(const char *, sancov_path, "sancov", "Sancov tool location.")

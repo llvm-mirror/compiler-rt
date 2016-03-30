@@ -404,6 +404,8 @@ struct ThreadState {
   // If set, malloc must not be called.
   int nomalloc;
 
+  const ReportDesc *current_report;
+
   explicit ThreadState(Context *ctx, int tid, int unique_id, u64 epoch,
                        unsigned reuse_count,
                        uptr stk_addr, uptr stk_size,
@@ -411,7 +413,7 @@ struct ThreadState {
 };
 
 #ifndef SANITIZER_GO
-#if SANITIZER_MAC
+#if SANITIZER_MAC || SANITIZER_ANDROID
 ThreadState *cur_thread();
 void cur_thread_finalize();
 #else
@@ -421,7 +423,7 @@ INLINE ThreadState *cur_thread() {
   return reinterpret_cast<ThreadState *>(&cur_thread_placeholder);
 }
 INLINE void cur_thread_finalize() { }
-#endif  // SANITIZER_MAC
+#endif  // SANITIZER_MAC || SANITIZER_ANDROID
 #endif  // SANITIZER_GO
 
 class ThreadContext : public ThreadContextBase {

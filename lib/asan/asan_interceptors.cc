@@ -21,6 +21,7 @@
 #include "asan_stack.h"
 #include "asan_stats.h"
 #include "asan_suppressions.h"
+#include "lsan/lsan_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
 #if SANITIZER_POSIX
@@ -242,7 +243,17 @@ INTERCEPTOR(int, pthread_create, void *thread,
   ThreadStartParam param;
   atomic_store(&param.t, 0, memory_order_relaxed);
   atomic_store(&param.is_registered, 0, memory_order_relaxed);
-  int result = REAL(pthread_create)(thread, attr, asan_thread_start, &param);
+  int result;
+  {
+    // Ignore all allocations made by pthread_create: thread stack/TLS may be
+    // stored by pthread for future reuse even after thread destruction, and
+    // the linked list it's stored in doesn't even hold valid pointers to the
+    // objects, the latter are calculated by obscure pointer arithmetic.
+#if CAN_SANITIZE_LEAKS
+    __lsan::ScopedInterceptorDisabler disabler;
+#endif
+    result = REAL(pthread_create)(thread, attr, asan_thread_start, &param);
+  }
   if (result == 0) {
     u32 current_tid = GetCurrentTidOrInvalid();
     AsanThread *t =
@@ -271,7 +282,8 @@ DEFINE_REAL_PTHREAD_FUNCTIONS
 
 #if SANITIZER_ANDROID
 INTERCEPTOR(void*, bsd_signal, int signum, void *handler) {
-  if (!IsDeadlySignal(signum) || common_flags()->allow_user_segv_handler) {
+  if (!IsHandledDeadlySignal(signum) ||
+      common_flags()->allow_user_segv_handler) {
     return REAL(bsd_signal)(signum, handler);
   }
   return 0;
@@ -279,7 +291,8 @@ INTERCEPTOR(void*, bsd_signal, int signum, void *handler) {
 #endif
 
 INTERCEPTOR(void*, signal, int signum, void *handler) {
-  if (!IsDeadlySignal(signum) || common_flags()->allow_user_segv_handler) {
+  if (!IsHandledDeadlySignal(signum) ||
+      common_flags()->allow_user_segv_handler) {
     return REAL(signal)(signum, handler);
   }
   return nullptr;
@@ -287,7 +300,8 @@ INTERCEPTOR(void*, signal, int signum, void *handler) {
 
 INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
                             struct sigaction *oldact) {
-  if (!IsDeadlySignal(signum) || common_flags()->allow_user_segv_handler) {
+  if (!IsHandledDeadlySignal(signum) ||
+      common_flags()->allow_user_segv_handler) {
     return REAL(sigaction)(signum, act, oldact);
   }
   return 0;

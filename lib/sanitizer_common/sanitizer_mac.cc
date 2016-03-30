@@ -68,8 +68,15 @@ extern "C" {
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <util.h>
+
+// from <crt_externs.h>, but we don't have that file on iOS
+extern "C" {
+  extern char ***_NSGetArgv(void);
+  extern char ***_NSGetEnviron(void);
+}
 
 namespace __sanitizer {
 
@@ -197,6 +204,15 @@ uptr internal_rename(const char *oldpath, const char *newpath) {
 
 uptr internal_ftruncate(fd_t fd, uptr size) {
   return ftruncate(fd, size);
+}
+
+uptr internal_execve(const char *filename, char *const argv[],
+                     char *const envp[]) {
+  return execve(filename, argv, envp);
+}
+
+uptr internal_waitpid(int pid, int *status, int options) {
+  return waitpid(pid, status, options);
 }
 
 // ----------------- sanitizer_common.h
@@ -345,13 +361,16 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
 #endif
 }
 
-uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
-                      string_predicate_t filter) {
+void ListOfModules::init() {
+  clear();
   MemoryMappingLayout memory_mapping(false);
-  return memory_mapping.DumpListOfModules(modules, max_modules, filter);
+  memory_mapping.DumpListOfModules(&modules_);
 }
 
-bool IsDeadlySignal(int signum) {
+bool IsHandledDeadlySignal(int signum) {
+  if ((SANITIZER_WATCHOS || SANITIZER_TVOS) && !(SANITIZER_IOSSIM))
+    // Handling fatal signals on watchOS and tvOS devices is disallowed.
+    return false;
   return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
 }
 
@@ -430,6 +449,12 @@ void WriteOneLineToSyslog(const char *s) {
   asl_log(nullptr, nullptr, ASL_LEVEL_ERR, "%s", s);
 }
 
+void LogMessageOnPrintf(const char *str) {
+  // Log all printf output to CrashLog.
+  if (common_flags()->abort_on_error)
+    CRAppendCrashLogMessage(str);
+}
+
 void LogFullErrorReport(const char *buffer) {
   // Log with os_trace. This will make it into the crash log.
 #if SANITIZER_OS_TRACE
@@ -463,9 +488,11 @@ void LogFullErrorReport(const char *buffer) {
   if (common_flags()->log_to_syslog)
     WriteToSyslog(buffer);
 
-  // Log to CrashLog.
-  if (common_flags()->abort_on_error)
-    CRSetCrashLogMessage(buffer);
+  // The report is added to CrashLog as part of logging all of Printf output.
+}
+
+SignalContext::WriteFlag SignalContext::GetWriteFlag(void *context) {
+  return UNKNOWN;  // FIXME: implement this.
 }
 
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
@@ -660,6 +687,10 @@ void MaybeReexec() {
   // a separate function called after InitializeAllocator().
   if (new_env_pos == new_env + env_name_len + 1) new_env = NULL;
   LeakyResetEnv(kDyldInsertLibraries, new_env);
+}
+
+char **GetArgv() {
+  return *_NSGetArgv();
 }
 
 }  // namespace __sanitizer

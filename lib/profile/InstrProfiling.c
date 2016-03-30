@@ -18,6 +18,8 @@
 
 char *(*GetEnvHook)(const char *) = 0;
 
+COMPILER_RT_WEAK uint64_t __llvm_profile_raw_version = INSTR_PROF_RAW_VERSION;
+
 COMPILER_RT_VISIBILITY uint64_t __llvm_profile_get_magic(void) {
   return sizeof(void *) == sizeof(uint64_t) ? (INSTR_PROF_RAW_MAGIC_64)
                                             : (INSTR_PROF_RAW_MAGIC_32);
@@ -32,7 +34,7 @@ __llvm_profile_get_num_padding_bytes(uint64_t SizeInBytes) {
 }
 
 COMPILER_RT_VISIBILITY uint64_t __llvm_profile_get_version(void) {
-  return INSTR_PROF_RAW_VERSION;
+  return __llvm_profile_raw_version;
 }
 
 COMPILER_RT_VISIBILITY void __llvm_profile_reset_counters(void) {
@@ -44,7 +46,7 @@ COMPILER_RT_VISIBILITY void __llvm_profile_reset_counters(void) {
   const __llvm_profile_data *DataBegin = __llvm_profile_begin_data();
   const __llvm_profile_data *DataEnd = __llvm_profile_end_data();
   const __llvm_profile_data *DI;
-  for (DI = DataBegin; DI != DataEnd; ++DI) {
+  for (DI = DataBegin; DI < DataEnd; ++DI) {
     uint64_t CurrentVSiteCount = 0;
     uint32_t VKI, i;
     if (!DI->Values)
@@ -65,4 +67,3 @@ COMPILER_RT_VISIBILITY void __llvm_profile_reset_counters(void) {
     }
   }
 }
-

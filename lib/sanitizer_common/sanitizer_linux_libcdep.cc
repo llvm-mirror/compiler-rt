@@ -222,6 +222,11 @@ uptr ThreadDescriptorSize() {
     char *end;
     int minor = internal_simple_strtoll(buf + 8, &end, 10);
     if (end != buf + 8 && (*end == '\0' || *end == '.')) {
+      int patch = 0;
+      if (*end == '.')
+        // strtoll will return 0 if no valid conversion could be performed
+        patch = internal_simple_strtoll(end + 1, nullptr, 10);
+
       /* sizeof(struct pthread) values from various glibc versions.  */
       if (SANITIZER_X32)
         val = 1728;  // Assume only one particular version for x32.
@@ -235,9 +240,9 @@ uptr ThreadDescriptorSize() {
         val = FIRST_32_SECOND_64(1136, 1712);
       else if (minor == 10)
         val = FIRST_32_SECOND_64(1168, 1776);
-      else if (minor <= 12)
+      else if (minor == 11 || (minor == 12 && patch == 1))
         val = FIRST_32_SECOND_64(1168, 2288);
-      else if (minor == 13)
+      else if (minor <= 13)
         val = FIRST_32_SECOND_64(1168, 2304);
       else
         val = FIRST_32_SECOND_64(1216, 2304);
@@ -412,17 +417,12 @@ typedef ElfW(Phdr) Elf_Phdr;
 # endif
 
 struct DlIteratePhdrData {
-  LoadedModule *modules;
-  uptr current_n;
+  InternalMmapVector<LoadedModule> *modules;
   bool first;
-  uptr max_n;
-  string_predicate_t filter;
 };
 
 static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
   DlIteratePhdrData *data = (DlIteratePhdrData*)arg;
-  if (data->current_n == data->max_n)
-    return 0;
   InternalScopedString module_name(kMaxPathLength);
   if (data->first) {
     data->first = false;
@@ -433,20 +433,18 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
   }
   if (module_name[0] == '\0')
     return 0;
-  if (data->filter && !data->filter(module_name.data()))
-    return 0;
-  LoadedModule *cur_module = &data->modules[data->current_n];
-  cur_module->set(module_name.data(), info->dlpi_addr);
-  data->current_n++;
+  LoadedModule cur_module;
+  cur_module.set(module_name.data(), info->dlpi_addr);
   for (int i = 0; i < info->dlpi_phnum; i++) {
     const Elf_Phdr *phdr = &info->dlpi_phdr[i];
     if (phdr->p_type == PT_LOAD) {
       uptr cur_beg = info->dlpi_addr + phdr->p_vaddr;
       uptr cur_end = cur_beg + phdr->p_memsz;
       bool executable = phdr->p_flags & PF_X;
-      cur_module->addAddressRange(cur_beg, cur_end, executable);
+      cur_module.addAddressRange(cur_beg, cur_end, executable);
     }
   }
+  data->modules->push_back(cur_module);
   return 0;
 }
 
@@ -455,8 +453,8 @@ extern "C" __attribute__((weak)) int dl_iterate_phdr(
     int (*)(struct dl_phdr_info *, size_t, void *), void *);
 #endif
 
-uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
-                      string_predicate_t filter) {
+void ListOfModules::init() {
+  clear();
 #if SANITIZER_ANDROID && __ANDROID_API__ <= 22
   u32 api_level = AndroidGetApiLevel();
   // Fall back to /proc/maps if dl_iterate_phdr is unavailable or broken.
@@ -464,13 +462,12 @@ uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
   // both K and L (and future) Android releases.
   if (api_level <= ANDROID_LOLLIPOP_MR1) { // L or earlier
     MemoryMappingLayout memory_mapping(false);
-    return memory_mapping.DumpListOfModules(modules, max_modules, filter);
+    memory_mapping.DumpListOfModules(&modules_);
+    return;
   }
 #endif
-  CHECK(modules);
-  DlIteratePhdrData data = {modules, 0, true, max_modules, filter};
+  DlIteratePhdrData data = {&modules_, true};
   dl_iterate_phdr(dl_iterate_phdr_cb, &data);
-  return data.current_n;
 }
 
 // getrusage does not give us the current RSS, only the max RSS.
@@ -524,13 +521,13 @@ void AndroidLogInit() {
   atomic_store(&android_log_initialized, 1, memory_order_release);
 }
 
-bool ShouldLogAfterPrintf() {
+static bool ShouldLogAfterPrintf() {
   return atomic_load(&android_log_initialized, memory_order_acquire);
 }
 #else
 void AndroidLogInit() {}
 
-bool ShouldLogAfterPrintf() { return true; }
+static bool ShouldLogAfterPrintf() { return true; }
 #endif  // SANITIZER_ANDROID
 
 void WriteOneLineToSyslog(const char *s) {
@@ -539,6 +536,11 @@ void WriteOneLineToSyslog(const char *s) {
 #else
   syslog(LOG_INFO, "%s", s);
 #endif
+}
+
+void LogMessageOnPrintf(const char *str) {
+  if (common_flags()->log_to_syslog && ShouldLogAfterPrintf())
+    WriteToSyslog(str);
 }
 
 #endif // SANITIZER_LINUX

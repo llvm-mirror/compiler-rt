@@ -195,7 +195,7 @@ INTERCEPTOR(void *, __libc_memalign, SIZE_T boundary, SIZE_T size) {
   GET_MALLOC_STACK_TRACE;
   CHECK_EQ(boundary & (boundary - 1), 0);
   void *ptr = MsanReallocate(&stack, nullptr, size, boundary, false);
-  DTLS_on_libc_memalign(ptr, size * boundary);
+  DTLS_on_libc_memalign(ptr, size);
   return ptr;
 }
 
@@ -874,17 +874,42 @@ INTERCEPTOR(int, getrlimit, int resource, void *rlim) {
 
 #if !SANITIZER_FREEBSD
 INTERCEPTOR(int, getrlimit64, int resource, void *rlim) {
-  if (msan_init_is_running)
-    return REAL(getrlimit64)(resource, rlim);
+  if (msan_init_is_running) return REAL(getrlimit64)(resource, rlim);
   ENSURE_MSAN_INITED();
   int res = REAL(getrlimit64)(resource, rlim);
-  if (!res)
-    __msan_unpoison(rlim, __sanitizer::struct_rlimit64_sz);
+  if (!res) __msan_unpoison(rlim, __sanitizer::struct_rlimit64_sz);
   return res;
 }
+
+INTERCEPTOR(int, prlimit, int pid, int resource, void *new_rlimit,
+            void *old_rlimit) {
+  if (msan_init_is_running)
+    return REAL(prlimit)(pid, resource, new_rlimit, old_rlimit);
+  ENSURE_MSAN_INITED();
+  CHECK_UNPOISONED(new_rlimit, __sanitizer::struct_rlimit_sz);
+  int res = REAL(prlimit)(pid, resource, new_rlimit, old_rlimit);
+  if (!res) __msan_unpoison(old_rlimit, __sanitizer::struct_rlimit_sz);
+  return res;
+}
+
+INTERCEPTOR(int, prlimit64, int pid, int resource, void *new_rlimit,
+            void *old_rlimit) {
+  if (msan_init_is_running)
+    return REAL(prlimit64)(pid, resource, new_rlimit, old_rlimit);
+  ENSURE_MSAN_INITED();
+  CHECK_UNPOISONED(new_rlimit, __sanitizer::struct_rlimit64_sz);
+  int res = REAL(prlimit64)(pid, resource, new_rlimit, old_rlimit);
+  if (!res) __msan_unpoison(old_rlimit, __sanitizer::struct_rlimit64_sz);
+  return res;
+}
+
 #define MSAN_MAYBE_INTERCEPT_GETRLIMIT64 INTERCEPT_FUNCTION(getrlimit64)
+#define MSAN_MAYBE_INTERCEPT_PRLIMIT INTERCEPT_FUNCTION(prlimit)
+#define MSAN_MAYBE_INTERCEPT_PRLIMIT64 INTERCEPT_FUNCTION(prlimit64)
 #else
 #define MSAN_MAYBE_INTERCEPT_GETRLIMIT64
+#define MSAN_MAYBE_INTERCEPT_PRLIMIT
+#define MSAN_MAYBE_INTERCEPT_PRLIMIT64
 #endif
 
 #if SANITIZER_FREEBSD
@@ -952,30 +977,6 @@ INTERCEPTOR(int, epoll_pwait, int epfd, void *events, int maxevents,
 #else
 #define MSAN_MAYBE_INTERCEPT_EPOLL_PWAIT
 #endif
-
-INTERCEPTOR(SSIZE_T, recv, int fd, void *buf, SIZE_T len, int flags) {
-  ENSURE_MSAN_INITED();
-  SSIZE_T res = REAL(recv)(fd, buf, len, flags);
-  if (res > 0)
-    __msan_unpoison(buf, res);
-  return res;
-}
-
-INTERCEPTOR(SSIZE_T, recvfrom, int fd, void *buf, SIZE_T len, int flags,
-            void *srcaddr, int *addrlen) {
-  ENSURE_MSAN_INITED();
-  SIZE_T srcaddr_sz;
-  if (srcaddr) srcaddr_sz = *addrlen;
-  SSIZE_T res = REAL(recvfrom)(fd, buf, len, flags, srcaddr, addrlen);
-  if (res > 0) {
-    __msan_unpoison(buf, res);
-    if (srcaddr) {
-      SIZE_T sz = *addrlen;
-      __msan_unpoison(srcaddr, Min(sz, srcaddr_sz));
-    }
-  }
-  return res;
-}
 
 INTERCEPTOR(void *, calloc, SIZE_T nmemb, SIZE_T size) {
   GET_MALLOC_STACK_TRACE;
@@ -1408,12 +1409,12 @@ int OnExit() {
   __msan_unpoison(ptr, size)
 #define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)                  \
   if (msan_init_is_running) return REAL(func)(__VA_ARGS__);       \
+  ENSURE_MSAN_INITED();                                           \
   MSanInterceptorContext msan_ctx = {IsInInterceptorScope()};     \
   ctx = (void *)&msan_ctx;                                        \
   (void)ctx;                                                      \
   InterceptorScope interceptor_scope;                             \
-  __msan_unpoison(__errno_location(), sizeof(int)); /* NOLINT */  \
-  ENSURE_MSAN_INITED();
+  __msan_unpoison(__errno_location(), sizeof(int)); /* NOLINT */
 #define COMMON_INTERCEPTOR_DIR_ACQUIRE(ctx, path) \
   do {                                            \
   } while (false)
@@ -1616,19 +1617,23 @@ void InitializeInterceptors() {
   MSAN_MAYBE_INTERCEPT_FGETS_UNLOCKED;
   INTERCEPT_FUNCTION(getrlimit);
   MSAN_MAYBE_INTERCEPT_GETRLIMIT64;
+  MSAN_MAYBE_INTERCEPT_PRLIMIT;
+  MSAN_MAYBE_INTERCEPT_PRLIMIT64;
   MSAN_INTERCEPT_UNAME;
   INTERCEPT_FUNCTION(gethostname);
   MSAN_MAYBE_INTERCEPT_EPOLL_WAIT;
   MSAN_MAYBE_INTERCEPT_EPOLL_PWAIT;
-  INTERCEPT_FUNCTION(recv);
-  INTERCEPT_FUNCTION(recvfrom);
   INTERCEPT_FUNCTION(dladdr);
   INTERCEPT_FUNCTION(dlerror);
   INTERCEPT_FUNCTION(dl_iterate_phdr);
   INTERCEPT_FUNCTION(getrusage);
   INTERCEPT_FUNCTION(sigaction);
   INTERCEPT_FUNCTION(signal);
+#if defined(__mips__)
+  INTERCEPT_FUNCTION_VER(pthread_create, "GLIBC_2.2");
+#else
   INTERCEPT_FUNCTION(pthread_create);
+#endif
   INTERCEPT_FUNCTION(pthread_key_create);
   INTERCEPT_FUNCTION(pthread_join);
   INTERCEPT_FUNCTION(tzset);

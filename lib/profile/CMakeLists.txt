@@ -30,6 +30,8 @@ set(PROFILE_SOURCES
   InstrProfilingValue.c
   InstrProfilingBuffer.c
   InstrProfilingFile.c
+  InstrProfilingMerge.c
+  InstrProfilingMergeFile.c
   InstrProfilingWriter.c
   InstrProfilingPlatformDarwin.c
   InstrProfilingPlatformLinux.c
@@ -37,13 +39,14 @@ set(PROFILE_SOURCES
   InstrProfilingRuntime.cc
   InstrProfilingUtil.c)
 
+if(WIN32)
+    list(APPEND PROFILE_SOURCES WindowsMMap.c)
+endif()
+
 if(UNIX)
  set(EXTRA_FLAGS
      -fPIC
      -Wno-pedantic)
-else()
- set(EXTRA_FLAGS
-     -fPIC)
 endif()
 
 if(COMPILER_RT_TARGET_HAS_ATOMICS)

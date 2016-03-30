@@ -15,6 +15,8 @@
 int __llvm_profile_runtime = 0;
 uint64_t __llvm_profile_get_size_for_buffer(void);
 int __llvm_profile_write_buffer(char *);
+void __llvm_profile_merge_from_buffer(const char *, uint64_t Size);
+
 int write_buffer(uint64_t, const char *);
 int main(int argc, const char *argv[]) {
   // CHECK-LABEL: define {{.*}} @main(
@@ -29,12 +31,14 @@ int main(int argc, const char *argv[]) {
   if (Size > MaxSize)
     return 1;
   int Write = __llvm_profile_write_buffer(Buffer);
-  if (__llvm_profile_write_buffer(Buffer))
+  if (Write)
     return Write;
 
 #ifdef CHECK_SYMBOLS
   // Don't write it out.  Since we're checking the symbols, we don't have libc
   // available.
+  // Call merge function to make sure it does not bring in libc deps:
+  __llvm_profile_merge_from_buffer(Buffer, Size);
   return 0;
 #else
   // Actually write it out so we can FileCheck the output.

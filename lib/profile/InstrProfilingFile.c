@@ -30,13 +30,24 @@ static uint32_t fileWriter(ProfDataIOVec *IOVecs, uint32_t NumIOVecs,
   return 0;
 }
 
+COMPILER_RT_VISIBILITY ProfBufferIO *
+lprofCreateBufferIOInternal(void *File, uint32_t BufferSz) {
+  CallocHook = calloc;
+  FreeHook = free;
+  return lprofCreateBufferIO(fileWriter, File, BufferSz);
+}
+
 static int writeFile(FILE *File) {
-  uint8_t *ValueDataBegin = NULL;
-  const uint64_t ValueDataSize =
-      __llvm_profile_gather_value_data(&ValueDataBegin);
-  int r = llvmWriteProfData(fileWriter, File, ValueDataBegin, ValueDataSize);
-  free(ValueDataBegin);
-  return r;
+  const char *BufferSzStr = 0;
+  uint64_t ValueDataSize = 0;
+  struct ValueProfData **ValueDataArray =
+      __llvm_profile_gather_value_data(&ValueDataSize);
+  FreeHook = &free;
+  CallocHook = &calloc;
+  BufferSzStr = getenv("LLVM_VP_BUFFER_SIZE");
+  if (BufferSzStr && BufferSzStr[0])
+    VPBufferSize = atoi(BufferSzStr);
+  return lprofWriteData(fileWriter, File, ValueDataArray, ValueDataSize);
 }
 
 static int writeFileWithName(const char *OutputName) {
@@ -103,9 +114,10 @@ int getpid(void);
 static int setFilenamePossiblyWithPid(const char *Filename) {
 #define MAX_PID_SIZE 16
   char PidChars[MAX_PID_SIZE] = {0};
-  int NumPids = 0, PidLength = 0;
+  int NumPids = 0, PidLength = 0, NumHosts = 0, HostNameLength = 0;
   char *Allocated;
   int I, J;
+  char Hostname[COMPILER_RT_MAX_HOSTLEN];
 
   /* Reset filename on NULL, except with env var which is checked by caller. */
   if (!Filename) {
@@ -115,19 +127,29 @@ static int setFilenamePossiblyWithPid(const char *Filename) {
 
   /* Check the filename for "%p", which indicates a pid-substitution. */
   for (I = 0; Filename[I]; ++I)
-    if (Filename[I] == '%' && Filename[++I] == 'p')
-      if (!NumPids++) {
-        PidLength = snprintf(PidChars, MAX_PID_SIZE, "%d", getpid());
-        if (PidLength <= 0)
-          return -1;
+    if (Filename[I] == '%') {
+      if (Filename[++I] == 'p') {
+        if (!NumPids++) {
+          PidLength = snprintf(PidChars, MAX_PID_SIZE, "%d", getpid());
+          if (PidLength <= 0)
+            return -1;
+        }
+      } else if (Filename[I] == 'h') {
+        if (!NumHosts++)
+          if (COMPILER_RT_GETHOSTNAME(Hostname, COMPILER_RT_MAX_HOSTLEN))
+            return -1;
+          HostNameLength = strlen(Hostname);
       }
-  if (!NumPids) {
+    }
+
+  if (!(NumPids || NumHosts)) {
     setFilename(Filename, 0);
     return 0;
   }
 
   /* Allocate enough space for the substituted filename. */
-  Allocated = malloc(I + NumPids*(PidLength - 2) + 1);
+  Allocated = malloc(I + NumPids*(PidLength - 2) +
+                     NumHosts*(HostNameLength - 2) + 1);
   if (!Allocated)
     return -1;
 
@@ -137,6 +159,10 @@ static int setFilenamePossiblyWithPid(const char *Filename) {
       if (Filename[++I] == 'p') {
         memcpy(Allocated + J, PidChars, PidLength);
         J += PidLength;
+      }
+      else if (Filename[I] == 'h') {
+        memcpy(Allocated + J, Hostname, HostNameLength);
+        J += HostNameLength;
       }
       /* Drop any unknown substitutions. */
     } else
@@ -196,6 +222,15 @@ int __llvm_profile_write_file(void) {
   /* Check the filename. */
   if (!__llvm_profile_CurrentFilename) {
     PROF_ERR("LLVM Profile: Failed to write file : %s\n", "Filename not set");
+    return -1;
+  }
+
+  /* Check if there is llvm/runtime version mismatch.  */
+  if (GET_VERSION(__llvm_profile_get_version()) != INSTR_PROF_RAW_VERSION) {
+    PROF_ERR("LLVM Profile: runtime and instrumentation version mismatch : "
+             "expected %d, but get %d\n",
+             INSTR_PROF_RAW_VERSION,
+             (int)GET_VERSION(__llvm_profile_get_version()));
     return -1;
   }
 

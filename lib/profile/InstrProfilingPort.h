@@ -22,51 +22,51 @@
 
 #define COMPILER_RT_SECTION(Sect) __attribute__((section(Sect)))
 
+#define COMPILER_RT_MAX_HOSTLEN 128
+#ifdef _MSC_VER
+#define COMPILER_RT_GETHOSTNAME(Name, Len) gethostname(Name, Len)
+#elif defined(__PS4__)
+#define COMPILER_RT_GETHOSTNAME(Name, Len) (-1)
+#else
+#define COMPILER_RT_GETHOSTNAME(Name, Len) lprofGetHostName(Name, Len)
+#define COMPILER_RT_HAS_UNAME 1
+#endif
+
 #if COMPILER_RT_HAS_ATOMICS == 1
 #ifdef _MSC_VER
 #include <windows.h>
+#if _MSC_VER < 1900
+#define snprintf _snprintf
+#endif
 #if defined(_WIN64)
 #define COMPILER_RT_BOOL_CMPXCHG(Ptr, OldV, NewV)                              \
   (InterlockedCompareExchange64((LONGLONG volatile *)Ptr, (LONGLONG)NewV,      \
                                 (LONGLONG)OldV) == (LONGLONG)OldV)
-#else
+#else /* !defined(_WIN64) */
 #define COMPILER_RT_BOOL_CMPXCHG(Ptr, OldV, NewV)                              \
   (InterlockedCompareExchange((LONG volatile *)Ptr, (LONG)NewV, (LONG)OldV) == \
    (LONG)OldV)
 #endif
-#else
+#else /* !defined(_MSC_VER) */
 #define COMPILER_RT_BOOL_CMPXCHG(Ptr, OldV, NewV)                              \
   __sync_bool_compare_and_swap(Ptr, OldV, NewV)
 #endif
-#else
+#else /* COMPILER_RT_HAS_ATOMICS != 1 */
+#include "InstrProfilingUtil.h"
 #define COMPILER_RT_BOOL_CMPXCHG(Ptr, OldV, NewV)                              \
-  BoolCmpXchg((void **)Ptr, OldV, NewV)
+  lprofBoolCmpXchg((void **)Ptr, OldV, NewV)
 #endif
 
 #define PROF_ERR(Format, ...)                                                  \
   if (GetEnvHook && GetEnvHook("LLVM_PROFILE_VERBOSE_ERRORS"))                 \
     fprintf(stderr, Format, __VA_ARGS__);
 
-#if defined(__FreeBSD__) && defined(__i386__)
+#if defined(__FreeBSD__)
 
-/* System headers define 'size_t' incorrectly on x64 FreeBSD (prior to
- * FreeBSD 10, r232261) when compiled in 32-bit mode.
- */
-#define PRIu64 "llu"
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-typedef uint32_t uintptr_t;
-#elif defined(__FreeBSD__) && defined(__x86_64__)
-#define PRIu64 "lu"
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-typedef unsigned long int uintptr_t;
+#include <inttypes.h>
+#include <sys/types.h>
 
-#else /* defined(__FreeBSD__) && defined(__i386__) */
+#else /* defined(__FreeBSD__) */
 
 #include <inttypes.h>
 #include <stdint.h>
