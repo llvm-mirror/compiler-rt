@@ -115,7 +115,10 @@ void *mempcpy(void *dest, const void *src, size_t n);
 # define SUPERUSER_GROUP "root"
 #endif
 
-const size_t kPageSize = 4096;
+static uintptr_t GetPageSize() {
+  return sysconf(_SC_PAGESIZE);
+}
+
 const size_t kMaxPathLength = 4096;
 
 typedef unsigned char      U1;
@@ -2914,6 +2917,10 @@ static void GetPathToLoadable(char *buf, size_t sz) {
   static const char basename[] = "libmsan_loadable.mips64el.so";
 #elif defined(__aarch64__)
   static const char basename[] = "libmsan_loadable.aarch64.so";
+#elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  static const char basename[] = "libmsan_loadable.powerpc64.so";
+#elif defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  static const char basename[] = "libmsan_loadable.powerpc64le.so";
 #endif
   int res = snprintf(buf, sz, "%.*s/%s",
                      (int)dir_len, program_path, basename);
@@ -3221,28 +3228,30 @@ TEST(MemorySanitizer, posix_memalign) {
 #if !defined(__FreeBSD__)
 TEST(MemorySanitizer, memalign) {
   void *p = memalign(4096, 13);
-  EXPECT_EQ(0U, (uintptr_t)p % kPageSize);
+  EXPECT_EQ(0U, (uintptr_t)p % 4096);
   free(p);
 }
 #endif
 
 TEST(MemorySanitizer, valloc) {
   void *a = valloc(100);
-  EXPECT_EQ(0U, (uintptr_t)a % kPageSize);
+  uintptr_t PageSize = GetPageSize();
+  EXPECT_EQ(0U, (uintptr_t)a % PageSize);
   free(a);
 }
 
 // There's no pvalloc() on FreeBSD.
 #if !defined(__FreeBSD__)
 TEST(MemorySanitizer, pvalloc) {
-  void *p = pvalloc(kPageSize + 100);
-  EXPECT_EQ(0U, (uintptr_t)p % kPageSize);
-  EXPECT_EQ(2 * kPageSize, __sanitizer_get_allocated_size(p));
+  uintptr_t PageSize = GetPageSize();
+  void *p = pvalloc(PageSize + 100);
+  EXPECT_EQ(0U, (uintptr_t)p % PageSize);
+  EXPECT_EQ(2 * PageSize, __sanitizer_get_allocated_size(p));
   free(p);
 
   p = pvalloc(0);  // pvalloc(0) should allocate at least one page.
-  EXPECT_EQ(0U, (uintptr_t)p % kPageSize);
-  EXPECT_EQ(kPageSize, __sanitizer_get_allocated_size(p));
+  EXPECT_EQ(0U, (uintptr_t)p % PageSize);
+  EXPECT_EQ(PageSize, __sanitizer_get_allocated_size(p));
   free(p);
 }
 #endif

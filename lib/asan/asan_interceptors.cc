@@ -223,6 +223,7 @@ struct ThreadStartParam {
   atomic_uintptr_t is_registered;
 };
 
+#if ASAN_INTERCEPT_PTHREAD_CREATE
 static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
   ThreadStartParam *param = reinterpret_cast<ThreadStartParam *>(arg);
   AsanThread *t = nullptr;
@@ -233,7 +234,6 @@ static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
   return t->ThreadStart(GetTid(), &param->is_registered);
 }
 
-#if ASAN_INTERCEPT_PTHREAD_CREATE
 INTERCEPTOR(int, pthread_create, void *thread,
     void *attr, void *(*start_routine)(void*), void *arg) {
   EnsureMainThreadIDIsCorrect();
@@ -563,6 +563,23 @@ INTERCEPTOR(char*, strdup, const char *s) {
   return reinterpret_cast<char*>(new_mem);
 }
 
+#if ASAN_INTERCEPT___STRDUP
+INTERCEPTOR(char*, __strdup, const char *s) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strdup);
+  if (UNLIKELY(!asan_inited)) return internal_strdup(s);
+  ENSURE_ASAN_INITED();
+  uptr length = REAL(strlen)(s);
+  if (flags()->replace_str) {
+    ASAN_READ_RANGE(ctx, s, length + 1);
+  }
+  GET_STACK_TRACE_MALLOC;
+  void *new_mem = asan_malloc(length + 1, &stack);
+  REAL(memcpy)(new_mem, s, length + 1);
+  return reinterpret_cast<char*>(new_mem);
+}
+#endif // ASAN_INTERCEPT___STRDUP
+
 INTERCEPTOR(SIZE_T, wcslen, const wchar_t *s) {
   void *ctx;
   ASAN_INTERCEPTOR_ENTER(ctx, wcslen);
@@ -669,12 +686,12 @@ INTERCEPTOR(long long, atoll, const char *nptr) {  // NOLINT
 }
 #endif  // ASAN_INTERCEPT_ATOLL_AND_STRTOLL
 
+#if ASAN_INTERCEPT___CXA_ATEXIT
 static void AtCxaAtexit(void *unused) {
   (void)unused;
   StopInitOrderChecking();
 }
 
-#if ASAN_INTERCEPT___CXA_ATEXIT
 INTERCEPTOR(int, __cxa_atexit, void (*func)(void *), void *arg,
             void *dso_handle) {
 #if SANITIZER_MAC
@@ -719,6 +736,9 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(strncat);
   ASAN_INTERCEPT_FUNC(strncpy);
   ASAN_INTERCEPT_FUNC(strdup);
+#if ASAN_INTERCEPT___STRDUP
+  ASAN_INTERCEPT_FUNC(__strdup);
+#endif
 #if ASAN_INTERCEPT_INDEX && ASAN_USE_ALIAS_ATTRIBUTE_FOR_INDEX
   ASAN_INTERCEPT_FUNC(index);
 #endif

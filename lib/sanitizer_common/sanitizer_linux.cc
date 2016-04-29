@@ -110,6 +110,7 @@ namespace __sanitizer {
 #endif
 
 // --------------- sanitizer_libc.h
+#if !SANITIZER_S390
 uptr internal_mmap(void *addr, uptr length, int prot, int flags, int fd,
                    OFF_T offset) {
 #if SANITIZER_FREEBSD || SANITIZER_LINUX_USES_64BIT_SYSCALLS
@@ -122,6 +123,7 @@ uptr internal_mmap(void *addr, uptr length, int prot, int flags, int fd,
                           offset / 4096);
 #endif
 }
+#endif // !SANITIZER_S390
 
 uptr internal_munmap(void *addr, uptr length) {
   return internal_syscall(SYSCALL(munmap), (uptr)addr, length);
@@ -464,12 +466,13 @@ static void GetArgsAndEnv(char ***argv, char ***envp) {
 #else
   // On FreeBSD, retrieving the argument and environment arrays is done via the
   // kern.ps_strings sysctl, which returns a pointer to a structure containing
-  // this information.  If the sysctl is not available, a "hardcoded" address,
-  // PS_STRINGS, must be used instead.  See also <sys/exec.h>.
+  // this information. See also <sys/exec.h>.
   ps_strings *pss;
   size_t sz = sizeof(pss);
-  if (sysctlbyname("kern.ps_strings", &pss, &sz, NULL, 0) == -1)
-    pss = (ps_strings*)PS_STRINGS;
+  if (sysctlbyname("kern.ps_strings", &pss, &sz, NULL, 0) == -1) {
+    Printf("sysctl kern.ps_strings failed\n");
+    Die();
+  }
   *argv = pss->ps_argvstr;
   *envp = pss->ps_envstr;
 #endif
@@ -1312,6 +1315,15 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
   *pc = ucontext->uc_mcontext.pc;
   *bp = ucontext->uc_mcontext.gregs[30];
   *sp = ucontext->uc_mcontext.gregs[29];
+#elif defined(__s390__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+# if defined(__s390x__)
+  *pc = ucontext->uc_mcontext.psw.addr;
+# else
+  *pc = ucontext->uc_mcontext.psw.addr & 0x7fffffff;
+# endif
+  *bp = ucontext->uc_mcontext.gregs[11];
+  *sp = ucontext->uc_mcontext.gregs[15];
 #else
 # error "Unsupported arch"
 #endif

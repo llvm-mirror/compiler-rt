@@ -97,21 +97,19 @@ void UnmapOrDie(void *addr, uptr size) {
   if (!size || !addr)
     return;
 
-  // Make sure that this API is only used to unmap an entire previous mapping.
-  // Windows cannot unmap part of a previous mapping. Unfortunately,
-  // we can't check that size matches the original size because mbi.RegionSize
-  // doesn't describe the size of the full allocation if some of the pages were
-  // protected.
   MEMORY_BASIC_INFORMATION mbi;
   CHECK(VirtualQuery(addr, &mbi, sizeof(mbi)));
-  CHECK(mbi.AllocationBase == addr &&
-        "Windows cannot unmap part of a previous mapping");
 
+  // MEM_RELEASE can only be used to unmap whole regions previously mapped with
+  // VirtualAlloc. So we first try MEM_RELEASE since it is better, and if that
+  // fails try MEM_DECOMMIT.
   if (VirtualFree(addr, 0, MEM_RELEASE) == 0) {
-    Report("ERROR: %s failed to "
-           "deallocate 0x%zx (%zd) bytes at address %p (error code: %d)\n",
-           SanitizerToolName, size, size, addr, GetLastError());
-    CHECK("unable to unmap" && 0);
+    if (VirtualFree(addr, size, MEM_DECOMMIT) == 0) {
+      Report("ERROR: %s failed to "
+             "deallocate 0x%zx (%zd) bytes at address %p (error code: %d)\n",
+             SanitizerToolName, size, size, addr, GetLastError());
+      CHECK("unable to unmap" && 0);
+    }
   }
 }
 
@@ -200,7 +198,7 @@ void *MmapNoReserveOrDie(uptr size, const char *mem_type) {
   return MmapOrDie(size, mem_type);
 }
 
-void *MmapNoAccess(uptr fixed_addr, uptr size, const char *name) {
+void *MmapFixedNoAccess(uptr fixed_addr, uptr size, const char *name) {
   (void)name; // unsupported
   void *res = VirtualAlloc((LPVOID)fixed_addr, size,
                            MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
@@ -209,6 +207,11 @@ void *MmapNoAccess(uptr fixed_addr, uptr size, const char *name) {
            "mprotect %p (%zd) bytes at %p (error code: %d)\n",
            SanitizerToolName, size, size, fixed_addr, GetLastError());
   return res;
+}
+
+void *MmapNoAccess(uptr size) {
+  // FIXME: unsupported.
+  return nullptr;
 }
 
 bool MprotectNoAccess(uptr addr, uptr size) {
@@ -392,6 +395,7 @@ void Abort() {
   internal__exit(3);
 }
 
+#ifndef SANITIZER_GO
 // Read the file to extract the ImageBase field from the PE header. If ASLR is
 // disabled and this virtual address is available, the loader will typically
 // load the image at this address. Therefore, we call it the preferred base. Any
@@ -444,7 +448,6 @@ static uptr GetPreferredBase(const char *modname) {
   return (uptr)pe_header->ImageBase;
 }
 
-#ifndef SANITIZER_GO
 void ListOfModules::init() {
   clear();
   HANDLE cur_process = GetCurrentProcess();
