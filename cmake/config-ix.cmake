@@ -109,6 +109,7 @@ macro(detect_target_arch)
   check_symbol_exists(__i386__ "" __I386)
   check_symbol_exists(__mips__ "" __MIPS)
   check_symbol_exists(__mips64__ "" __MIPS64)
+  check_symbol_exists(__s390x__ "" __S390X)
   check_symbol_exists(__wasm32__ "" __WEBASSEMBLY32)
   check_symbol_exists(__wasm64__ "" __WEBASSEMBLY64)
   if(__ARM)
@@ -125,6 +126,8 @@ macro(detect_target_arch)
     add_default_target_arch(mips64)
   elseif(__MIPS)
     add_default_target_arch(mips)
+  elseif(__S390X)
+    add_default_target_arch(s390x)
   elseif(__WEBASSEMBLY32)
     add_default_target_arch(wasm32)
   elseif(__WEBASSEMBLY64)
@@ -137,6 +140,27 @@ endmacro()
 if (NOT CMAKE_SIZEOF_VOID_P EQUAL 4 AND
     NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Please use architecture with 4 or 8 byte pointers.")
+endif()
+
+# Find and run MSVC (not clang-cl) and get its version. This will tell clang-cl
+# what version of MSVC to pretend to be so that the STL works.
+set(MSVC_VERSION_FLAG "")
+if (MSVC)
+  # Find and run MSVC (not clang-cl) and get its version. This will tell
+  # clang-cl what version of MSVC to pretend to be so that the STL works.
+  execute_process(COMMAND "$ENV{VSINSTALLDIR}/VC/bin/cl.exe"
+    OUTPUT_QUIET
+    ERROR_VARIABLE MSVC_COMPAT_VERSION
+    )
+  string(REGEX REPLACE "^.*Compiler Version ([0-9.]+) for .*$" "\\1"
+    MSVC_COMPAT_VERSION "${MSVC_COMPAT_VERSION}")
+  if (MSVC_COMPAT_VERSION MATCHES "^[0-9].+$")
+    set(MSVC_VERSION_FLAG "-fms-compatibility-version=${MSVC_COMPAT_VERSION}")
+    # Add this flag into the host build if this is clang-cl.
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      append("${MSVC_VERSION_FLAG}" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+    endif()
+  endif()
 endif()
 
 # Generate the COMPILER_RT_SUPPORTED_ARCH list.
@@ -155,9 +179,9 @@ elseif(NOT APPLE) # Supported archs for Apple platforms are generated later
       test_target_arch(i386 __i386__ "-m32")
     else()
       if (CMAKE_SIZEOF_VOID_P EQUAL 4)
-        test_target_arch(i386 "" "")
+        test_target_arch(i386 "" "${MSVC_VERSION_FLAG}")
       else()
-        test_target_arch(x86_64 "" "")
+        test_target_arch(x86_64 "" "${MSVC_VERSION_FLAG}")
       endif()
     endif()
   elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "powerpc")
@@ -167,6 +191,8 @@ elseif(NOT APPLE) # Supported archs for Apple platforms are generated later
     else()
       test_target_arch(powerpc64le "" "-m64")
     endif()
+  elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "s390x")
+    test_target_arch(s390x "" "")
   elseif("${COMPILER_RT_DEFAULT_TARGET_ARCH}" MATCHES "mipsel|mips64el")
     # Gcc doesn't accept -m32/-m64 so we do the next best thing and use
     # -mips32r2/-mips64r2. We don't use -mips1/-mips3 because we want to match
@@ -217,6 +243,7 @@ set(X86_64 x86_64)
 set(MIPS32 mips mipsel)
 set(MIPS64 mips64 mips64el)
 set(PPC64 powerpc64 powerpc64le)
+set(S390X s390x)
 set(WASM32 wasm32)
 set(WASM64 wasm64)
 
@@ -229,7 +256,7 @@ endif()
 set(ALL_BUILTIN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
     ${MIPS32} ${MIPS64} ${WASM32} ${WASM64})
 set(ALL_SANITIZER_COMMON_SUPPORTED_ARCH ${X86} ${X86_64} ${PPC64}
-    ${ARM32} ${ARM64} ${MIPS32} ${MIPS64})
+    ${ARM32} ${ARM64} ${MIPS32} ${MIPS64} ${S390X})
 set(ALL_ASAN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
     ${MIPS32} ${MIPS64} ${PPC64})
 set(ALL_DFSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64})
@@ -239,9 +266,10 @@ set(ALL_PROFILE_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64} ${PPC64}
     ${MIPS32} ${MIPS64})
 set(ALL_TSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64} ${PPC64})
 set(ALL_UBSAN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
-    ${MIPS32} ${MIPS64} ${PPC64})
+    ${MIPS32} ${MIPS64} ${PPC64} ${S390X})
 set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM64} ${MIPS32} ${MIPS64})
-set(ALL_CFI_SUPPORTED_ARCH ${X86} ${X86_64})
+set(ALL_CFI_SUPPORTED_ARCH ${X86} ${X86_64} ${MIPS64})
+set(ALL_ESAN_SUPPORTED_ARCH ${X86_64})
 
 if(APPLE)
   include(CompilerRTDarwinUtils)
@@ -397,10 +425,13 @@ if(APPLE)
           DARWIN_${platform}sim_ARCHS
           ${toolchain_arches})
         message(STATUS "${platform} Simulator supported arches: ${DARWIN_${platform}sim_ARCHS}")
-        if(DARWIN_iossim_ARCHS)
+        if(DARWIN_${platform}_ARCHS)
           list(APPEND SANITIZER_COMMON_SUPPORTED_OS ${platform}sim)
           list(APPEND BUILTIN_SUPPORTED_OS ${platform}sim)
           list(APPEND PROFILE_SUPPORTED_OS ${platform}sim)
+          if(DARWIN_${platform}_SYSROOT_INTERNAL)
+            list(APPEND TSAN_SUPPORTED_OS ${platform}sim)
+          endif()
         endif()
         foreach(arch ${DARWIN_${platform}sim_ARCHS})
           list(APPEND COMPILER_RT_SUPPORTED_ARCH ${arch})
@@ -473,6 +504,9 @@ if(APPLE)
   list_intersect(CFI_SUPPORTED_ARCH
     ALL_CFI_SUPPORTED_ARCH
     SANITIZER_COMMON_SUPPORTED_ARCH)
+  list_intersect(ESAN_SUPPORTED_ARCH
+    ALL_ESAN_SUPPORTED_ARCH
+    SANITIZER_COMMON_SUPPORTED_ARCH)
 else()
   # Architectures supported by compiler-rt libraries.
   filter_available_targets(BUILTIN_SUPPORTED_ARCH
@@ -495,6 +529,7 @@ else()
   filter_available_targets(SAFESTACK_SUPPORTED_ARCH
     ${ALL_SAFESTACK_SUPPORTED_ARCH})
   filter_available_targets(CFI_SUPPORTED_ARCH ${ALL_CFI_SUPPORTED_ARCH})
+  filter_available_targets(ESAN_SUPPORTED_ARCH ${ALL_ESAN_SUPPORTED_ARCH})
 endif()
 
 if (MSVC)
@@ -601,4 +636,11 @@ if (COMPILER_RT_HAS_SANITIZER_COMMON AND CFI_SUPPORTED_ARCH AND
   set(COMPILER_RT_HAS_CFI TRUE)
 else()
   set(COMPILER_RT_HAS_CFI FALSE)
+endif()
+
+if (COMPILER_RT_HAS_SANITIZER_COMMON AND ESAN_SUPPORTED_ARCH AND
+    OS_NAME MATCHES "Linux")
+  set(COMPILER_RT_HAS_ESAN TRUE)
+else()
+  set(COMPILER_RT_HAS_ESAN FALSE)
 endif()

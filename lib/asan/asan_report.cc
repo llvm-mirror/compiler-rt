@@ -471,7 +471,7 @@ bool DescribeAddressIfStack(uptr addr, uptr access_size) {
   // previously. That's unfortunate, but I have no better solution,
   // especially given that the alloca may be from entirely different place
   // (e.g. use-after-scope, or different thread's stack).
-#if defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#if SANITIZER_PPC64V1
   // On PowerPC64 ELFv1, the address of a function actually points to a
   // three-doubleword data structure with the first field containing
   // the address of the function's code.
@@ -815,7 +815,7 @@ void ReportDoubleFree(uptr addr, BufferedStackTrace *free_stack) {
   ReportErrorSummary("double-free", &stack);
 }
 
-void ReportNewDeleteSizeMismatch(uptr addr, uptr delete_size,
+void ReportNewDeleteSizeMismatch(uptr addr, uptr alloc_size, uptr delete_size,
                                  BufferedStackTrace *free_stack) {
   ScopedInErrorReport in_report;
   Decorator d;
@@ -829,7 +829,7 @@ void ReportNewDeleteSizeMismatch(uptr addr, uptr delete_size,
   Printf("%s  object passed to delete has wrong type:\n", d.EndWarning());
   Printf("  size of the allocated type:   %zd bytes;\n"
          "  size of the deallocated type: %zd bytes.\n",
-         asan_mz_size(reinterpret_cast<void*>(addr)), delete_size);
+         alloc_size, delete_size);
   CHECK_GT(free_stack->size, 0);
   ScarinessScore::PrintSimple(10, "new-delete-type-mismatch");
   GET_STACK_TRACE_FATAL(free_stack->trace[0], free_stack->top_frame_bp);
@@ -1098,6 +1098,8 @@ void ReportGenericError(uptr pc, uptr bp, uptr sp, uptr addr, bool is_write,
     bool far_from_bounds = false;
     shadow_val = *shadow_addr;
     int bug_type_score = 0;
+    // For use-after-frees reads are almost as bad as writes.
+    int read_after_free_bonus = 0;
     switch (shadow_val) {
       case kAsanHeapLeftRedzoneMagic:
       case kAsanHeapRightRedzoneMagic:
@@ -1109,6 +1111,7 @@ void ReportGenericError(uptr pc, uptr bp, uptr sp, uptr addr, bool is_write,
       case kAsanHeapFreeMagic:
         bug_descr = "heap-use-after-free";
         bug_type_score = 20;
+        if (!is_write) read_after_free_bonus = 18;
         break;
       case kAsanStackLeftRedzoneMagic:
         bug_descr = "stack-buffer-underflow";
@@ -1129,6 +1132,7 @@ void ReportGenericError(uptr pc, uptr bp, uptr sp, uptr addr, bool is_write,
       case kAsanStackAfterReturnMagic:
         bug_descr = "stack-use-after-return";
         bug_type_score = 30;
+        if (!is_write) read_after_free_bonus = 18;
         break;
       case kAsanUserPoisonedMemoryMagic:
         bug_descr = "use-after-poison";
@@ -1158,7 +1162,7 @@ void ReportGenericError(uptr pc, uptr bp, uptr sp, uptr addr, bool is_write,
         far_from_bounds = AdjacentShadowValuesAreFullyPoisoned(shadow_addr);
         break;
     }
-    SS.Scare(bug_type_score, bug_descr);
+    SS.Scare(bug_type_score + read_after_free_bonus, bug_descr);
     if (far_from_bounds)
       SS.Scare(10, "far-from-bounds");
   }

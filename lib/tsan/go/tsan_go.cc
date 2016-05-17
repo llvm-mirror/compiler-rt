@@ -40,8 +40,9 @@ void internal_free(void *p) {
 static void (*go_runtime_cb)(uptr cmd, void *ctx);
 
 enum {
-  CallbackSymbolizeCode = 0,
-  CallbackSymbolizeData = 1,
+  CallbackGetProc = 0,
+  CallbackSymbolizeCode = 1,
+  CallbackSymbolizeData = 2,
 };
 
 struct SymbolizeCodeContext {
@@ -109,10 +110,26 @@ ReportLocation *SymbolizeData(uptr addr) {
   }
 }
 
-extern "C" {
-
 static ThreadState *main_thr;
 static bool inited;
+
+static Processor* get_cur_proc() {
+  if (UNLIKELY(!inited)) {
+    // Running Initialize().
+    // We have not yet returned the Processor to Go, so we cannot ask it back.
+    // Currently, Initialize() does not use the Processor, so return nullptr.
+    return nullptr;
+  }
+  Processor *proc;
+  go_runtime_cb(CallbackGetProc, &proc);
+  return proc;
+}
+
+Processor *ThreadState::proc() {
+  return get_cur_proc();
+}
+
+extern "C" {
 
 static ThreadState *AllocGoroutine() {
   ThreadState *thr = (ThreadState*)internal_alloc(MBlockThreadContex,
@@ -121,11 +138,13 @@ static ThreadState *AllocGoroutine() {
   return thr;
 }
 
-void __tsan_init(ThreadState **thrp, void (*cb)(uptr cmd, void *cb)) {
+void __tsan_init(ThreadState **thrp, Processor **procp,
+                 void (*cb)(uptr cmd, void *cb)) {
   go_runtime_cb = cb;
   ThreadState *thr = AllocGoroutine();
   main_thr = *thrp = thr;
   Initialize(thr);
+  *procp = thr->proc1;
   inited = true;
 }
 
@@ -187,9 +206,8 @@ void __tsan_malloc(ThreadState *thr, uptr pc, uptr p, uptr sz) {
   MemoryResetRange(0, 0, (uptr)p, sz);
 }
 
-void __tsan_free(ThreadState *thr, uptr p, uptr sz) {
-  if (thr)
-    ctx->metamap.FreeRange(thr, 0, p, sz);
+void __tsan_free(uptr p, uptr sz) {
+  ctx->metamap.FreeRange(get_cur_proc(), p, sz);
 }
 
 void __tsan_go_start(ThreadState *parent, ThreadState **pthr, void *pc) {
@@ -202,6 +220,14 @@ void __tsan_go_start(ThreadState *parent, ThreadState **pthr, void *pc) {
 void __tsan_go_end(ThreadState *thr) {
   ThreadFinish(thr);
   internal_free(thr);
+}
+
+void __tsan_proc_create(Processor **pproc) {
+  *pproc = ProcCreate();
+}
+
+void __tsan_proc_destroy(Processor *proc) {
+  ProcDestroy(proc);
 }
 
 void __tsan_acquire(ThreadState *thr, void *addr) {

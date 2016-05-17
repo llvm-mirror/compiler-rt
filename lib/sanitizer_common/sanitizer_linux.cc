@@ -110,6 +110,7 @@ namespace __sanitizer {
 #endif
 
 // --------------- sanitizer_libc.h
+#if !SANITIZER_S390
 uptr internal_mmap(void *addr, uptr length, int prot, int flags, int fd,
                    OFF_T offset) {
 #if SANITIZER_FREEBSD || SANITIZER_LINUX_USES_64BIT_SYSCALLS
@@ -122,6 +123,7 @@ uptr internal_mmap(void *addr, uptr length, int prot, int flags, int fd,
                           offset / 4096);
 #endif
 }
+#endif // !SANITIZER_S390
 
 uptr internal_munmap(void *addr, uptr length) {
   return internal_syscall(SYSCALL(munmap), (uptr)addr, length);
@@ -244,7 +246,15 @@ uptr internal_lstat(const char *path, void *buf) {
   return internal_syscall(SYSCALL(newfstatat), AT_FDCWD, (uptr)path,
                          (uptr)buf, AT_SYMLINK_NOFOLLOW);
 #elif SANITIZER_LINUX_USES_64BIT_SYSCALLS
+# if SANITIZER_MIPS64
+  // For mips64, lstat syscall fills buffer in the format of kernel_stat
+  struct kernel_stat kbuf;
+  int res = internal_syscall(SYSCALL(lstat), path, &kbuf);
+  kernel_stat_to_stat(&kbuf, (struct stat *)buf);
+  return res;
+# else
   return internal_syscall(SYSCALL(lstat), (uptr)path, (uptr)buf);
+# endif
 #else
   struct stat64 buf64;
   int res = internal_syscall(SYSCALL(lstat64), path, &buf64);
@@ -255,7 +265,15 @@ uptr internal_lstat(const char *path, void *buf) {
 
 uptr internal_fstat(fd_t fd, void *buf) {
 #if SANITIZER_FREEBSD || SANITIZER_LINUX_USES_64BIT_SYSCALLS
+# if SANITIZER_MIPS64
+  // For mips64, fstat syscall fills buffer in the format of kernel_stat
+  struct kernel_stat kbuf;
+  int res = internal_syscall(SYSCALL(fstat), fd, &kbuf);
+  kernel_stat_to_stat(&kbuf, (struct stat *)buf);
+  return res;
+# else
   return internal_syscall(SYSCALL(fstat), fd, (uptr)buf);
+# endif
 #else
   struct stat64 buf64;
   int res = internal_syscall(SYSCALL(fstat64), fd, &buf64);
@@ -448,12 +466,13 @@ static void GetArgsAndEnv(char ***argv, char ***envp) {
 #else
   // On FreeBSD, retrieving the argument and environment arrays is done via the
   // kern.ps_strings sysctl, which returns a pointer to a structure containing
-  // this information.  If the sysctl is not available, a "hardcoded" address,
-  // PS_STRINGS, must be used instead.  See also <sys/exec.h>.
+  // this information. See also <sys/exec.h>.
   ps_strings *pss;
   size_t sz = sizeof(pss);
-  if (sysctlbyname("kern.ps_strings", &pss, &sz, NULL, 0) == -1)
-    pss = (ps_strings*)PS_STRINGS;
+  if (sysctlbyname("kern.ps_strings", &pss, &sz, NULL, 0) == -1) {
+    Printf("sysctl kern.ps_strings failed\n");
+    Die();
+  }
   *argv = pss->ps_argvstr;
   *envp = pss->ps_envstr;
 #endif
@@ -610,7 +629,9 @@ int internal_sigaction_norestorer(int signum, const void *act, void *oldact) {
     // rt_sigaction, so we need to do the same (we'll need to reimplement the
     // restorers; for x86_64 the restorer address can be obtained from
     // oldact->sa_restorer upon a call to sigaction(xxx, NULL, oldact).
+#if !SANITIZER_ANDROID || !SANITIZER_MIPS32
     k_act.sa_restorer = u_act->sa_restorer;
+#endif
   }
 
   uptr result = internal_syscall(SYSCALL(rt_sigaction), (uptr)signum,
@@ -624,7 +645,9 @@ int internal_sigaction_norestorer(int signum, const void *act, void *oldact) {
     internal_memcpy(&u_oldact->sa_mask, &k_oldact.sa_mask,
                     sizeof(__sanitizer_kernel_sigset_t));
     u_oldact->sa_flags = k_oldact.sa_flags;
+#if !SANITIZER_ANDROID || !SANITIZER_MIPS32
     u_oldact->sa_restorer = k_oldact.sa_restorer;
+#endif
   }
   return result;
 }
@@ -1292,13 +1315,18 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
   *pc = ucontext->uc_mcontext.pc;
   *bp = ucontext->uc_mcontext.gregs[30];
   *sp = ucontext->uc_mcontext.gregs[29];
+#elif defined(__s390__)
+  ucontext_t *ucontext = (ucontext_t*)context;
+# if defined(__s390x__)
+  *pc = ucontext->uc_mcontext.psw.addr;
+# else
+  *pc = ucontext->uc_mcontext.psw.addr & 0x7fffffff;
+# endif
+  *bp = ucontext->uc_mcontext.gregs[11];
+  *sp = ucontext->uc_mcontext.gregs[15];
 #else
 # error "Unsupported arch"
 #endif
-}
-
-void DisableReexec() {
-  // No need to re-exec on Linux.
 }
 
 void MaybeReexec() {

@@ -82,15 +82,20 @@ namespace __sanitizer {
 
 #include "sanitizer_syscall_generic.inc"
 
+// Direct syscalls, don't call libmalloc hooks.
+extern "C" void *__mmap(void *addr, size_t len, int prot, int flags, int fildes,
+                        off_t off);
+extern "C" int __munmap(void *, size_t);
+
 // ---------------------- sanitizer_libc.h
 uptr internal_mmap(void *addr, size_t length, int prot, int flags,
                    int fd, u64 offset) {
   if (fd == -1) fd = VM_MAKE_TAG(VM_MEMORY_ANALYSIS_TOOL);
-  return (uptr)mmap(addr, length, prot, flags, fd, offset);
+  return (uptr)__mmap(addr, length, prot, flags, fd, offset);
 }
 
 uptr internal_munmap(void *addr, uptr length) {
-  return munmap(addr, length);
+  return __munmap(addr, length);
 }
 
 int internal_mprotect(void *addr, uptr length, int prot) {
@@ -225,7 +230,10 @@ bool FileExists(const char *filename) {
 }
 
 uptr GetTid() {
-  return reinterpret_cast<uptr>(pthread_self());
+  // FIXME: This can potentially get truncated on 32-bit, where uptr is 4 bytes.
+  uint64_t tid;
+  pthread_threadid_np(nullptr, &tid);
+  return tid;
 }
 
 void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
@@ -442,11 +450,15 @@ void *internal_start_thread(void(*func)(void *arg), void *arg) {
 
 void internal_join_thread(void *th) { pthread_join((pthread_t)th, 0); }
 
+#ifndef SANITIZER_GO
 static BlockingMutex syslog_lock(LINKER_INITIALIZED);
+#endif
 
 void WriteOneLineToSyslog(const char *s) {
+#ifndef SANITIZER_GO
   syslog_lock.CheckLocked();
   asl_log(nullptr, nullptr, ASL_LEVEL_ERR, "%s", s);
+#endif
 }
 
 void LogMessageOnPrintf(const char *str) {
@@ -456,6 +468,7 @@ void LogMessageOnPrintf(const char *str) {
 }
 
 void LogFullErrorReport(const char *buffer) {
+#ifndef SANITIZER_GO
   // Log with os_trace. This will make it into the crash log.
 #if SANITIZER_OS_TRACE
   if (GetMacosVersion() >= MACOS_VERSION_YOSEMITE) {
@@ -489,10 +502,16 @@ void LogFullErrorReport(const char *buffer) {
     WriteToSyslog(buffer);
 
   // The report is added to CrashLog as part of logging all of Printf output.
+#endif
 }
 
 SignalContext::WriteFlag SignalContext::GetWriteFlag(void *context) {
-  return UNKNOWN;  // FIXME: implement this.
+#if defined(__x86_64__) || defined(__i386__)
+  ucontext_t *ucontext = static_cast<ucontext_t*>(context);
+  return ucontext->uc_mcontext->__es.__err & 2 /*T_PF_WRITE*/ ? WRITE : READ;
+#else
+  return UNKNOWN;
+#endif
 }
 
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
@@ -522,6 +541,7 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 # endif
 }
 
+#ifndef SANITIZER_GO
 static const char kDyldInsertLibraries[] = "DYLD_INSERT_LIBRARIES";
 LowLevelAllocator allocator_for_env;
 
@@ -554,16 +574,19 @@ void LeakyResetEnv(const char *name, const char *name_value) {
   }
 }
 
-static bool reexec_disabled = false;
-
-void DisableReexec() {
-  reexec_disabled = true;
+SANITIZER_WEAK_CXX_DEFAULT_IMPL
+bool ReexecDisabled() {
+  return false;
 }
 
-extern "C" double dyldVersionNumber;
+extern "C" SANITIZER_WEAK_ATTRIBUTE double dyldVersionNumber;
 static const double kMinDyldVersionWithAutoInterposition = 360.0;
 
 bool DyldNeedsEnvVariable() {
+  // Although sanitizer support was added to LLVM on OS X 10.7+, GCC users
+  // still may want use them on older systems. On older Darwin platforms, dyld
+  // doesn't export dyldVersionNumber symbol and we simply return true.
+  if (!&dyldVersionNumber) return true;
   // If running on OS X 10.11+ or iOS 9.0+, dyld will interpose even if
   // DYLD_INSERT_LIBRARIES is not set. However, checking OS version via
   // GetMacosVersion() doesn't work for the simulator. Let's instead check
@@ -573,7 +596,7 @@ bool DyldNeedsEnvVariable() {
 }
 
 void MaybeReexec() {
-  if (reexec_disabled) return;
+  if (ReexecDisabled()) return;
 
   // Make sure the dynamic runtime library is preloaded so that the
   // wrappers work. If it is not, set DYLD_INSERT_LIBRARIES and re-exec
@@ -625,6 +648,21 @@ void MaybeReexec() {
            "possibly because of sandbox restrictions. Make sure to launch the "
            "executable with:\n%s=%s\n", kDyldInsertLibraries, new_env);
     CHECK("execv failed" && 0);
+  }
+
+  // Verify that interceptors really work.  We'll use dlsym to locate
+  // "pthread_create", if interceptors are working, it should really point to
+  // "wrap_pthread_create" within our own dylib.
+  Dl_info info_pthread_create;
+  void *dlopen_addr = dlsym(RTLD_DEFAULT, "pthread_create");
+  CHECK(dladdr(dlopen_addr, &info_pthread_create));
+  if (internal_strcmp(info.dli_fname, info_pthread_create.dli_fname) != 0) {
+    Report(
+        "ERROR: Interceptors are not working. This may be because %s is "
+        "loaded too late (e.g. via dlopen). Please launch the executable "
+        "with:\n%s=%s\n",
+        SanitizerToolName, kDyldInsertLibraries, info.dli_fname);
+    CHECK("interceptors not installed" && 0);
   }
 
   if (!lib_is_in_env)
@@ -688,6 +726,7 @@ void MaybeReexec() {
   if (new_env_pos == new_env + env_name_len + 1) new_env = NULL;
   LeakyResetEnv(kDyldInsertLibraries, new_env);
 }
+#endif  // SANITIZER_GO
 
 char **GetArgv() {
   return *_NSGetArgv();
