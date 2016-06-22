@@ -161,6 +161,10 @@ void internal__exit(int exitcode) {
   _exit(exitcode);
 }
 
+unsigned int internal_sleep(unsigned int seconds) {
+  return sleep(seconds);
+}
+
 uptr internal_getpid() {
   return getpid();
 }
@@ -195,7 +199,11 @@ int internal_forkpty(int *amaster) {
   }
   if (pid == 0) {
     close(master);
-    CHECK_EQ(login_tty(slave), 0);
+    if (login_tty(slave) != 0) {
+      // We already forked, there's not much we can do.  Let's quit.
+      Report("login_tty failed (errno %d)\n", errno);
+      internal__exit(1);
+    }
   } else {
     *amaster = master;
     close(slave);
@@ -602,7 +610,7 @@ void MaybeReexec() {
   // wrappers work. If it is not, set DYLD_INSERT_LIBRARIES and re-exec
   // ourselves.
   Dl_info info;
-  CHECK(dladdr((void*)((uptr)&__sanitizer_report_error_summary), &info));
+  RAW_CHECK(dladdr((void*)((uptr)&__sanitizer_report_error_summary), &info));
   char *dyld_insert_libraries =
       const_cast<char*>(GetEnv(kDyldInsertLibraries));
   uptr old_env_len = dyld_insert_libraries ?
@@ -647,7 +655,7 @@ void MaybeReexec() {
            "environment variable and re-execute itself, but execv() failed, "
            "possibly because of sandbox restrictions. Make sure to launch the "
            "executable with:\n%s=%s\n", kDyldInsertLibraries, new_env);
-    CHECK("execv failed" && 0);
+    RAW_CHECK("execv failed" && 0);
   }
 
   // Verify that interceptors really work.  We'll use dlsym to locate
@@ -655,14 +663,14 @@ void MaybeReexec() {
   // "wrap_pthread_create" within our own dylib.
   Dl_info info_pthread_create;
   void *dlopen_addr = dlsym(RTLD_DEFAULT, "pthread_create");
-  CHECK(dladdr(dlopen_addr, &info_pthread_create));
+  RAW_CHECK(dladdr(dlopen_addr, &info_pthread_create));
   if (internal_strcmp(info.dli_fname, info_pthread_create.dli_fname) != 0) {
     Report(
         "ERROR: Interceptors are not working. This may be because %s is "
         "loaded too late (e.g. via dlopen). Please launch the executable "
         "with:\n%s=%s\n",
         SanitizerToolName, kDyldInsertLibraries, info.dli_fname);
-    CHECK("interceptors not installed" && 0);
+    RAW_CHECK("interceptors not installed" && 0);
   }
 
   if (!lib_is_in_env)
@@ -677,7 +685,7 @@ void MaybeReexec() {
   // sign and the '\0' char.
   char *new_env = (char*)allocator_for_env.Allocate(
       old_env_len + 2 + env_name_len);
-  CHECK(new_env);
+  RAW_CHECK(new_env);
   internal_memset(new_env, '\0', old_env_len + 2 + env_name_len);
   internal_strncpy(new_env, kDyldInsertLibraries, env_name_len);
   new_env[env_name_len] = '=';

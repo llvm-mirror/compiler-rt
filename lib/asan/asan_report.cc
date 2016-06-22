@@ -736,10 +736,10 @@ class ScopedInErrorReport {
 };
 
 StaticSpinMutex ScopedInErrorReport::lock_;
-u32 ScopedInErrorReport::reporting_thread_tid_;
+u32 ScopedInErrorReport::reporting_thread_tid_ = kInvalidTid;
 
 void ReportStackOverflow(const SignalContext &sig) {
-  ScopedInErrorReport in_report;
+  ScopedInErrorReport in_report(/*report*/ nullptr, /*fatal*/ true);
   Decorator d;
   Printf("%s", d.Warning());
   Report(
@@ -1012,10 +1012,10 @@ static INLINE void CheckForInvalidPointerPair(void *p1, void *p2) {
   uptr a2 = reinterpret_cast<uptr>(p2);
   AsanChunkView chunk1 = FindHeapChunkByAddress(a1);
   AsanChunkView chunk2 = FindHeapChunkByAddress(a2);
-  bool valid1 = chunk1.IsValid();
-  bool valid2 = chunk2.IsValid();
-  if ((valid1 != valid2) || (valid1 && valid2 && !chunk1.Eq(chunk2))) {
-    GET_CALLER_PC_BP_SP;                                              \
+  bool valid1 = chunk1.IsAllocated();
+  bool valid2 = chunk2.IsAllocated();
+  if (!valid1 || !valid2 || !chunk1.Eq(chunk2)) {
+    GET_CALLER_PC_BP_SP;
     return ReportInvalidPointerPair(pc, bp, sp, a1, a2);
   }
 }

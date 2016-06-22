@@ -335,6 +335,7 @@ INTERFACE_FUNCTION(__sanitizer_update_counter_bitset_and_clear_counters)
 INTERFACE_FUNCTION(__sanitizer_sandbox_on_notify)
 INTERFACE_FUNCTION(__sanitizer_set_death_callback)
 INTERFACE_FUNCTION(__sanitizer_set_report_path)
+INTERFACE_FUNCTION(__sanitizer_set_report_fd)
 INTERFACE_FUNCTION(__sanitizer_unaligned_load16)
 INTERFACE_FUNCTION(__sanitizer_unaligned_load32)
 INTERFACE_FUNCTION(__sanitizer_unaligned_load64)
@@ -342,6 +343,7 @@ INTERFACE_FUNCTION(__sanitizer_unaligned_store16)
 INTERFACE_FUNCTION(__sanitizer_unaligned_store32)
 INTERFACE_FUNCTION(__sanitizer_unaligned_store64)
 INTERFACE_FUNCTION(__sanitizer_verify_contiguous_container)
+INTERFACE_FUNCTION(__sanitizer_install_malloc_and_free_hooks)
 
 // TODO(timurrrr): Add more interface functions on the as-needed basis.
 
