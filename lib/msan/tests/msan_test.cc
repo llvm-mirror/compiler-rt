@@ -2462,6 +2462,20 @@ TEST(MemorySanitizer, VAArgManyTest) {
   vaargsfn_many(1, 2, *x, 3, 4, 5, 6, 7, 8, 9, *y);
 }
 
+static void vaargsfn_manyfix(int g1, int g2, int g3, int g4, int g5, int g6, int g7, int g8, int g9, ...) {
+  va_list vl;
+  va_start(vl, g9);
+  EXPECT_NOT_POISONED(va_arg(vl, int));
+  EXPECT_POISONED(va_arg(vl, int));
+  va_end(vl);
+}
+
+TEST(MemorySanitizer, VAArgManyFixTest) {
+  int* x = GetPoisoned<int>();
+  int* y = GetPoisoned<int>();
+  vaargsfn_manyfix(1, *x, 3, 4, 5, 6, 7, 8, 9, 10, *y);
+}
+
 static void vaargsfn_pass2(va_list vl) {
   EXPECT_NOT_POISONED(va_arg(vl, int));
   EXPECT_NOT_POISONED(va_arg(vl, int));
@@ -3955,7 +3969,48 @@ TEST(VectorMaddTest, mmx_pmadd_wd) {
 
   EXPECT_EQ((unsigned)(2 * 102 + 3 * 103), c[1]);
 }
-#endif  // defined(__clang__)
+
+TEST(VectorCmpTest, mm_cmpneq_ps) {
+  V4x32 c;
+  c = _mm_cmpneq_ps(V4x32{Poisoned<U4>(), 1, 2, 3}, V4x32{4, 5, Poisoned<U4>(), 6});
+  EXPECT_POISONED(c[0]);
+  EXPECT_NOT_POISONED(c[1]);
+  EXPECT_POISONED(c[2]);
+  EXPECT_NOT_POISONED(c[3]);
+
+  c = _mm_cmpneq_ps(V4x32{0, 1, 2, 3}, V4x32{4, 5, 6, 7});
+  EXPECT_NOT_POISONED(c);
+}
+
+TEST(VectorCmpTest, mm_cmpneq_sd) {
+  V2x64 c;
+  c = _mm_cmpneq_sd(V2x64{Poisoned<U8>(), 1}, V2x64{2, 3});
+  EXPECT_POISONED(c[0]);
+  c = _mm_cmpneq_sd(V2x64{1, 2}, V2x64{Poisoned<U8>(), 3});
+  EXPECT_POISONED(c[0]);
+  c = _mm_cmpneq_sd(V2x64{1, 2}, V2x64{3, 4});
+  EXPECT_NOT_POISONED(c[0]);
+  c = _mm_cmpneq_sd(V2x64{1, Poisoned<U8>()}, V2x64{2, Poisoned<U8>()});
+  EXPECT_NOT_POISONED(c[0]);
+  c = _mm_cmpneq_sd(V2x64{1, Poisoned<U8>()}, V2x64{1, Poisoned<U8>()});
+  EXPECT_NOT_POISONED(c[0]);
+}
+
+TEST(VectorCmpTest, builtin_ia32_ucomisdlt) {
+  U4 c;
+  c = __builtin_ia32_ucomisdlt(V2x64{Poisoned<U8>(), 1}, V2x64{2, 3});
+  EXPECT_POISONED(c);
+  c = __builtin_ia32_ucomisdlt(V2x64{1, 2}, V2x64{Poisoned<U8>(), 3});
+  EXPECT_POISONED(c);
+  c = __builtin_ia32_ucomisdlt(V2x64{1, 2}, V2x64{3, 4});
+  EXPECT_NOT_POISONED(c);
+  c = __builtin_ia32_ucomisdlt(V2x64{1, Poisoned<U8>()}, V2x64{2, Poisoned<U8>()});
+  EXPECT_NOT_POISONED(c);
+  c = __builtin_ia32_ucomisdlt(V2x64{1, Poisoned<U8>()}, V2x64{1, Poisoned<U8>()});
+  EXPECT_NOT_POISONED(c);
+}
+
+#endif // defined(__x86_64__) && defined(__clang__)
 
 TEST(MemorySanitizerOrigins, SetGet) {
   EXPECT_EQ(TrackingOrigins(), !!__msan_get_track_origins());
@@ -4208,7 +4263,7 @@ TEST(MemorySanitizerOrigins, StoreIntrinsic) {
   U4 origin = __LINE__;
   __msan_set_origin(&x, sizeof(x), origin);
   __msan_poison(&x, sizeof(x));
-  __builtin_ia32_storeups((float*)&y, x);
+  _mm_storeu_ps((float*)&y, x);
   EXPECT_POISONED_O(y, origin);
 }
 #endif

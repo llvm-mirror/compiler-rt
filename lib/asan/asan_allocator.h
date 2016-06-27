@@ -49,14 +49,17 @@ void GetAllocatorOptions(AllocatorOptions *options);
 class AsanChunkView {
  public:
   explicit AsanChunkView(AsanChunk *chunk) : chunk_(chunk) {}
-  bool IsValid();   // Checks if AsanChunkView points to a valid allocated
-                    // or quarantined chunk.
-  uptr Beg();       // First byte of user memory.
-  uptr End();       // Last byte of user memory.
-  uptr UsedSize();  // Size requested by the user.
+  bool IsValid();        // Checks if AsanChunkView points to a valid allocated
+                         // or quarantined chunk.
+  bool IsAllocated();    // Checks if the memory is currently allocated.
+  uptr Beg();            // First byte of user memory.
+  uptr End();            // Last byte of user memory.
+  uptr UsedSize();       // Size requested by the user.
   uptr AllocTid();
   uptr FreeTid();
   bool Eq(const AsanChunkView &c) const { return chunk_ == c.chunk_; }
+  u32 GetAllocStackId();
+  u32 GetFreeStackId();
   StackTrace GetAllocStack();
   StackTrace GetFreeStack();
   bool AddrIsInside(uptr addr, uptr access_size, sptr *offset) {

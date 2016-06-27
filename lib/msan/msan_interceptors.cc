@@ -742,65 +742,6 @@ INTERCEPTOR(int, __fxstatat64, int magic, int fd, char *pathname, void *buf,
 #define MSAN_MAYBE_INTERCEPT___FXSTATAT64
 #endif
 
-#if SANITIZER_FREEBSD
-INTERCEPTOR(int, stat, char *path, void *buf) {
-  ENSURE_MSAN_INITED();
-  int res = REAL(stat)(path, buf);
-  if (!res)
-    __msan_unpoison(buf, __sanitizer::struct_stat_sz);
-  return res;
-}
-# define MSAN_INTERCEPT_STAT INTERCEPT_FUNCTION(stat)
-#else
-INTERCEPTOR(int, __xstat, int magic, char *path, void *buf) {
-  ENSURE_MSAN_INITED();
-  int res = REAL(__xstat)(magic, path, buf);
-  if (!res)
-    __msan_unpoison(buf, __sanitizer::struct_stat_sz);
-  return res;
-}
-# define MSAN_INTERCEPT_STAT INTERCEPT_FUNCTION(__xstat)
-#endif
-
-#if !SANITIZER_FREEBSD
-INTERCEPTOR(int, __xstat64, int magic, char *path, void *buf) {
-  ENSURE_MSAN_INITED();
-  int res = REAL(__xstat64)(magic, path, buf);
-  if (!res)
-    __msan_unpoison(buf, __sanitizer::struct_stat64_sz);
-  return res;
-}
-#define MSAN_MAYBE_INTERCEPT___XSTAT64 INTERCEPT_FUNCTION(__xstat64)
-#else
-#define MSAN_MAYBE_INTERCEPT___XSTAT64
-#endif
-
-#if !SANITIZER_FREEBSD
-INTERCEPTOR(int, __lxstat, int magic, char *path, void *buf) {
-  ENSURE_MSAN_INITED();
-  int res = REAL(__lxstat)(magic, path, buf);
-  if (!res)
-    __msan_unpoison(buf, __sanitizer::struct_stat_sz);
-  return res;
-}
-#define MSAN_MAYBE_INTERCEPT___LXSTAT INTERCEPT_FUNCTION(__lxstat)
-#else
-#define MSAN_MAYBE_INTERCEPT___LXSTAT
-#endif
-
-#if !SANITIZER_FREEBSD
-INTERCEPTOR(int, __lxstat64, int magic, char *path, void *buf) {
-  ENSURE_MSAN_INITED();
-  int res = REAL(__lxstat64)(magic, path, buf);
-  if (!res)
-    __msan_unpoison(buf, __sanitizer::struct_stat64_sz);
-  return res;
-}
-#define MSAN_MAYBE_INTERCEPT___LXSTAT64 INTERCEPT_FUNCTION(__lxstat64)
-#else
-#define MSAN_MAYBE_INTERCEPT___LXSTAT64
-#endif
-
 INTERCEPTOR(int, pipe, int pipefd[2]) {
   if (msan_init_is_running)
     return REAL(pipe)(pipefd);
@@ -1327,7 +1268,16 @@ int OnExit() {
       VReport(1, "MemorySanitizer: failed to intercept '" #name "'\n"); \
   } while (0)
 
+#define MSAN_INTERCEPT_FUNC_VER(name, ver)                                    \
+  do {                                                                        \
+    if ((!INTERCEPT_FUNCTION_VER(name, ver) || !REAL(name)))                  \
+      VReport(                                                                \
+          1, "MemorySanitizer: failed to intercept '" #name "@@" #ver "'\n"); \
+  } while (0)
+
 #define COMMON_INTERCEPT_FUNCTION(name) MSAN_INTERCEPT_FUNC(name)
+#define COMMON_INTERCEPT_FUNCTION_VER(name, ver)                          \
+  MSAN_INTERCEPT_FUNC_VER(name, ver)
 #define COMMON_INTERCEPTOR_UNPOISON_PARAM(count)  \
   UnpoisonParam(count)
 #define COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, size) \
@@ -1573,8 +1523,13 @@ void InitializeInterceptors() {
   INTERCEPT_STRTO(wcstoul);
   INTERCEPT_STRTO(wcstoll);
   INTERCEPT_STRTO(wcstoull);
+#ifdef SANITIZER_NLDBL_VERSION
+  INTERCEPT_FUNCTION_VER(vswprintf, SANITIZER_NLDBL_VERSION);
+  INTERCEPT_FUNCTION_VER(swprintf, SANITIZER_NLDBL_VERSION);
+#else
   INTERCEPT_FUNCTION(vswprintf);
   INTERCEPT_FUNCTION(swprintf);
+#endif
   INTERCEPT_FUNCTION(strxfrm);
   INTERCEPT_FUNCTION(strxfrm_l);
   INTERCEPT_FUNCTION(strftime);
@@ -1596,12 +1551,8 @@ void InitializeInterceptors() {
   INTERCEPT_FUNCTION(fcvt);
   MSAN_MAYBE_INTERCEPT___FXSTAT;
   MSAN_INTERCEPT_FSTATAT;
-  MSAN_INTERCEPT_STAT;
-  MSAN_MAYBE_INTERCEPT___LXSTAT;
   MSAN_MAYBE_INTERCEPT___FXSTAT64;
   MSAN_MAYBE_INTERCEPT___FXSTATAT64;
-  MSAN_MAYBE_INTERCEPT___XSTAT64;
-  MSAN_MAYBE_INTERCEPT___LXSTAT64;
   INTERCEPT_FUNCTION(pipe);
   INTERCEPT_FUNCTION(pipe2);
   INTERCEPT_FUNCTION(socketpair);

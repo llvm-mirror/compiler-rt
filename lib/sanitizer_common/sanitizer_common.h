@@ -103,6 +103,8 @@ void NoHugePagesInRegion(uptr addr, uptr length);
 void DontDumpShadowMemory(uptr addr, uptr length);
 // Check if the built VMA size matches the runtime one.
 void CheckVMASize();
+void RunMallocHooks(const void *ptr, uptr size);
+void RunFreeHooks(const void *ptr);
 
 // InternalScopedBuffer can be used instead of large stack arrays to
 // keep frame size low.
@@ -298,6 +300,7 @@ void ReExec();
 char **GetArgv();
 void PrintCmdline();
 bool StackSizeIsUnlimited();
+uptr GetStackSizeLimitInBytes();
 void SetStackSizeLimitInBytes(uptr limit);
 bool AddressSpaceIsUnlimited();
 void SetAddressSpaceUnlimited();

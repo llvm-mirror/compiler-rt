@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "sanitizer_common.h"
+#include "sanitizer_allocator_interface.h"
 #include "sanitizer_allocator_internal.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_libc.h"
@@ -104,64 +105,6 @@ uptr stoptheworld_tracer_pid = 0;
 // Cached pid of parent process - if the parent process dies, we want to keep
 // writing to the same log file.
 uptr stoptheworld_tracer_ppid = 0;
-
-static const int kMaxNumOfInternalDieCallbacks = 5;
-static DieCallbackType InternalDieCallbacks[kMaxNumOfInternalDieCallbacks];
-
-bool AddDieCallback(DieCallbackType callback) {
-  for (int i = 0; i < kMaxNumOfInternalDieCallbacks; i++) {
-    if (InternalDieCallbacks[i] == nullptr) {
-      InternalDieCallbacks[i] = callback;
-      return true;
-    }
-  }
-  return false;
-}
-
-bool RemoveDieCallback(DieCallbackType callback) {
-  for (int i = 0; i < kMaxNumOfInternalDieCallbacks; i++) {
-    if (InternalDieCallbacks[i] == callback) {
-      internal_memmove(&InternalDieCallbacks[i], &InternalDieCallbacks[i + 1],
-                       sizeof(InternalDieCallbacks[0]) *
-                           (kMaxNumOfInternalDieCallbacks - i - 1));
-      InternalDieCallbacks[kMaxNumOfInternalDieCallbacks - 1] = nullptr;
-      return true;
-    }
-  }
-  return false;
-}
-
-static DieCallbackType UserDieCallback;
-void SetUserDieCallback(DieCallbackType callback) {
-  UserDieCallback = callback;
-}
-
-void NORETURN Die() {
-  if (UserDieCallback)
-    UserDieCallback();
-  for (int i = kMaxNumOfInternalDieCallbacks - 1; i >= 0; i--) {
-    if (InternalDieCallbacks[i])
-      InternalDieCallbacks[i]();
-  }
-  if (common_flags()->abort_on_error)
-    Abort();
-  internal__exit(common_flags()->exitcode);
-}
-
-static CheckFailedCallbackType CheckFailedCallback;
-void SetCheckFailedCallback(CheckFailedCallbackType callback) {
-  CheckFailedCallback = callback;
-}
-
-void NORETURN CheckFailed(const char *file, int line, const char *cond,
-                          u64 v1, u64 v2) {
-  if (CheckFailedCallback) {
-    CheckFailedCallback(file, line, cond, v1, v2);
-  }
-  Report("Sanitizer CHECK failed: %s:%d %s (%lld, %lld)\n", file, line, cond,
-                                                            v1, v2);
-  Die();
-}
 
 void NORETURN ReportMmapFailureAndDie(uptr size, const char *mem_type,
                                       const char *mmap_type, error_t err,
@@ -479,6 +422,44 @@ void PrintCmdline() {
   Printf("\n\n");
 }
 
+// Malloc hooks.
+static const int kMaxMallocFreeHooks = 5;
+struct MallocFreeHook {
+  void (*malloc_hook)(const void *, uptr);
+  void (*free_hook)(const void *);
+};
+
+static MallocFreeHook MFHooks[kMaxMallocFreeHooks];
+
+void RunMallocHooks(const void *ptr, uptr size) {
+  for (int i = 0; i < kMaxMallocFreeHooks; i++) {
+    auto hook = MFHooks[i].malloc_hook;
+    if (!hook) return;
+    hook(ptr, size);
+  }
+}
+
+void RunFreeHooks(const void *ptr) {
+  for (int i = 0; i < kMaxMallocFreeHooks; i++) {
+    auto hook = MFHooks[i].free_hook;
+    if (!hook) return;
+    hook(ptr);
+  }
+}
+
+static int InstallMallocFreeHooks(void (*malloc_hook)(const void *, uptr),
+                                  void (*free_hook)(const void *)) {
+  if (!malloc_hook || !free_hook) return 0;
+  for (int i = 0; i < kMaxMallocFreeHooks; i++) {
+    if (MFHooks[i].malloc_hook == nullptr) {
+      MFHooks[i].malloc_hook = malloc_hook;
+      MFHooks[i].free_hook = free_hook;
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
 } // namespace __sanitizer
 
 using namespace __sanitizer;  // NOLINT
@@ -488,6 +469,11 @@ void __sanitizer_set_report_path(const char *path) {
   report_file.SetReportPath(path);
 }
 
+void __sanitizer_set_report_fd(void *fd) {
+  report_file.fd = (fd_t)reinterpret_cast<uptr>(fd);
+  report_file.fd_pid = internal_getpid();
+}
+
 void __sanitizer_report_error_summary(const char *error_summary) {
   Printf("%s\n", error_summary);
 }
@@ -495,5 +481,12 @@ void __sanitizer_report_error_summary(const char *error_summary) {
 SANITIZER_INTERFACE_ATTRIBUTE
 void __sanitizer_set_death_callback(void (*callback)(void)) {
   SetUserDieCallback(callback);
+}
+
+SANITIZER_INTERFACE_ATTRIBUTE
+int __sanitizer_install_malloc_and_free_hooks(void (*malloc_hook)(const void *,
+                                                                  uptr),
+                                              void (*free_hook)(const void *)) {
+  return InstallMallocFreeHooks(malloc_hook, free_hook);
 }
 } // extern "C"
