@@ -29,9 +29,15 @@
 #if !SANITIZER_DEBUG
 
 #if SANITIZER_CAN_USE_ALLOCATOR64
+#if SANITIZER_WINDOWS
+static const uptr kAllocatorSpace = 0x10000000000ULL;
+static const uptr kAllocatorSize  =  0x10000000000ULL;  // 1T.
+static const u64 kAddressSpaceSize = 1ULL << 40;
+#else
 static const uptr kAllocatorSpace = 0x700000000000ULL;
 static const uptr kAllocatorSize  = 0x010000000000ULL;  // 1T.
 static const u64 kAddressSpaceSize = 1ULL << 47;
+#endif
 
 typedef SizeClassAllocator64<
   kAllocatorSpace, kAllocatorSize, 16, DefaultSizeClassMap> Allocator64;
@@ -335,7 +341,6 @@ TEST(SanitizerCommon, SizeClassAllocator64Overflow) {
 }
 #endif
 
-#if !defined(_WIN32)  // FIXME: This currently fails on Windows.
 TEST(SanitizerCommon, LargeMmapAllocator) {
   LargeMmapAllocator<> a;
   a.Init(/* may_return_null */ false);
@@ -411,7 +416,6 @@ TEST(SanitizerCommon, LargeMmapAllocator) {
   CHECK_NE(p, (char *)a.GetBlockBegin(p + page_size));
   a.Deallocate(&stats, p);
 }
-#endif
 
 template
 <class PrimaryAllocator, class SecondaryAllocator, class AllocatorCache>
@@ -483,13 +487,11 @@ TEST(SanitizerCommon, CombinedAllocator64Compact) {
 }
 #endif
 
-#if !defined(_WIN32)  // FIXME: This currently fails on Windows.
 TEST(SanitizerCommon, CombinedAllocator32Compact) {
   TestCombinedAllocator<Allocator32Compact,
       LargeMmapAllocator<>,
       SizeClassAllocatorLocalCache<Allocator32Compact> > ();
 }
-#endif
 
 template <class AllocatorCache>
 void TestSizeClassAllocatorLocalCache() {
@@ -605,6 +607,8 @@ TEST(Allocator, AllocatorCacheDeallocNewThread) {
   pthread_t t;
   PTHREAD_CREATE(&t, 0, DeallocNewThreadWorker, params);
   PTHREAD_JOIN(t, 0);
+
+  allocator.TestOnlyUnmap();
 }
 #endif
 

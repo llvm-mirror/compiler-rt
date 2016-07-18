@@ -2499,6 +2499,34 @@ INTERCEPTOR(SSIZE_T, recvmsg, int fd, struct __sanitizer_msghdr *msg,
 #endif
 
 #if SANITIZER_INTERCEPT_SENDMSG
+static void read_msghdr_control(void *ctx, void *control, uptr controllen) {
+  const unsigned kCmsgDataOffset =
+      RoundUpTo(sizeof(__sanitizer_cmsghdr), sizeof(uptr));
+
+  char *p = (char *)control;
+  char *const control_end = p + controllen;
+  while (true) {
+    if (p + sizeof(__sanitizer_cmsghdr) > control_end) break;
+    __sanitizer_cmsghdr *cmsg = (__sanitizer_cmsghdr *)p;
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, &cmsg->cmsg_len, sizeof(cmsg->cmsg_len));
+
+    if (p + RoundUpTo(cmsg->cmsg_len, sizeof(uptr)) > control_end) break;
+
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, &cmsg->cmsg_level,
+                                  sizeof(cmsg->cmsg_level));
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, &cmsg->cmsg_type,
+                                  sizeof(cmsg->cmsg_type));
+
+    if (cmsg->cmsg_len > kCmsgDataOffset) {
+      char *data = p + kCmsgDataOffset;
+      unsigned data_len = cmsg->cmsg_len - kCmsgDataOffset;
+      if (data_len > 0) COMMON_INTERCEPTOR_READ_RANGE(ctx, data, data_len);
+    }
+
+    p += RoundUpTo(cmsg->cmsg_len, sizeof(uptr));
+  }
+}
+
 static void read_msghdr(void *ctx, struct __sanitizer_msghdr *msg,
                         SSIZE_T maxlen) {
 #define R(f) \
@@ -2518,7 +2546,7 @@ static void read_msghdr(void *ctx, struct __sanitizer_msghdr *msg,
                                   sizeof(*msg->msg_iov) * msg->msg_iovlen);
   read_iovec(ctx, msg->msg_iov, msg->msg_iovlen, maxlen);
   if (msg->msg_control && msg->msg_controllen)
-    COMMON_INTERCEPTOR_READ_RANGE(ctx, msg->msg_control, msg->msg_controllen);
+    read_msghdr_control(ctx, msg->msg_control, msg->msg_controllen);
 }
 
 INTERCEPTOR(SSIZE_T, sendmsg, int fd, struct __sanitizer_msghdr *msg,
@@ -5667,6 +5695,35 @@ INTERCEPTOR(SSIZE_T, sendto, int fd, void *buf, SIZE_T len, int flags,
 #define INIT_SEND_SENDTO
 #endif
 
+#if SANITIZER_INTERCEPT_EVENTFD_READ_WRITE
+INTERCEPTOR(int, eventfd_read, int fd, u64 *value) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, eventfd_read, fd, value);
+  COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
+  int res = REAL(eventfd_read)(fd, value);
+  if (res == 0) {
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, value, sizeof(*value));
+    if (fd >= 0) COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd);
+  }
+  return res;
+}
+INTERCEPTOR(int, eventfd_write, int fd, u64 value) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, eventfd_write, fd, value);
+  if (fd >= 0) {
+    COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd);
+    COMMON_INTERCEPTOR_FD_RELEASE(ctx, fd);
+  }
+  int res = REAL(eventfd_write)(fd, value);
+  return res;
+}
+#define INIT_EVENTFD_READ_WRITE            \
+  COMMON_INTERCEPT_FUNCTION(eventfd_read); \
+  COMMON_INTERCEPT_FUNCTION(eventfd_write)
+#else
+#define INIT_EVENTFD_READ_WRITE
+#endif
+
 #if SANITIZER_INTERCEPT_STAT
 INTERCEPTOR(int, stat, const char *path, void *buf) {
   void *ctx;
@@ -5937,6 +5994,7 @@ static void InitializeCommonInterceptors() {
   INIT_RECV_RECVFROM;
   INIT_SEND_SENDTO;
   INIT_STAT;
+  INIT_EVENTFD_READ_WRITE;
   INIT___XSTAT;
   INIT___XSTAT64;
   INIT___LXSTAT;
