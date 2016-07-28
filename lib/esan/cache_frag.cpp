@@ -28,10 +28,12 @@ struct StructInfo {
   const char *StructName;
   u32 Size;
   u32 NumFields;
-  u32 *FieldOffsets;
-  u32 *FieldSize;
+  u32 *FieldOffset;           // auxiliary struct field info.
+  u32 *FieldSize;             // auxiliary struct field info.
+  const char **FieldTypeName; // auxiliary struct field info.
   u64 *FieldCounters;
-  const char **FieldTypeNames;
+  u64 *ArrayCounter;
+  bool hasAuxFieldInfo() { return FieldOffset != nullptr; }
 };
 
 // This should be kept consistent with LLVM's EfficiencySanitizer CacheFragInfo.
@@ -96,12 +98,19 @@ static void reportStructCounter(StructHashMap::Handle &Handle) {
   end = strchr(start, '#');
   CHECK(end != nullptr);
   Report("  %s %.*s\n", type, end - start, start);
-  Report("   size = %u, count = %llu, ratio = %llu\n", Struct->Size,
-         Handle->Count, Handle->Ratio);
-  for (u32 i = 0; i < Struct->NumFields; ++i) {
-    Report("   #%2u: offset = %u,\t size = %u,\t count = %llu,\t type = %.*s\n",
-           i, Struct->FieldOffsets[i], Struct->FieldSize[i],
-           Struct->FieldCounters[i], TypePrintLimit, Struct->FieldTypeNames[i]);
+  Report("   size = %u, count = %llu, ratio = %llu, array access = %llu\n",
+         Struct->Size, Handle->Count, Handle->Ratio, *Struct->ArrayCounter);
+  if (Struct->hasAuxFieldInfo()) {
+    for (u32 i = 0; i < Struct->NumFields; ++i) {
+      Report("   #%2u: offset = %u,\t size = %u,"
+             "\t count = %llu,\t type = %.*s\n",
+             i, Struct->FieldOffset[i], Struct->FieldSize[i],
+             Struct->FieldCounters[i], TypePrintLimit, Struct->FieldTypeName[i]);
+    }
+  } else {
+    for (u32 i = 0; i < Struct->NumFields; ++i) {
+      Report("   #%2u: count = %llu\n", i, Struct->FieldCounters[i]);
+    }
   }
 }
 
@@ -188,6 +197,12 @@ void initializeCacheFrag() {
 int finalizeCacheFrag() {
   VPrintf(2, "in esan::%s\n", __FUNCTION__);
   return 0;
+}
+
+void reportCacheFrag() {
+  VPrintf(2, "in esan::%s\n", __FUNCTION__);
+  // FIXME: Not yet implemented.  We need to iterate over all of the
+  // compilation unit data.
 }
 
 } // namespace __esan

@@ -66,6 +66,7 @@ static inline uhwptr *GetCanonicFrame(uptr bp,
 
 void BufferedStackTrace::FastUnwindStack(uptr pc, uptr bp, uptr stack_top,
                                          uptr stack_bottom, u32 max_depth) {
+  const uptr kPageSize = GetPageSizeCached();
   CHECK_GE(max_depth, 2);
   trace_buffer[0] = pc;
   size = 1;
@@ -92,6 +93,11 @@ void BufferedStackTrace::FastUnwindStack(uptr pc, uptr bp, uptr stack_top,
 #else
     uhwptr pc1 = frame[1];
 #endif
+    // Let's assume that any pointer in the 0th page (i.e. <0x1000 on i386 and
+    // x86_64) is invalid and stop unwinding here.  If we're adding support for
+    // a platform where this isn't true, we need to reconsider this check.
+    if (pc1 < kPageSize)
+      break;
     if (pc1 != pc) {
       trace_buffer[size++] = (uptr) pc1;
     }
