@@ -37,6 +37,12 @@ int __asan_should_detect_stack_use_after_return() {
   return __asan_option_detect_stack_use_after_return;
 }
 
+SANITIZER_INTERFACE_ATTRIBUTE
+int __asan_should_detect_stack_use_after_scope() {
+  __asan_init();
+  return __asan_option_detect_stack_use_after_scope;
+}
+
 // -------------------- A workaround for the abscence of weak symbols ----- {{{
 // We don't have a direct equivalent of weak symbols when using MSVC, but we can
 // use the /alternatename directive to tell the linker to default a specific
@@ -71,9 +77,17 @@ INTERCEPTOR_WINAPI(void, RaiseException, void *a, void *b, void *c, void *d) {
   REAL(RaiseException)(a, b, c, d);
 }
 
-// TODO(wwchrome): Win64 has no _except_handler3/4.
-// Need to implement _C_specific_handler instead.
-#ifndef _WIN64
+
+#ifdef _WIN64
+
+INTERCEPTOR_WINAPI(int, __C_specific_handler, void *a, void *b, void *c, void *d) {  // NOLINT
+  CHECK(REAL(__C_specific_handler));
+  __asan_handle_no_return();
+  return REAL(__C_specific_handler)(a, b, c, d);
+}
+
+#else
+
 INTERCEPTOR(int, _except_handler3, void *a, void *b, void *c, void *d) {
   CHECK(REAL(_except_handler3));
   __asan_handle_no_return();
@@ -154,8 +168,9 @@ void InitializePlatformInterceptors() {
   ASAN_INTERCEPT_FUNC(CreateThread);
   ASAN_INTERCEPT_FUNC(RaiseException);
 
-// TODO(wwchrome): Win64 uses _C_specific_handler instead.
-#ifndef _WIN64
+#ifdef _WIN64
+  ASAN_INTERCEPT_FUNC(__C_specific_handler);
+#else
   ASAN_INTERCEPT_FUNC(_except_handler3);
   ASAN_INTERCEPT_FUNC(_except_handler4);
 #endif
@@ -220,8 +235,7 @@ void AsanOnDeadlySignal(int, void *siginfo, void *context) {
 // Exception handler for dealing with shadow memory.
 static LONG CALLBACK
 ShadowExceptionHandler(PEXCEPTION_POINTERS exception_pointers) {
-  static uptr page_size = GetPageSizeCached();
-  static uptr alloc_granularity = GetMmapGranularity();
+  uptr page_size = GetPageSizeCached();
   // Only handle access violations.
   if (exception_pointers->ExceptionRecord->ExceptionCode !=
       EXCEPTION_ACCESS_VIOLATION) {
