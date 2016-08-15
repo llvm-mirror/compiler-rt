@@ -585,7 +585,7 @@ INTERCEPTOR(char*, __strdup, const char *s) {
 INTERCEPTOR(SIZE_T, wcslen, const wchar_t *s) {
   void *ctx;
   ASAN_INTERCEPTOR_ENTER(ctx, wcslen);
-  SIZE_T length = REAL(wcslen)(s);
+  SIZE_T length = internal_wcslen(s);
   if (!asan_init_is_running) {
     ENSURE_ASAN_INITED();
     ASAN_READ_RANGE(ctx, s, (length + 1) * sizeof(wchar_t));
@@ -725,11 +725,13 @@ void InitializeAsanInterceptors() {
   InitializeCommonInterceptors();
 
   // Intercept mem* functions.
-  ASAN_INTERCEPT_FUNC(memcpy);
+  ASAN_INTERCEPT_FUNC(memmove);
   ASAN_INTERCEPT_FUNC(memset);
   if (PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE) {
     // In asan, REAL(memmove) is not used, but it is used in msan.
-    ASAN_INTERCEPT_FUNC(memmove);
+    ASAN_INTERCEPT_FUNC(memcpy);
+  } else {
+    ASSIGN_REAL(memcpy, memmove);
   }
   CHECK(REAL(memcpy));
 

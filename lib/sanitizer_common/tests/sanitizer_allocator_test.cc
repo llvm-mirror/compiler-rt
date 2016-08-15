@@ -335,7 +335,9 @@ void FailInAssertionOnOOM() {
   a.TestOnlyUnmap();
 }
 
-#if SANITIZER_CAN_USE_ALLOCATOR64
+// Don't test OOM conditions on Win64 because it causes other tests on the same
+// machine to OOM.
+#if SANITIZER_CAN_USE_ALLOCATOR64 && !SANITIZER_WINDOWS64
 TEST(SanitizerCommon, SizeClassAllocator64Overflow) {
   EXPECT_DEATH(FailInAssertionOnOOM<Allocator64>(), "Out of memory");
 }
@@ -390,8 +392,10 @@ TEST(SanitizerCommon, LargeMmapAllocator) {
   }
   CHECK_EQ(a.TotalMemoryUsed(), 0);
 
-  // Test alignments.
-  uptr max_alignment = SANITIZER_WORDSIZE == 64 ? (1 << 28) : (1 << 24);
+  // Test alignments. Test with 512MB alignment on x64 non-Windows machines.
+  // Windows doesn't overcommit, and many machines do not have 51.2GB of swap.
+  uptr max_alignment =
+      (SANITIZER_WORDSIZE == 64 && !SANITIZER_WINDOWS) ? (1 << 28) : (1 << 24);
   for (uptr alignment = 8; alignment <= max_alignment; alignment *= 2) {
     const uptr kNumAlignedAllocs = 100;
     for (uptr i = 0; i < kNumAlignedAllocs; i++) {
@@ -777,11 +781,13 @@ TEST(SanitizerCommon, LargeMmapAllocatorBlockBegin) {
 }
 
 
-#if SANITIZER_CAN_USE_ALLOCATOR64
+// Don't test OOM conditions on Win64 because it causes other tests on the same
+// machine to OOM.
+#if SANITIZER_CAN_USE_ALLOCATOR64 && !SANITIZER_WINDOWS64
 // Regression test for out-of-memory condition in PopulateFreeList().
 TEST(SanitizerCommon, SizeClassAllocator64PopulateFreeListOOM) {
   // In a world where regions are small and chunks are huge...
-  typedef SizeClassMap<63, 128, 16> SpecialSizeClassMap;
+  typedef SizeClassMap<63, 126, 16> SpecialSizeClassMap;
   typedef SizeClassAllocator64<kAllocatorSpace, kAllocatorSize, 0,
                                SpecialSizeClassMap> SpecialAllocator64;
   const uptr kRegionSize =

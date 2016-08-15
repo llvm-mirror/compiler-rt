@@ -167,6 +167,21 @@ static uptr RoundUpTo(uptr size, uptr boundary) {
 // FIXME: internal_str* and internal_mem* functions should be moved from the
 // ASan sources into interception/.
 
+static size_t _strlen(const char *str) {
+  const char* p = str;
+  while (*p != '\0') ++p;
+  return p - str;
+}
+
+static char* _strchr(char* str, char c) {
+  while (*str) {
+    if (*str == c)
+      return str;
+    ++str;
+  }
+  return nullptr;
+}
+
 static void _memset(void *p, int value, size_t sz) {
   for (size_t i = 0; i < sz; ++i)
     ((char*)p)[i] = (char)value;
@@ -227,10 +242,6 @@ static bool FunctionHasPadding(uptr address, uptr size) {
 
 static void WritePadding(uptr from, uptr size) {
   _memset((void*)from, 0xCC, (size_t)size);
-}
-
-static void CopyInstructions(uptr from, uptr to, uptr size) {
-  _memcpy((void*)from, (void*)to, (size_t)size);
 }
 
 static void WriteJumpInstruction(uptr from, uptr target) {
@@ -294,7 +305,7 @@ struct TrampolineMemoryRegion {
   uptr max_size;
 };
 
-static const uptr kTrampolineScanLimitRange = 1 << 30;  // 1 gig
+static const uptr kTrampolineScanLimitRange = 1 << 31;  // 2 gig
 static const int kMaxTrampolineRegion = 1024;
 static TrampolineMemoryRegion TrampolineRegions[kMaxTrampolineRegion];
 
@@ -384,7 +395,12 @@ static uptr AllocateMemoryForTrampoline(uptr image_address, size_t size) {
 }
 
 // Returns 0 on error.
-static size_t GetInstructionSize(uptr address) {
+static size_t GetInstructionSize(uptr address, size_t* rel_offset = nullptr) {
+  switch (*(u64*)address) {
+    case 0x90909090909006EB:  // stub: jmp over 6 x nop.
+      return 8;
+  }
+
   switch (*(u8*)address) {
     case 0x90:  // 90 : nop
       return 1;
@@ -405,7 +421,6 @@ static size_t GetInstructionSize(uptr address) {
 
     case 0xb8:  // b8 XX XX XX XX : mov eax, XX XX XX XX
     case 0xB9:  // b9 XX XX XX XX : mov ecx, XX XX XX XX
-    case 0xA1:  // A1 XX XX XX XX : mov eax, dword ptr ds:[XXXXXXXX]
       return 5;
 
     // Cannot overwrite control-instruction. Return 0 to indicate failure.
@@ -448,6 +463,12 @@ static size_t GetInstructionSize(uptr address) {
   }
 
 #if SANITIZER_WINDOWS64
+  switch (*(u8*)address) {
+    case 0xA1:  // A1 XX XX XX XX XX XX XX XX :
+                //   movabs eax, dword ptr ds:[XXXXXXXX]
+      return 8;
+  }
+
   switch (*(u16*)address) {
     case 0x5040:  // push rax
     case 0x5140:  // push rcx
@@ -495,11 +516,20 @@ static size_t GetInstructionSize(uptr address) {
                       //   mov rax, QWORD PTR [rip + XXXXXXXX]
     case 0x25ff48:    // 48 ff 25 XX XX XX XX :
                       //   rex.W jmp QWORD PTR [rip + XXXXXXXX]
+
+      // Instructions having offset relative to 'rip' need offset adjustment.
+      if (rel_offset)
+        *rel_offset = 3;
       return 7;
+
+    case 0x2444c7:    // C7 44 24 XX YY YY YY YY
+                      //   mov dword ptr [rsp + XX], YYYYYYYY
+      return 8;
   }
 
   switch (*(u32*)(address)) {
-    case 0x24448b48:  // 48 8b 44 24 XX : mov rax, qword ptr [rsp + XX]
+    case 0x24448b48:  // 48 8b 44 24 XX : mov rax, QWORD ptr [rsp + XX]
+    case 0x246c8948:  // 48 89 6C 24 XX : mov QWORD ptr [rsp + XX], rbp
     case 0x245c8948:  // 48 89 5c 24 XX : mov QWORD PTR [rsp + XX], rbx
     case 0x24748948:  // 48 89 74 24 XX : mov QWORD PTR [rsp + XX], rsi
       return 5;
@@ -507,6 +537,10 @@ static size_t GetInstructionSize(uptr address) {
 
 #else
 
+  switch (*(u8*)address) {
+    case 0xA1:  // A1 XX XX XX XX :  mov eax, dword ptr ds:[XXXXXXXX]
+      return 5;
+  }
   switch (*(u16*)address) {
     case 0x458B:  // 8B 45 XX : mov eax, dword ptr [ebp + XX]
     case 0x5D8B:  // 8B 5D XX : mov ebx, dword ptr [ebp + XX]
@@ -559,6 +593,28 @@ static size_t RoundUpToInstrBoundary(size_t size, uptr address) {
   }
   return cursor;
 }
+
+static bool CopyInstructions(uptr to, uptr from, size_t size) {
+  size_t cursor = 0;
+  while (cursor != size) {
+    size_t rel_offset = 0;
+    size_t instruction_size = GetInstructionSize(from + cursor, &rel_offset);
+    _memcpy((void*)(to + cursor), (void*)(from + cursor),
+            (size_t)instruction_size);
+    if (rel_offset) {
+      uptr delta = to - from;
+      uptr relocated_offset = *(u32*)(to + cursor + rel_offset) - delta;
+#if SANITIZER_WINDOWS64
+      if (relocated_offset + 0x80000000U >= 0xFFFFFFFFU)
+        return false;
+#endif
+      *(u32*)(to + cursor + rel_offset) = relocated_offset;
+    }
+    cursor += instruction_size;
+  }
+  return true;
+}
+
 
 #if !SANITIZER_WINDOWS64
 bool OverrideFunctionWithDetour(
@@ -650,7 +706,8 @@ bool OverrideFunctionWithHotPatch(
     uptr trampoline = AllocateMemoryForTrampoline(old_func, trampoline_length);
     if (!trampoline)
       return false;
-    CopyInstructions(trampoline, old_func, instruction_size);
+    if (!CopyInstructions(trampoline, old_func, instruction_size))
+      return false;
     WriteDirectBranch(trampoline + instruction_size,
                       old_func + instruction_size);
     *orig_old_func = trampoline;
@@ -699,7 +756,8 @@ bool OverrideFunctionWithTrampoline(
     uptr trampoline = AllocateMemoryForTrampoline(old_func, trampoline_length);
     if (!trampoline)
       return false;
-    CopyInstructions(trampoline, old_func, instructions_length);
+    if (!CopyInstructions(trampoline, old_func, instructions_length))
+      return false;
     WriteDirectBranch(trampoline + instructions_length,
                       old_func + instructions_length);
     *orig_old_func = trampoline;
@@ -814,6 +872,32 @@ uptr InternalGetProcAddress(void *module, const char *func_name) {
     if (!strcmp(func_name, name)) {
       DWORD index = ordinals[i];
       RVAPtr<char> func(module, functions[index]);
+
+      // Handle forwarded functions.
+      DWORD offset = functions[index];
+      if (offset >= export_directory->VirtualAddress &&
+          offset < export_directory->VirtualAddress + export_directory->Size) {
+        // An entry for a forwarded function is a string with the following
+        // format: "<module> . <function_name>" that is stored into the
+        // exported directory.
+        char function_name[256];
+        size_t funtion_name_length = _strlen(func);
+        if (funtion_name_length >= sizeof(function_name) - 1)
+          InterceptionFailed();
+
+        _memcpy(function_name, func, funtion_name_length);
+        function_name[funtion_name_length] = '\0';
+        char* separator = _strchr(function_name, '.');
+        if (!separator)
+          InterceptionFailed();
+        *separator = '\0';
+
+        void* redirected_module = GetModuleHandleA(function_name);
+        if (!redirected_module)
+          InterceptionFailed();
+        return InternalGetProcAddress(redirected_module, separator + 1);
+      }
+
       return (uptr)(char *)func;
     }
   }
