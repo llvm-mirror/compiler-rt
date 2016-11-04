@@ -4,11 +4,20 @@ set(XRAY_SOURCES
   xray_init.cc
 	xray_interface.cc
 	xray_flags.cc
+  xray_inmemory_log.cc
 )
 
 set(x86_64_SOURCES
-		xray_trampoline_x86.S
+		xray_x86_64.cc
+		xray_trampoline_x86_64.S
 		${XRAY_SOURCES})
+
+set(arm_SOURCES
+		xray_arm.cc
+		xray_trampoline_arm.S
+		${XRAY_SOURCES})
+
+set(armhf_SOURCES ${arm_SOURCES})
 
 include_directories(..)
 include_directories(../../include)
@@ -18,11 +27,12 @@ set(XRAY_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 set(XRAY_COMMON_DEFINITIONS XRAY_HAS_EXCEPTIONS=1)
 
 add_compiler_rt_object_libraries(RTXray
-		ARCHS ${XRAY_SUPPORTED_ARCH}
-		SOURCES ${XRAY_SOURCES} CFLAGS ${XRAY_CFLAGS}
-		DEFS ${XRAY_COMMON_DEFINITIONS})
+    ARCHS ${XRAY_SUPPORTED_ARCH}
+    SOURCES ${XRAY_SOURCES} CFLAGS ${XRAY_CFLAGS}
+    DEFS ${XRAY_COMMON_DEFINITIONS})
 
-add_custom_target(xray)
+add_compiler_rt_component(xray)
+
 set(XRAY_COMMON_RUNTIME_OBJECT_LIBS
 		RTSanitizerCommon
 		RTSanitizerCommonLibc)
@@ -39,9 +49,3 @@ foreach (arch ${XRAY_SUPPORTED_ARCH})
 						PARENT_TARGET xray)
 		endif ()
 endforeach()
-
-add_dependencies(compiler-rt xray)
-
-# if(COMPILER_RT_INCLUDE_TESTS)
-#   add_subdirectory(tests)
-# endif()

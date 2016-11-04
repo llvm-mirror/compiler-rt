@@ -72,10 +72,21 @@ extern "C" {
 #include <unistd.h>
 #include <util.h>
 
-// from <crt_externs.h>, but we don't have that file on iOS
+// From <crt_externs.h>, but we don't have that file on iOS.
 extern "C" {
   extern char ***_NSGetArgv(void);
   extern char ***_NSGetEnviron(void);
+}
+
+// From <mach/mach_vm.h>, but we don't have that file on iOS.
+extern "C" {
+  extern kern_return_t mach_vm_region_recurse(
+    vm_map_t target_task,
+    mach_vm_address_t *address,
+    mach_vm_size_t *size,
+    natural_t *nesting_depth,
+    vm_region_recurse_info_t info,
+    mach_msg_type_number_t *infoCnt);
 }
 
 namespace __sanitizer {
@@ -362,7 +373,7 @@ void InitTlsSize() {
 
 void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
                           uptr *tls_addr, uptr *tls_size) {
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
   uptr stack_top, stack_bottom;
   GetThreadStackTopAndBottom(main, &stack_top, &stack_bottom);
   *stk_addr = stack_bottom;
@@ -387,6 +398,8 @@ bool IsHandledDeadlySignal(int signum) {
   if ((SANITIZER_WATCHOS || SANITIZER_TVOS) && !(SANITIZER_IOSSIM))
     // Handling fatal signals on watchOS and tvOS devices is disallowed.
     return false;
+  if (common_flags()->handle_abort && signum == SIGABRT)
+    return true;
   return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
 }
 
@@ -458,12 +471,12 @@ void *internal_start_thread(void(*func)(void *arg), void *arg) {
 
 void internal_join_thread(void *th) { pthread_join((pthread_t)th, 0); }
 
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
 static BlockingMutex syslog_lock(LINKER_INITIALIZED);
 #endif
 
 void WriteOneLineToSyslog(const char *s) {
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
   syslog_lock.CheckLocked();
   asl_log(nullptr, nullptr, ASL_LEVEL_ERR, "%s", s);
 #endif
@@ -476,7 +489,7 @@ void LogMessageOnPrintf(const char *str) {
 }
 
 void LogFullErrorReport(const char *buffer) {
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
   // Log with os_trace. This will make it into the crash log.
 #if SANITIZER_OS_TRACE
   if (GetMacosVersion() >= MACOS_VERSION_YOSEMITE) {
@@ -549,7 +562,7 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 # endif
 }
 
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
 static const char kDyldInsertLibraries[] = "DYLD_INSERT_LIBRARIES";
 LowLevelAllocator allocator_for_env;
 
@@ -738,6 +751,43 @@ void MaybeReexec() {
 
 char **GetArgv() {
   return *_NSGetArgv();
+}
+
+uptr FindAvailableMemoryRange(uptr shadow_size,
+                              uptr alignment,
+                              uptr left_padding) {
+  typedef vm_region_submap_short_info_data_64_t RegionInfo;
+  enum { kRegionInfoSize = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64 };
+  // Start searching for available memory region past PAGEZERO, which is
+  // 4KB on 32-bit and 4GB on 64-bit.
+  mach_vm_address_t start_address =
+    (SANITIZER_WORDSIZE == 32) ? 0x000000001000 : 0x000100000000;
+
+  mach_vm_address_t address = start_address;
+  mach_vm_address_t free_begin = start_address;
+  kern_return_t kr = KERN_SUCCESS;
+  while (kr == KERN_SUCCESS) {
+    mach_vm_size_t vmsize = 0;
+    natural_t depth = 0;
+    RegionInfo vminfo;
+    mach_msg_type_number_t count = kRegionInfoSize;
+    kr = mach_vm_region_recurse(mach_task_self(), &address, &vmsize, &depth,
+                                (vm_region_info_t)&vminfo, &count);
+    if (free_begin != address) {
+      // We found a free region [free_begin..address-1].
+      uptr shadow_address = RoundUpTo((uptr)free_begin + left_padding,
+                                      alignment);
+      if (shadow_address + shadow_size < (uptr)address) {
+        return shadow_address;
+      }
+    }
+    // Move to the next region.
+    address += vmsize;
+    free_begin = address;
+  }
+
+  // We looked at all free regions and could not find one large enough.
+  return 0;
 }
 
 // FIXME implement on this platform.

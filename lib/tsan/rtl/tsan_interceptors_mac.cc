@@ -119,24 +119,23 @@ OSATOMIC_INTERCEPTORS_CAS(OSAtomicCompareAndSwap32, __tsan_atomic32, a32,
 OSATOMIC_INTERCEPTORS_CAS(OSAtomicCompareAndSwap64, __tsan_atomic64, a64,
                           int64_t)
 
-#define OSATOMIC_INTERCEPTOR_BITOP(f, op, m, mo)              \
+#define OSATOMIC_INTERCEPTOR_BITOP(f, op, clear, mo)          \
   TSAN_INTERCEPTOR(bool, f, uint32_t n, volatile void *ptr) { \
     SCOPED_TSAN_INTERCEPTOR(f, n, ptr);                       \
     char *byte_ptr = ((char *)ptr) + (n >> 3);                \
-    char bit_index = n & 7;                                   \
-    char mask = m;                                            \
+    char bit = 0x80u >> (n & 7);                              \
+    char mask = clear ? ~bit : bit;                           \
     char orig_byte = op((a8 *)byte_ptr, mask, mo);            \
-    return orig_byte & mask;                                  \
+    return orig_byte & bit;                                   \
   }
 
-#define OSATOMIC_INTERCEPTORS_BITOP(f, op, m)                     \
-  OSATOMIC_INTERCEPTOR_BITOP(f, op, m, kMacOrderNonBarrier)       \
-  OSATOMIC_INTERCEPTOR_BITOP(f##Barrier, op, m, kMacOrderBarrier)
+#define OSATOMIC_INTERCEPTORS_BITOP(f, op, clear)               \
+  OSATOMIC_INTERCEPTOR_BITOP(f, op, clear, kMacOrderNonBarrier) \
+  OSATOMIC_INTERCEPTOR_BITOP(f##Barrier, op, clear, kMacOrderBarrier)
 
-OSATOMIC_INTERCEPTORS_BITOP(OSAtomicTestAndSet, __tsan_atomic8_fetch_or,
-                            0x80u >> bit_index)
+OSATOMIC_INTERCEPTORS_BITOP(OSAtomicTestAndSet, __tsan_atomic8_fetch_or, false)
 OSATOMIC_INTERCEPTORS_BITOP(OSAtomicTestAndClear, __tsan_atomic8_fetch_and,
-                            ~(0x80u >> bit_index))
+                            true)
 
 TSAN_INTERCEPTOR(void, OSAtomicEnqueue, OSQueueHead *list, void *item,
                  size_t offset) {
@@ -326,6 +325,33 @@ STDCXX_INTERCEPTOR(void, _ZNSt3__119__shared_weak_count16__release_sharedEv,
       o->on_zero_shared_weak();
     }
   }
+}
+
+namespace {
+struct call_once_callback_args {
+  void (*orig_func)(void *arg);
+  void *orig_arg;
+  void *flag;
+};
+
+void call_once_callback_wrapper(void *arg) {
+  call_once_callback_args *new_args = (call_once_callback_args *)arg;
+  new_args->orig_func(new_args->orig_arg);
+  __tsan_release(new_args->flag);
+}
+}  // namespace
+
+// This adds a libc++ interceptor for:
+//     void __call_once(volatile unsigned long&, void*, void(*)(void*));
+// C++11 call_once is implemented via an internal function __call_once which is
+// inside libc++.dylib, and the atomic release store inside it is thus
+// TSan-invisible. To avoid false positives, this interceptor wraps the callback
+// function and performs an explicit Release after the user code has run.
+STDCXX_INTERCEPTOR(void, _ZNSt3__111__call_onceERVmPvPFvS2_E, void *flag,
+                   void *arg, void (*func)(void *arg)) {
+  call_once_callback_args new_args = {func, arg, flag};
+  REAL(_ZNSt3__111__call_onceERVmPvPFvS2_E)(flag, &new_args,
+                                            call_once_callback_wrapper);
 }
 
 }  // namespace __tsan

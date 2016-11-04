@@ -1,12 +1,23 @@
+include(CMakeCheckCompilerFlagCommonPatterns)
 
 # This function takes an OS and a list of architectures and identifies the
 # subset of the architectures list that the installed toolchain can target.
 function(try_compile_only output)
+  cmake_parse_arguments(ARG "" "" "SOURCE;FLAGS" ${ARGN})
+  if(NOT ARG_SOURCE)
+    set(ARG_SOURCE "int foo(int x, int y) { return x + y; }\n")
+  endif()
   set(SIMPLE_C ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/src.c)
-  file(WRITE ${SIMPLE_C} "int foo(int x, int y) { return x + y; }\n")
+  file(WRITE ${SIMPLE_C} "${ARG_SOURCE}\n")
   string(REGEX MATCHALL "<[A-Za-z0-9_]*>" substitutions
          ${CMAKE_C_COMPILE_OBJECT})
-  string(REPLACE ";" " " extra_flags "${ARGN}")
+
+  set(TRY_COMPILE_FLAGS "${ARG_FLAGS}")
+  if(CMAKE_C_COMPILER_ID MATCHES Clang AND CMAKE_C_COMPILER_TARGET)
+    list(APPEND TRY_COMPILE_FLAGS "-target ${CMAKE_C_COMPILER_TARGET}")
+  endif()
+
+  string(REPLACE ";" " " extra_flags "${TRY_COMPILE_FLAGS}")
 
   set(test_compile_command "${CMAKE_C_COMPILE_OBJECT}")
   foreach(substitution ${substitutions})
@@ -37,7 +48,19 @@ function(try_compile_only output)
     OUTPUT_VARIABLE TEST_OUTPUT
     ERROR_VARIABLE TEST_ERROR
   )
-  if(result EQUAL 0)
+
+  CHECK_COMPILER_FLAG_COMMON_PATTERNS(_CheckCCompilerFlag_COMMON_PATTERNS)
+  set(ERRORS_FOUND OFF)
+  foreach(var ${_CheckCCompilerFlag_COMMON_PATTERNS})
+    if("${var}" STREQUAL "FAIL_REGEX")
+      continue()
+    endif()
+    if("${TEST_ERROR}" MATCHES "${var}" OR "${TEST_OUTPUT}" MATCHES "${var}")
+      set(ERRORS_FOUND ON)
+    endif()
+  endforeach()
+
+  if(result EQUAL 0 AND NOT ERRORS_FOUND)
     set(${output} True PARENT_SCOPE)
   else()
     file(APPEND ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/CMakeError.log
@@ -51,7 +74,20 @@ endfunction()
 function(builtin_check_c_compiler_flag flag output)
   if(NOT DEFINED ${output})
     message(STATUS "Performing Test ${output}")
-    try_compile_only(result ${flag})
+    try_compile_only(result FLAGS ${flag})
+    set(${output} ${result} CACHE INTERNAL "Compiler supports ${flag}")
+    if(${result})
+      message(STATUS "Performing Test ${output} - Success")
+    else()
+      message(STATUS "Performing Test ${output} - Failed")
+    endif()
+  endif()
+endfunction()
+
+function(builtin_check_c_compiler_source output source)
+  if(NOT DEFINED ${output})
+    message(STATUS "Performing Test ${output}")
+    try_compile_only(result SOURCE ${source})
     set(${output} ${result} CACHE INTERNAL "Compiler supports ${flag}")
     if(${result})
       message(STATUS "Performing Test ${output} - Success")

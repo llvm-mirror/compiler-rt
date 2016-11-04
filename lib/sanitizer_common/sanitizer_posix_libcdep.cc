@@ -44,6 +44,8 @@
 #define MAP_NORESERVE 0
 #endif
 
+typedef void (*sa_sigaction_t)(int, siginfo_t *, void *);
+
 namespace __sanitizer {
 
 u32 GetUid() {
@@ -54,7 +56,7 @@ uptr GetThreadSelf() {
   return (uptr)pthread_self();
 }
 
-void FlushUnneededShadowMemory(uptr addr, uptr size) {
+void ReleaseMemoryToOS(uptr addr, uptr size) {
   madvise((void*)addr, size, MADV_DONTNEED);
 }
 
@@ -126,11 +128,21 @@ void SleepForMillis(int millis) {
 }
 
 void Abort() {
+#if !SANITIZER_GO
+  // If we are handling SIGABRT, unhandle it first.
+  if (IsHandledDeadlySignal(SIGABRT)) {
+    struct sigaction sigact;
+    internal_memset(&sigact, 0, sizeof(sigact));
+    sigact.sa_sigaction = (sa_sigaction_t)SIG_DFL;
+    internal_sigaction(SIGABRT, &sigact, nullptr);
+  }
+#endif
+
   abort();
 }
 
 int Atexit(void (*function)(void)) {
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
   return atexit(function);
 #else
   return 0;
@@ -141,7 +153,7 @@ bool SupportsColoredOutput(fd_t fd) {
   return isatty(fd) != 0;
 }
 
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
 // TODO(glider): different tools may require different altstack size.
 static const uptr kAltStackSize = SIGSTKSZ * 4;  // SIGSTKSZ is not enough.
 
@@ -170,7 +182,6 @@ void UnsetAlternateSignalStack() {
   UnmapOrDie(oldstack.ss_sp, oldstack.ss_size);
 }
 
-typedef void (*sa_sigaction_t)(int, siginfo_t *, void *);
 static void MaybeInstallSigaction(int signum,
                                   SignalHandlerType handler) {
   if (!IsHandledDeadlySignal(signum))
