@@ -99,7 +99,7 @@ const int FUTEX_WAKE = 1;
 # define SANITIZER_LINUX_USES_64BIT_SYSCALLS 0
 #endif
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || SANITIZER_MIPS64
 extern "C" {
 extern void internal_sigreturn();
 }
@@ -671,7 +671,7 @@ int internal_sigaction_norestorer(int signum, const void *act, void *oldact) {
 // Invokes sigaction via a raw syscall with a restorer, but does not support
 // all platforms yet.
 // We disable for Go simply because we have not yet added to buildgo.sh.
-#if defined(__x86_64__) && !SANITIZER_GO
+#if (defined(__x86_64__) || SANITIZER_MIPS64) && !SANITIZER_GO
 int internal_sigaction_syscall(int signum, const void *act, void *oldact) {
   if (act == nullptr)
     return internal_sigaction_norestorer(signum, act, oldact);
@@ -1230,7 +1230,7 @@ bool IsHandledDeadlySignal(int signum) {
   return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
 }
 
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
 void *internal_start_thread(void(*func)(void *arg), void *arg) {
   // Start the thread with signals blocked, otherwise it can steal user signals.
   __sanitizer_sigset_t set, old;
@@ -1387,6 +1387,11 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 
 void MaybeReexec() {
   // No need to re-exec on Linux.
+}
+
+uptr FindAvailableMemoryRange(uptr size, uptr alignment, uptr left_padding) {
+  UNREACHABLE("FindAvailableMemoryRange is not available");
+  return 0;
 }
 
 } // namespace __sanitizer

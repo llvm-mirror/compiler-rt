@@ -37,6 +37,8 @@ set(SANITIZER_SOURCES_NOTERMINATION
 if(UNIX AND NOT APPLE)
   list(APPEND SANITIZER_SOURCES_NOTERMINATION
     sanitizer_linux_x86_64.S)
+  list(APPEND SANITIZER_SOURCES_NOTERMINATION
+    sanitizer_linux_mips64.S)
 endif()
 
 set(SANITIZER_SOURCES
@@ -126,14 +128,6 @@ set(SANITIZER_HEADERS
 
 set(SANITIZER_COMMON_DEFINITIONS)
 
-if(MSVC)
-  list(APPEND SANITIZER_COMMON_DEFINITIONS
-    SANITIZER_NEEDS_SEGV=0)
-else()
-  list(APPEND SANITIZER_COMMON_DEFINITIONS
-    SANITIZER_NEEDS_SEGV=1)
-endif()
-
 include(CheckIncludeFile)
 append_have_file_definition(rpc/xdr.h HAVE_RPC_XDR_H SANITIZER_COMMON_DEFINITIONS)
 append_have_file_definition(tirpc/rpc/xdr.h HAVE_TIRPC_RPC_XDR_H SANITIZER_COMMON_DEFINITIONS)
@@ -154,6 +148,8 @@ if (LLVM_ENABLE_PEDANTIC AND UNIX AND NOT APPLE)
   # remove -pedantic from just this file (we'd have to remove from
   # CMAKE_C*_FLAGS and re-add as a source property to all the non-.S files).
   set_source_files_properties(sanitizer_linux_x86_64.S
+    PROPERTIES COMPILE_FLAGS "-w")
+  set_source_files_properties(sanitizer_linux_mips64.S
     PROPERTIES COMPILE_FLAGS "-w")
 endif ()
 

@@ -98,9 +98,12 @@ void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type);
 bool MprotectNoAccess(uptr addr, uptr size);
 bool MprotectReadOnly(uptr addr, uptr size);
 
+// Find an available address space.
+uptr FindAvailableMemoryRange(uptr size, uptr alignment, uptr left_padding);
+
 // Used to check if we can map shadow memory to a fixed location.
 bool MemoryRangeIsAvailable(uptr range_start, uptr range_end);
-void FlushUnneededShadowMemory(uptr addr, uptr size);
+void ReleaseMemoryToOS(uptr addr, uptr size);
 void IncreaseTotalMmap(uptr size);
 void DecreaseTotalMmap(uptr size);
 uptr GetRSS();
@@ -115,16 +118,14 @@ void RunFreeHooks(const void *ptr);
 // keep frame size low.
 // FIXME: use InternalAlloc instead of MmapOrDie once
 // InternalAlloc is made libc-free.
-template<typename T>
+template <typename T>
 class InternalScopedBuffer {
  public:
   explicit InternalScopedBuffer(uptr cnt) {
     cnt_ = cnt;
-    ptr_ = (T*)MmapOrDie(cnt * sizeof(T), "InternalScopedBuffer");
+    ptr_ = (T *)MmapOrDie(cnt * sizeof(T), "InternalScopedBuffer");
   }
-  ~InternalScopedBuffer() {
-    UnmapOrDie(ptr_, cnt_ * sizeof(T));
-  }
+  ~InternalScopedBuffer() { UnmapOrDie(ptr_, cnt_ * sizeof(T)); }
   T &operator[](uptr i) { return ptr_[i]; }
   T *data() { return ptr_; }
   uptr size() { return cnt_ * sizeof(T); }
@@ -132,9 +133,11 @@ class InternalScopedBuffer {
  private:
   T *ptr_;
   uptr cnt_;
-  // Disallow evil constructors.
-  InternalScopedBuffer(const InternalScopedBuffer&);
-  void operator=(const InternalScopedBuffer&);
+  // Disallow copies and moves.
+  InternalScopedBuffer(const InternalScopedBuffer &) = delete;
+  InternalScopedBuffer &operator=(const InternalScopedBuffer &) = delete;
+  InternalScopedBuffer(InternalScopedBuffer &&) = delete;
+  InternalScopedBuffer &operator=(InternalScopedBuffer &&) = delete;
 };
 
 class InternalScopedString : public InternalScopedBuffer<char> {
@@ -330,6 +333,7 @@ void SleepForMillis(int millis);
 u64 NanoTime();
 int Atexit(void (*function)(void));
 void SortArray(uptr *array, uptr size);
+void SortArray(u32 *array, uptr size);
 bool TemplateMatch(const char *templ, const char *str);
 
 // Exit
@@ -371,6 +375,12 @@ void SetCheckFailedCallback(CheckFailedCallbackType callback);
 // The callback should be registered once at the tool init time.
 void SetSoftRssLimitExceededCallback(void (*Callback)(bool exceeded));
 
+// Callback to be called when we want to try releasing unused allocator memory
+// back to the OS.
+typedef void (*AllocatorReleaseToOSCallback)();
+// The callback should be registered once at the tool init time.
+void SetAllocatorReleaseToOSCallback(AllocatorReleaseToOSCallback Callback);
+
 // Functions related to signal handling.
 typedef void (*SignalHandlerType)(int, void *, void *);
 bool IsHandledDeadlySignal(int signum);
@@ -389,7 +399,7 @@ void ReportErrorSummary(const char *error_message);
 //   error_type file:line[:column][ function]
 void ReportErrorSummary(const char *error_type, const AddressInfo &info);
 // Same as above, but obtains AddressInfo by symbolizing top stack trace frame.
-void ReportErrorSummary(const char *error_type, StackTrace *trace);
+void ReportErrorSummary(const char *error_type, const StackTrace *trace);
 
 // Math
 #if SANITIZER_WINDOWS && !defined(__clang__) && !defined(__GNUC__)
@@ -446,8 +456,8 @@ INLINE uptr RoundUpToPowerOfTwo(uptr size) {
   if (IsPowerOfTwo(size)) return size;
 
   uptr up = MostSignificantSetBitIndex(size);
-  CHECK(size < (1ULL << (up + 1)));
-  CHECK(size > (1ULL << up));
+  CHECK_LT(size, (1ULL << (up + 1)));
+  CHECK_GT(size, (1ULL << up));
   return 1ULL << (up + 1);
 }
 
@@ -827,16 +837,16 @@ void AvoidCVE_2016_2143();
 INLINE void AvoidCVE_2016_2143() {}
 #endif
 
+struct StackDepotStats {
+  uptr n_uniq_ids;
+  uptr allocated;
+};
+
 }  // namespace __sanitizer
 
 inline void *operator new(__sanitizer::operator_new_size_type size,
                           __sanitizer::LowLevelAllocator &alloc) {
   return alloc.Allocate(size);
 }
-
-struct StackDepotStats {
-  uptr n_uniq_ids;
-  uptr allocated;
-};
 
 #endif  // SANITIZER_COMMON_H

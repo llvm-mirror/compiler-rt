@@ -15,7 +15,7 @@
 // See https://github.com/google/sanitizers/issues/209 for the details.
 //===----------------------------------------------------------------------===//
 
-// Only compile this code when buidling asan_dll_thunk.lib
+// Only compile this code when building asan_dll_thunk.lib
 // Using #ifdef rather than relying on Makefiles etc.
 // simplifies the build procedure.
 #ifdef ASAN_DLL_THUNK
@@ -29,6 +29,8 @@ void *__stdcall GetModuleHandleA(const char *module_name);
 void *__stdcall GetProcAddress(void *module, const char *proc_name);
 void abort();
 }
+
+using namespace __sanitizer;
 
 static uptr getRealProcAddressOrDie(const char *name) {
   uptr ret =
@@ -198,11 +200,11 @@ static void InterceptHooks();
 // Don't use the INTERFACE_FUNCTION machinery for this function as we actually
 // want to call it in the __asan_init interceptor.
 WRAP_W_V(__asan_should_detect_stack_use_after_return)
-WRAP_W_V(__asan_should_detect_stack_use_after_scope)
+WRAP_W_V(__asan_get_shadow_memory_dynamic_address)
 
 extern "C" {
   int __asan_option_detect_stack_use_after_return;
-  int __asan_option_detect_stack_use_after_scope;
+  uptr __asan_shadow_memory_dynamic_address;
 
   // Manually wrap __asan_init as we need to initialize
   // __asan_option_detect_stack_use_after_return afterwards.
@@ -216,9 +218,8 @@ extern "C" {
     fn();
     __asan_option_detect_stack_use_after_return =
         (__asan_should_detect_stack_use_after_return() != 0);
-    __asan_option_detect_stack_use_after_scope =
-        (__asan_should_detect_stack_use_after_scope() != 0);
-
+    __asan_shadow_memory_dynamic_address =
+        (uptr)__asan_get_shadow_memory_dynamic_address();
     InterceptHooks();
   }
 }
@@ -260,6 +261,13 @@ INTERFACE_FUNCTION(__asan_loadN)
 INTERFACE_FUNCTION(__asan_memcpy);
 INTERFACE_FUNCTION(__asan_memset);
 INTERFACE_FUNCTION(__asan_memmove);
+
+INTERFACE_FUNCTION(__asan_set_shadow_00);
+INTERFACE_FUNCTION(__asan_set_shadow_f1);
+INTERFACE_FUNCTION(__asan_set_shadow_f2);
+INTERFACE_FUNCTION(__asan_set_shadow_f3);
+INTERFACE_FUNCTION(__asan_set_shadow_f5);
+INTERFACE_FUNCTION(__asan_set_shadow_f8);
 
 INTERFACE_FUNCTION(__asan_alloca_poison);
 INTERFACE_FUNCTION(__asan_allocas_unpoison);
@@ -315,12 +323,9 @@ INTERFACE_FUNCTION(__sanitizer_cov_init)
 INTERFACE_FUNCTION(__sanitizer_cov_module_init)
 INTERFACE_FUNCTION(__sanitizer_cov_trace_basic_block)
 INTERFACE_FUNCTION(__sanitizer_cov_trace_func_enter)
-INTERFACE_FUNCTION(__sanitizer_cov_trace_cmp)
-INTERFACE_FUNCTION(__sanitizer_cov_trace_switch)
 INTERFACE_FUNCTION(__sanitizer_cov_with_check)
 INTERFACE_FUNCTION(__sanitizer_get_allocated_size)
 INTERFACE_FUNCTION(__sanitizer_get_coverage_guards)
-INTERFACE_FUNCTION(__sanitizer_get_coverage_pc_buffer)
 INTERFACE_FUNCTION(__sanitizer_get_current_allocated_bytes)
 INTERFACE_FUNCTION(__sanitizer_get_estimated_allocated_size)
 INTERFACE_FUNCTION(__sanitizer_get_free_bytes)
@@ -331,6 +336,8 @@ INTERFACE_FUNCTION(__sanitizer_get_total_unique_coverage)
 INTERFACE_FUNCTION(__sanitizer_get_unmapped_bytes)
 INTERFACE_FUNCTION(__sanitizer_maybe_open_cov_file)
 INTERFACE_FUNCTION(__sanitizer_print_stack_trace)
+INTERFACE_FUNCTION(__sanitizer_symbolize_pc)
+INTERFACE_FUNCTION(__sanitizer_symbolize_global)
 INTERFACE_FUNCTION(__sanitizer_ptr_cmp)
 INTERFACE_FUNCTION(__sanitizer_ptr_sub)
 INTERFACE_FUNCTION(__sanitizer_report_error_summary)
@@ -372,6 +379,7 @@ WRAP_W_WW(realloc)
 WRAP_W_WW(_realloc_base)
 WRAP_W_WWW(_realloc_dbg)
 WRAP_W_WWW(_recalloc)
+WRAP_W_WWW(_recalloc_base)
 
 WRAP_W_W(_msize)
 WRAP_W_W(_expand)
