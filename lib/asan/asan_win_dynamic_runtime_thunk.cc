@@ -24,6 +24,7 @@
 // Using #ifdef rather than relying on Makefiles etc.
 // simplifies the build procedure.
 #ifdef ASAN_DYNAMIC_RUNTIME_THUNK
+#include "asan_globals_win.h"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -33,6 +34,7 @@
 #pragma section(".CRT$XCAB", long, read)  // NOLINT
 #pragma section(".CRT$XTW", long, read)  // NOLINT
 #pragma section(".CRT$XTY", long, read)  // NOLINT
+#pragma section(".CRT$XLAB", long, read)  // NOLINT
 
 ////////////////////////////////////////////////////////////////////////////////
 // Define a copy of __asan_option_detect_stack_use_after_return that should be
@@ -61,9 +63,18 @@ static int InitializeClonedVariables() {
   return 0;
 }
 
-// Our cloned variables must be initialized before C/C++ constructors.
-__declspec(allocate(".CRT$XIB"))
-int (*__asan_initialize_cloned_variables)() = InitializeClonedVariables;
+static void NTAPI asan_thread_init(void *mod, unsigned long reason,
+    void *reserved) {
+  if (reason == DLL_PROCESS_ATTACH) InitializeClonedVariables();
+}
+
+// Our cloned variables must be initialized before C/C++ constructors.  If TLS
+// is used, our .CRT$XLAB initializer will run first. If not, our .CRT$XIB
+// initializer is needed as a backup.
+__declspec(allocate(".CRT$XIB")) int (*__asan_initialize_cloned_variables)() =
+    InitializeClonedVariables;
+__declspec(allocate(".CRT$XLAB")) void (NTAPI *__asan_tls_init)(void *,
+    unsigned long, void *) = asan_thread_init;
 
 ////////////////////////////////////////////////////////////////////////////////
 // For some reason, the MD CRT doesn't call the C/C++ terminators during on DLL
@@ -110,5 +121,7 @@ static int SetSEHFilter() { return __asan_set_seh_filter(); }
 __declspec(allocate(".CRT$XCAB")) int (*__asan_seh_interceptor)() =
     SetSEHFilter;
 }
+
+ASAN_LINK_GLOBALS_WIN()
 
 #endif // ASAN_DYNAMIC_RUNTIME_THUNK
