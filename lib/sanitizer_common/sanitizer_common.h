@@ -103,7 +103,9 @@ uptr FindAvailableMemoryRange(uptr size, uptr alignment, uptr left_padding);
 
 // Used to check if we can map shadow memory to a fixed location.
 bool MemoryRangeIsAvailable(uptr range_start, uptr range_end);
-void ReleaseMemoryToOS(uptr addr, uptr size);
+// Releases memory pages entirely within the [beg, end] address range. Noop if
+// the provided range does not contain at least one entire page.
+void ReleaseMemoryPagesToOS(uptr beg, uptr end);
 void IncreaseTotalMmap(uptr size);
 void DecreaseTotalMmap(uptr size);
 uptr GetRSS();
@@ -375,12 +377,6 @@ void SetCheckFailedCallback(CheckFailedCallbackType callback);
 // The callback should be registered once at the tool init time.
 void SetSoftRssLimitExceededCallback(void (*Callback)(bool exceeded));
 
-// Callback to be called when we want to try releasing unused allocator memory
-// back to the OS.
-typedef void (*AllocatorReleaseToOSCallback)();
-// The callback should be registered once at the tool init time.
-void SetAllocatorReleaseToOSCallback(AllocatorReleaseToOSCallback Callback);
-
 // Functions related to signal handling.
 typedef void (*SignalHandlerType)(int, void *, void *);
 bool IsHandledDeadlySignal(int signum);
@@ -635,20 +631,19 @@ void InternalSort(Container *v, uptr size, Compare comp) {
   }
 }
 
-template<class Container, class Value, class Compare>
-uptr InternalBinarySearch(const Container &v, uptr first, uptr last,
-                          const Value &val, Compare comp) {
-  uptr not_found = last + 1;
-  while (last >= first) {
+// Works like std::lower_bound: finds the first element that is not less
+// than the val.
+template <class Container, class Value, class Compare>
+uptr InternalLowerBound(const Container &v, uptr first, uptr last,
+                        const Value &val, Compare comp) {
+  while (last > first) {
     uptr mid = (first + last) / 2;
     if (comp(v[mid], val))
       first = mid + 1;
-    else if (comp(val, v[mid]))
-      last = mid - 1;
     else
-      return mid;
+      last = mid;
   }
-  return not_found;
+  return first;
 }
 
 // Represents a binary loaded into virtual memory (e.g. this can be an
@@ -799,6 +794,8 @@ struct SignalContext {
         is_memory_access(is_memory_access),
         write_flag(write_flag) {}
 
+  static void DumpAllRegisters(void *context);
+
   // Creates signal context in a platform-specific manner.
   static SignalContext Create(void *siginfo, void *context);
 
@@ -841,6 +838,10 @@ struct StackDepotStats {
   uptr n_uniq_ids;
   uptr allocated;
 };
+
+// The default value for allocator_release_to_os_interval_ms common flag to
+// indicate that sanitizer allocator should not attempt to release memory to OS.
+const s32 kReleaseToOSIntervalNever = -1;
 
 }  // namespace __sanitizer
 

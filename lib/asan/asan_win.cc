@@ -19,6 +19,7 @@
 
 #include <stdlib.h>
 
+#include "asan_globals_win.h"
 #include "asan_interceptors.h"
 #include "asan_internal.h"
 #include "asan_report.h"
@@ -293,17 +294,25 @@ const char *DescribeSignalOrException(int signo) {
   return nullptr;
 }
 
-static long WINAPI SEHHandler(EXCEPTION_POINTERS *info) {
+extern "C" SANITIZER_INTERFACE_ATTRIBUTE
+long __asan_unhandled_exception_filter(EXCEPTION_POINTERS *info) {
   EXCEPTION_RECORD *exception_record = info->ExceptionRecord;
   CONTEXT *context = info->ContextRecord;
 
-  if (ShouldReportDeadlyException(exception_record->ExceptionCode)) {
-    SignalContext sig = SignalContext::Create(exception_record, context);
-    ReportDeadlySignal(exception_record->ExceptionCode, sig);
-  }
-
+  // Continue the search if the signal wasn't deadly.
+  if (!ShouldReportDeadlyException(exception_record->ExceptionCode))
+    return EXCEPTION_CONTINUE_SEARCH;
   // FIXME: Handle EXCEPTION_STACK_OVERFLOW here.
 
+  SignalContext sig = SignalContext::Create(exception_record, context);
+  ReportDeadlySignal(exception_record->ExceptionCode, sig);
+  UNREACHABLE("returned from reporting deadly signal");
+}
+
+static long WINAPI SEHHandler(EXCEPTION_POINTERS *info) {
+  __asan_unhandled_exception_filter(info);
+
+  // Bubble out to the default exception filter.
   return default_seh_handler(info);
 }
 
@@ -343,10 +352,25 @@ int __asan_set_seh_filter() {
 // immediately after the CRT runs. This way, our exception filter is called
 // first and we can delegate to their filter if appropriate.
 #pragma section(".CRT$XCAB", long, read)  // NOLINT
-__declspec(allocate(".CRT$XCAB"))
-    int (*__intercept_seh)() = __asan_set_seh_filter;
+__declspec(allocate(".CRT$XCAB")) int (*__intercept_seh)() =
+    __asan_set_seh_filter;
+
+// Piggyback on the TLS initialization callback directory to initialize asan as
+// early as possible. Initializers in .CRT$XL* are called directly by ntdll,
+// which run before the CRT. Users also add code to .CRT$XLC, so it's important
+// to run our initializers first.
+static void NTAPI asan_thread_init(void *module, DWORD reason, void *reserved) {
+  if (reason == DLL_PROCESS_ATTACH) __asan_init();
+}
+
+#pragma section(".CRT$XLAB", long, read)  // NOLINT
+__declspec(allocate(".CRT$XLAB")) void (NTAPI *__asan_tls_init)(void *,
+    unsigned long, void *) = asan_thread_init;
 #endif
+
+ASAN_LINK_GLOBALS_WIN()
+
 // }}}
 }  // namespace __asan
 
-#endif  // _WIN32
+#endif  // SANITIZER_WINDOWS

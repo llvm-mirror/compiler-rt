@@ -371,7 +371,31 @@ set(arm_Thumb1_SOURCES
   ${arm_Thumb1_VFPv2_SOURCES}
   ${arm_Thumb1_icache_SOURCES})
 
-if(NOT WIN32)
+if(MINGW)
+  set(arm_SOURCES
+      arm/aeabi_idivmod.S
+      arm/aeabi_ldivmod.S
+      arm/aeabi_uidivmod.S
+      arm/aeabi_uldivmod.S
+      divmoddi4.c
+      divmodsi4.c
+      divdi3.c
+      divsi3.c
+      fixdfdi.c
+      fixsfdi.c
+      fixunsdfdi.c
+      fixunssfdi.c
+      floatdidf.c
+      floatdisf.c
+      floatundidf.c
+      floatundisf.c
+      mingw_fixfloat.c
+      moddi3.c
+      udivmoddi4.c
+      udivmodsi4.c
+      udivsi3.c
+      umoddi3.c)
+elseif(NOT WIN32)
   # TODO the EABI sources should only be added to EABI targets
   set(arm_SOURCES
     ${arm_SOURCES}
@@ -427,7 +451,7 @@ if (APPLE)
 else ()
   set(BUILTIN_CFLAGS "")
 
-  append_list_if(COMPILER_RT_HAS_STD_C99_FLAG -std=gnu99 BUILTIN_CFLAGS)
+  append_list_if(COMPILER_RT_HAS_STD_C11_FLAG -std=c11 BUILTIN_CFLAGS)
 
   # These flags would normally be added to CMAKE_C_FLAGS by the llvm
   # cmake step. Add them manually if this is a standalone build.
