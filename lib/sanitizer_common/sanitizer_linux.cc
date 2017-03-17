@@ -1175,6 +1175,71 @@ uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
                "r0", "r29", "r27", "r28");
   return res;
 }
+#elif defined(__i386__) && SANITIZER_LINUX
+uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+                    int *parent_tidptr, void *newtls, int *child_tidptr) {
+  int res;
+  if (!fn || !child_stack)
+    return -EINVAL;
+  CHECK_EQ(0, (uptr)child_stack % 16);
+  child_stack = (char *)child_stack - 7 * sizeof(unsigned int);
+  ((unsigned int *)child_stack)[0] = (uptr)flags;
+  ((unsigned int *)child_stack)[1] = (uptr)0;
+  ((unsigned int *)child_stack)[2] = (uptr)fn;
+  ((unsigned int *)child_stack)[3] = (uptr)arg;
+  __asm__ __volatile__(
+                       /* %eax = syscall(%eax = SYSCALL(clone),
+                        *                %ebx = flags,
+                        *                %ecx = child_stack,
+                        *                %edx = parent_tidptr,
+                        *                %esi  = new_tls,
+                        *                %edi = child_tidptr)
+                        */
+
+                        /* Obtain flags */
+                        "movl    (%%ecx), %%ebx\n"
+                        /* Do the system call */
+                        "pushl   %%ebx\n"
+                        "pushl   %%esi\n"
+                        "pushl   %%edi\n"
+                        /* Remember the flag value.  */
+                        "movl    %%ebx, (%%ecx)\n"
+                        "int     $0x80\n"
+                        "popl    %%edi\n"
+                        "popl    %%esi\n"
+                        "popl    %%ebx\n"
+
+                        /* if (%eax != 0)
+                         *   return;
+                         */
+
+                        "test    %%eax,%%eax\n"
+                        "jnz    1f\n"
+
+                        /* terminate the stack frame */
+                        "xorl   %%ebp,%%ebp\n"
+                        /* Call FN. */
+                        "call    *%%ebx\n"
+#ifdef PIC
+                        "call    here\n"
+                        "here:\n"
+                        "popl    %%ebx\n"
+                        "addl    $_GLOBAL_OFFSET_TABLE_+[.-here], %%ebx\n"
+#endif
+                        /* Call exit */
+                        "movl    %%eax, %%ebx\n"
+                        "movl    %2, %%eax\n"
+                        "int     $0x80\n"
+                        "1:\n"
+                       : "=a" (res)
+                       : "a"(SYSCALL(clone)), "i"(SYSCALL(exit)),
+                         "c"(child_stack),
+                         "d"(parent_tidptr),
+                         "S"(newtls),
+                         "D"(child_tidptr)
+                       : "memory");
+  return res;
+}
 #endif  // defined(__x86_64__) && SANITIZER_LINUX
 
 #if SANITIZER_ANDROID
@@ -1227,7 +1292,9 @@ bool IsHandledDeadlySignal(int signum) {
     return true;
   if (common_flags()->handle_sigfpe && signum == SIGFPE)
     return true;
-  return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
+  if (common_flags()->handle_segv && signum == SIGSEGV)
+    return true;
+  return common_flags()->handle_sigbus && signum == SIGBUS;
 }
 
 #if !SANITIZER_GO
@@ -1391,6 +1458,23 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 
 void MaybeReexec() {
   // No need to re-exec on Linux.
+}
+
+void PrintModuleMap() { }
+
+void CheckNoDeepBind(const char *filename, int flag) {
+#if !SANITIZER_ANDROID
+  if (flag & RTLD_DEEPBIND) {
+    Report(
+        "You are trying to dlopen a %s shared library with RTLD_DEEPBIND flag"
+        " which is incompatibe with sanitizer runtime "
+        "(see https://github.com/google/sanitizers/issues/611 for details"
+        "). If you want to run %s library under sanitizers please remove "
+        "RTLD_DEEPBIND from dlopen flags.\n",
+        filename, filename);
+    Die();
+  }
+#endif
 }
 
 uptr FindAvailableMemoryRange(uptr size, uptr alignment, uptr left_padding) {

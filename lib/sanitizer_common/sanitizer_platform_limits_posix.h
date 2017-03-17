@@ -635,9 +635,12 @@ namespace __sanitizer {
 #ifndef __mips__
 #if defined(__sparc__)
 #if __GLIBC_PREREQ (2, 20)
-    // On sparc glibc 2.19 and earlier sa_flags was unsigned long, and
-    // __glibc_reserved0 didn't exist.
+    // On sparc glibc 2.19 and earlier sa_flags was unsigned long.
+#if defined(__arch64__)
+    // To maintain ABI compatibility on sparc64 when switching to an int,
+    // __glibc_reserved0 was added.
     int __glibc_reserved0;
+#endif
     int sa_flags;
 #else
     unsigned long sa_flags;
@@ -860,6 +863,13 @@ namespace __sanitizer {
   extern int shmctl_ipc_info;
   extern int shmctl_shm_info;
   extern int shmctl_shm_stat;
+#endif
+
+#if !SANITIZER_MAC && !SANITIZER_FREEBSD
+  extern unsigned struct_utmp_sz;
+#endif
+#if !SANITIZER_ANDROID
+  extern unsigned struct_utmpx_sz;
 #endif
 
   extern int map_fixed;

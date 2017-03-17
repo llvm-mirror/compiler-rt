@@ -28,12 +28,21 @@ namespace __lsan {
 struct ChunkMetadata {
   u8 allocated : 8;  // Must be first.
   ChunkTag tag : 2;
+#if SANITIZER_WORDSIZE == 64
   uptr requested_size : 54;
+#else
+  uptr requested_size : 32;
+  uptr padding : 22;
+#endif
   u32 stack_trace_id;
 };
 
-#if defined(__mips64) || defined(__aarch64__)
+#if defined(__mips64) || defined(__aarch64__) || defined(__i386__)
+#if defined(__i386__)
+static const uptr kMaxAllowedMallocSize = 1UL << 30;
+#else
 static const uptr kMaxAllowedMallocSize = 4UL << 30;
+#endif
 static const uptr kRegionSizeLog = 20;
 static const uptr kNumRegions = SANITIZER_MMAP_RANGE_SIZE >> kRegionSizeLog;
 typedef TwoLevelByteMap<(kNumRegions >> 12), 1 << 12> ByteMap;
@@ -258,4 +267,17 @@ SANITIZER_INTERFACE_ATTRIBUTE
 uptr __sanitizer_get_allocated_size(const void *p) {
   return GetMallocUsableSize(p);
 }
+
+#if !SANITIZER_SUPPORTS_WEAK_HOOKS
+// Provide default (no-op) implementation of malloc hooks.
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_malloc_hook(void *ptr, uptr size) {
+  (void)ptr;
+  (void)size;
+}
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_free_hook(void *ptr) {
+  (void)ptr;
+}
+#endif
 } // extern "C"

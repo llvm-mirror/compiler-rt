@@ -97,6 +97,9 @@ TEST(AddressSanitizer, NoInstMallocTest) {
   MallocStress(ASAN_LOW_MEMORY ? 300000 : 1000000);
 }
 
+#ifndef __powerpc64__
+// FIXME: This has not reliably worked on powerpc since r279664.  Re-enable
+// this once the problem is tracked down and fixed.
 TEST(AddressSanitizer, ThreadedMallocStressTest) {
   const int kNumThreads = 4;
   const int kNumIterations = (ASAN_LOW_MEMORY) ? 10000 : 100000;
@@ -109,6 +112,7 @@ TEST(AddressSanitizer, ThreadedMallocStressTest) {
     PTHREAD_JOIN(t[i], 0);
   }
 }
+#endif
 
 static void PrintShadow(const char *tag, uptr ptr, size_t size) {
   fprintf(stderr, "%s shadow: %lx size % 3ld: ", tag, (long)ptr, (long)size);
@@ -170,6 +174,12 @@ void *ThreadedQuarantineTestWorker(void *unused) {
 // Check that the thread local allocators are flushed when threads are
 // destroyed.
 TEST(AddressSanitizer, ThreadedQuarantineTest) {
+  // Run the routine once to warm up ASAN internal structures to get more
+  // predictable incremental memory changes.
+  pthread_t t;
+  PTHREAD_CREATE(&t, NULL, ThreadedQuarantineTestWorker, 0);
+  PTHREAD_JOIN(t, 0);
+
   const int n_threads = 3000;
   size_t mmaped1 = __sanitizer_get_heap_size();
   for (int i = 0; i < n_threads; i++) {
@@ -177,6 +187,7 @@ TEST(AddressSanitizer, ThreadedQuarantineTest) {
     PTHREAD_CREATE(&t, NULL, ThreadedQuarantineTestWorker, 0);
     PTHREAD_JOIN(t, 0);
     size_t mmaped2 = __sanitizer_get_heap_size();
+    // Figure out why this much memory is required.
     EXPECT_LT(mmaped2 - mmaped1, 320U * (1 << 20));
   }
 }
@@ -199,6 +210,10 @@ void *ThreadedOneSizeMallocStress(void *unused) {
   return NULL;
 }
 
+#ifndef __powerpc64__
+// FIXME: This has not reliably worked on powerpc since r279664.  Re-enable
+// this once the problem is tracked down and fixed.
+
 TEST(AddressSanitizer, ThreadedOneSizeMallocStressTest) {
   const int kNumThreads = 4;
   pthread_t t[kNumThreads];
@@ -209,6 +224,7 @@ TEST(AddressSanitizer, ThreadedOneSizeMallocStressTest) {
     PTHREAD_JOIN(t[i], 0);
   }
 }
+#endif
 
 TEST(AddressSanitizer, ShadowRegionIsPoisonedTest) {
   using __asan::kHighMemEnd;

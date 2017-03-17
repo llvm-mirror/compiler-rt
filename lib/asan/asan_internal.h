@@ -36,7 +36,7 @@
 // If set, values like allocator chunk size, as well as defaults for some flags
 // will be changed towards less memory overhead.
 #ifndef ASAN_LOW_MEMORY
-# if SANITIZER_IOS || (SANITIZER_WORDSIZE == 32)
+# if SANITIZER_IOS || SANITIZER_ANDROID
 #  define ASAN_LOW_MEMORY 1
 # else
 #  define ASAN_LOW_MEMORY 0
@@ -64,9 +64,9 @@ void AsanInitFromRtl();
 
 // asan_win.cc
 void InitializePlatformExceptionHandlers();
-
-// asan_win.cc / asan_posix.cc
-const char *DescribeSignalOrException(int signo);
+// Returns whether an address is a valid allocated system heap block.
+// 'addr' must point to the beginning of the block.
+bool IsSystemHeapAddress(uptr addr);
 
 // asan_rtl.cc
 void NORETURN ShowStatsAndAbort();
@@ -102,17 +102,6 @@ void AppendToErrorMessageBuffer(const char *buffer);
 void *AsanDlSymNext(const char *sym);
 
 void ReserveShadowMemoryRange(uptr beg, uptr end, const char *name);
-
-// Platform-specific options.
-#if SANITIZER_MAC
-bool PlatformHasDifferentMemcpyAndMemmove();
-# define PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE \
-    (PlatformHasDifferentMemcpyAndMemmove())
-#elif SANITIZER_WINDOWS64
-# define PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE false
-#else
-# define PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE true
-#endif  // SANITIZER_MAC
 
 // Add convenient macro for interface functions that may be represented as
 // weak hooks.

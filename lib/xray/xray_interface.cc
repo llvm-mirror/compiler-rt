@@ -35,12 +35,21 @@ static const int16_t cSledLength = 12;
 static const int16_t cSledLength = 32;
 #elif defined(__arm__)
 static const int16_t cSledLength = 28;
+#elif SANITIZER_MIPS32
+static const int16_t cSledLength = 48;
+#elif SANITIZER_MIPS64
+static const int16_t cSledLength = 64;
+#elif defined(__powerpc64__)
+static const int16_t cSledLength = 8;
 #else
 #error "Unsupported CPU Architecture"
 #endif /* CPU architecture */
 
 // This is the function to call when we encounter the entry or exit sleds.
 std::atomic<void (*)(int32_t, XRayEntryType)> XRayPatchedFunction{nullptr};
+
+// This is the function to call from the arg1-enabled sleds/trampolines.
+std::atomic<void (*)(int32_t, XRayEntryType, uint64_t)> XRayArgLogger{nullptr};
 
 // MProtectHelper is an RAII wrapper for calls to mprotect(...) that will undo
 // any successful mprotect(...) changes. This is used to make a page writeable
@@ -115,14 +124,14 @@ public:
 };
 
 template <class Function>
-CleanupInvoker<Function> ScopeCleanup(Function Fn) XRAY_NEVER_INSTRUMENT {
+CleanupInvoker<Function> scopeCleanup(Function Fn) XRAY_NEVER_INSTRUMENT {
   return CleanupInvoker<Function>{Fn};
 }
 
-// ControlPatching implements the common internals of the patching/unpatching
+// controlPatching implements the common internals of the patching/unpatching
 // implementation. |Enable| defines whether we're enabling or disabling the
 // runtime XRay instrumentation.
-XRayPatchingStatus ControlPatching(bool Enable) XRAY_NEVER_INSTRUMENT {
+XRayPatchingStatus controlPatching(bool Enable) XRAY_NEVER_INSTRUMENT {
   if (!XRayInitialized.load(std::memory_order_acquire))
     return XRayPatchingStatus::NOT_INITIALIZED; // Not initialized.
 
@@ -134,7 +143,7 @@ XRayPatchingStatus ControlPatching(bool Enable) XRAY_NEVER_INSTRUMENT {
   }
 
   bool PatchingSuccess = false;
-  auto XRayPatchingStatusResetter = ScopeCleanup([&PatchingSuccess] {
+  auto XRayPatchingStatusResetter = scopeCleanup([&PatchingSuccess] {
     if (!PatchingSuccess) {
       XRayPatching.store(false, std::memory_order_release);
     }
@@ -179,13 +188,16 @@ XRayPatchingStatus ControlPatching(bool Enable) XRAY_NEVER_INSTRUMENT {
     bool Success = false;
     switch (Sled.Kind) {
     case XRayEntryType::ENTRY:
-      Success = patchFunctionEntry(Enable, FuncId, Sled);
+      Success = patchFunctionEntry(Enable, FuncId, Sled, __xray_FunctionEntry);
       break;
     case XRayEntryType::EXIT:
       Success = patchFunctionExit(Enable, FuncId, Sled);
       break;
     case XRayEntryType::TAIL:
       Success = patchFunctionTailExit(Enable, FuncId, Sled);
+      break;
+    case XRayEntryType::LOG_ARGS_ENTRY:
+      Success = patchFunctionEntry(Enable, FuncId, Sled, __xray_ArgLoggerEntry);
       break;
     default:
       Report("Unsupported sled kind: %d\n", int(Sled.Kind));
@@ -199,9 +211,22 @@ XRayPatchingStatus ControlPatching(bool Enable) XRAY_NEVER_INSTRUMENT {
 }
 
 XRayPatchingStatus __xray_patch() XRAY_NEVER_INSTRUMENT {
-  return ControlPatching(true);
+  return controlPatching(true);
 }
 
 XRayPatchingStatus __xray_unpatch() XRAY_NEVER_INSTRUMENT {
-  return ControlPatching(false);
+  return controlPatching(false);
 }
+
+int __xray_set_handler_arg1(void (*Handler)(int32_t, XRayEntryType, uint64_t))
+{
+  if (!XRayInitialized.load(std::memory_order_acquire)) {
+    return 0;
+  }
+  // A relaxed write might not be visible even if the current thread gets
+  // scheduled on a different CPU/NUMA node.  We need to wait for everyone to
+  // have this handler installed for consistency of collected data across CPUs.
+  XRayArgLogger.store(Handler, std::memory_order_release);
+  return 1;
+}
+int __xray_remove_handler_arg1() { return __xray_set_handler_arg1(nullptr); }

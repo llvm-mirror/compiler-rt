@@ -32,19 +32,14 @@ namespace __lsan {
 // also to protect the global list of root regions.
 BlockingMutex global_mutex(LINKER_INITIALIZED);
 
-__attribute__((tls_model("initial-exec")))
-THREADLOCAL int disable_counter;
-bool DisabledInThisThread() { return disable_counter > 0; }
-void DisableInThisThread() { disable_counter++; }
-void EnableInThisThread() {
-  if (!disable_counter && common_flags()->detect_leaks) {
+Flags lsan_flags;
+
+void DisableCounterUnderflow() {
+  if (common_flags()->detect_leaks) {
     Report("Unmatched call to __lsan_enable().\n");
     Die();
   }
-  disable_counter--;
 }
-
-Flags lsan_flags;
 
 void Flags::SetDefaults() {
 #define LSAN_FLAG(Type, Name, DefaultValue, Description) Name = DefaultValue;
@@ -757,6 +752,11 @@ int __lsan_do_recoverable_leak_check() {
 SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
 int __lsan_is_turned_off() {
   return 0;
+}
+
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+const char *__lsan_default_suppressions() {
+  return "";
 }
 #endif
 } // extern "C"
