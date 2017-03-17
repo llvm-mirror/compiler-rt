@@ -132,6 +132,7 @@ set(GENERIC_SOURCES
   negvdi2.c
   negvsi2.c
   negvti2.c
+  os_version_check.c
   paritydi2.c
   paritysi2.c
   parityti2.c
@@ -302,6 +303,13 @@ set(arm_SOURCES
   arm/umodsi3.S
   ${GENERIC_SOURCES})
 
+set(thumb1_SOURCES
+  arm/divsi3.S
+  arm/udivsi3.S
+  arm/comparesf2.S
+  arm/addsf3.S
+  ${GENERIC_SOURCES})
+
 set(arm_EABI_SOURCES
   arm/aeabi_cdcmp.S
   arm/aeabi_cdcmpeq_check_nan.c
@@ -320,6 +328,7 @@ set(arm_EABI_SOURCES
   arm/aeabi_memset.S
   arm/aeabi_uidivmod.S
   arm/aeabi_uldivmod.S)
+
 set(arm_Thumb1_JT_SOURCES
   arm/switch16.S
   arm/switch32.S
@@ -401,6 +410,10 @@ elseif(NOT WIN32)
     ${arm_SOURCES}
     ${arm_EABI_SOURCES}
     ${arm_Thumb1_SOURCES})
+
+  set(thumb1_SOURCES
+    ${thumb1_SOURCES}
+    ${arm_EABI_SOURCES})
 endif()
 
 set(aarch64_SOURCES
@@ -415,8 +428,10 @@ set(aarch64_SOURCES
   fixunstfti.c
   floatditf.c
   floatsitf.c
+  floattitf.c
   floatunditf.c
   floatunsitf.c
+  floatuntitf.c
   multc3.c
   trunctfdf2.c
   trunctfsf2.c
@@ -429,7 +444,7 @@ set(armv7k_SOURCES ${arm_SOURCES})
 set(arm64_SOURCES ${aarch64_SOURCES})
 
 # macho_embedded archs
-set(armv6m_SOURCES ${GENERIC_SOURCES})
+set(armv6m_SOURCES ${thumb1_SOURCES})
 set(armv7m_SOURCES ${arm_SOURCES})
 set(armv7em_SOURCES ${arm_SOURCES})
 

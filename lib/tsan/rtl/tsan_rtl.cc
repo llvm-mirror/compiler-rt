@@ -381,7 +381,7 @@ void Initialize(ThreadState *thr) {
   // Initialize thread 0.
   int tid = ThreadCreate(thr, 0, 0, true);
   CHECK_EQ(tid, 0);
-  ThreadStart(thr, tid, internal_getpid());
+  ThreadStart(thr, tid, GetTid(), /*workerthread*/ false);
 #if TSAN_CONTAINS_UBSAN
   __ubsan::InitAsPlugin();
 #endif
@@ -403,6 +403,8 @@ void Initialize(ThreadState *thr) {
 
 int Finalize(ThreadState *thr) {
   bool failed = false;
+
+  if (common_flags()->print_module_map == 1) PrintModuleMap();
 
   if (flags()->atexit_sleep_ms > 0 && ThreadCount(thr) > 1)
     SleepForMillis(flags()->atexit_sleep_ms);

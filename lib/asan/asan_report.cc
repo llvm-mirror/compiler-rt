@@ -179,6 +179,8 @@ class ScopedInErrorReport {
     if (common_flags()->print_cmdline)
       PrintCmdline();
 
+    if (common_flags()->print_module_map == 2) PrintModuleMap();
+
     // Copy the message buffer so that we could start logging without holding a
     // lock that gets aquired during printing.
     InternalScopedBuffer<char> buffer_copy(kErrorMessageBufferSize);
@@ -486,9 +488,6 @@ void __sanitizer_ptr_cmp(void *a, void *b) {
 }
 } // extern "C"
 
-#if !SANITIZER_SUPPORTS_WEAK_HOOKS
 // Provide default implementation of __asan_on_error that does nothing
 // and may be overriden by user.
-SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE NOINLINE
-void __asan_on_error() {}
-#endif
+SANITIZER_INTERFACE_WEAK_DEF(void, __asan_on_error, void) {}

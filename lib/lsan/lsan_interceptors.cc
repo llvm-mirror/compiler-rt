@@ -19,12 +19,15 @@
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_linux.h"
+#include "sanitizer_common/sanitizer_platform_interceptors.h"
 #include "sanitizer_common/sanitizer_platform_limits_posix.h"
 #include "sanitizer_common/sanitizer_tls_get_addr.h"
 #include "lsan.h"
 #include "lsan_allocator.h"
 #include "lsan_common.h"
 #include "lsan_thread.h"
+
+#include <stddef.h>
 
 using namespace __lsan;
 
@@ -86,25 +89,13 @@ INTERCEPTOR(void*, realloc, void *q, uptr size) {
   return Reallocate(stack, q, size, 1);
 }
 
+#if SANITIZER_INTERCEPT_MEMALIGN
 INTERCEPTOR(void*, memalign, uptr alignment, uptr size) {
   ENSURE_LSAN_INITED;
   GET_STACK_TRACE_MALLOC;
   return Allocate(stack, size, alignment, kAlwaysClearMemory);
 }
-
-INTERCEPTOR(void*, aligned_alloc, uptr alignment, uptr size) {
-  ENSURE_LSAN_INITED;
-  GET_STACK_TRACE_MALLOC;
-  return Allocate(stack, size, alignment, kAlwaysClearMemory);
-}
-
-INTERCEPTOR(int, posix_memalign, void **memptr, uptr alignment, uptr size) {
-  ENSURE_LSAN_INITED;
-  GET_STACK_TRACE_MALLOC;
-  *memptr = Allocate(stack, size, alignment, kAlwaysClearMemory);
-  // FIXME: Return ENOMEM if user requested more than max alloc size.
-  return 0;
-}
+#define LSAN_MAYBE_INTERCEPT_MEMALIGN INTERCEPT_FUNCTION(memalign)
 
 INTERCEPTOR(void *, __libc_memalign, uptr alignment, uptr size) {
   ENSURE_LSAN_INITED;
@@ -112,6 +103,30 @@ INTERCEPTOR(void *, __libc_memalign, uptr alignment, uptr size) {
   void *res = Allocate(stack, size, alignment, kAlwaysClearMemory);
   DTLS_on_libc_memalign(res, size);
   return res;
+}
+#define LSAN_MAYBE_INTERCEPT___LIBC_MEMALIGN INTERCEPT_FUNCTION(__libc_memalign)
+#else
+#define LSAN_MAYBE_INTERCEPT_MEMALIGN
+#define LSAN_MAYBE_INTERCEPT___LIBC_MEMALIGN
+#endif // SANITIZER_INTERCEPT_MEMALIGN
+
+#if SANITIZER_INTERCEPT_ALIGNED_ALLOC
+INTERCEPTOR(void*, aligned_alloc, uptr alignment, uptr size) {
+  ENSURE_LSAN_INITED;
+  GET_STACK_TRACE_MALLOC;
+  return Allocate(stack, size, alignment, kAlwaysClearMemory);
+}
+#define LSAN_MAYBE_INTERCEPT_ALIGNED_ALLOC INTERCEPT_FUNCTION(aligned_alloc)
+#else
+#define LSAN_MAYBE_INTERCEPT_ALIGNED_ALLOC
+#endif
+
+INTERCEPTOR(int, posix_memalign, void **memptr, uptr alignment, uptr size) {
+  ENSURE_LSAN_INITED;
+  GET_STACK_TRACE_MALLOC;
+  *memptr = Allocate(stack, size, alignment, kAlwaysClearMemory);
+  // FIXME: Return ENOMEM if user requested more than max alloc size.
+  return 0;
 }
 
 INTERCEPTOR(void*, valloc, uptr size) {
@@ -122,11 +137,18 @@ INTERCEPTOR(void*, valloc, uptr size) {
   return Allocate(stack, size, GetPageSizeCached(), kAlwaysClearMemory);
 }
 
+#if SANITIZER_INTERCEPT_MALLOC_USABLE_SIZE
 INTERCEPTOR(uptr, malloc_usable_size, void *ptr) {
   ENSURE_LSAN_INITED;
   return GetMallocUsableSize(ptr);
 }
+#define LSAN_MAYBE_INTERCEPT_MALLOC_USABLE_SIZE \
+        INTERCEPT_FUNCTION(malloc_usable_size)
+#else
+#define LSAN_MAYBE_INTERCEPT_MALLOC_USABLE_SIZE
+#endif
 
+#if SANITIZER_INTERCEPT_MALLOPT_AND_MALLINFO
 struct fake_mallinfo {
   int x[10];
 };
@@ -136,11 +158,18 @@ INTERCEPTOR(struct fake_mallinfo, mallinfo, void) {
   internal_memset(&res, 0, sizeof(res));
   return res;
 }
+#define LSAN_MAYBE_INTERCEPT_MALLINFO INTERCEPT_FUNCTION(mallinfo)
 
 INTERCEPTOR(int, mallopt, int cmd, int value) {
   return -1;
 }
+#define LSAN_MAYBE_INTERCEPT_MALLOPT INTERCEPT_FUNCTION(mallopt)
+#else
+#define LSAN_MAYBE_INTERCEPT_MALLINFO
+#define LSAN_MAYBE_INTERCEPT_MALLOPT
+#endif // SANITIZER_INTERCEPT_MALLOPT_AND_MALLINFO
 
+#if SANITIZER_INTERCEPT_PVALLOC
 INTERCEPTOR(void*, pvalloc, uptr size) {
   ENSURE_LSAN_INITED;
   GET_STACK_TRACE_MALLOC;
@@ -152,8 +181,17 @@ INTERCEPTOR(void*, pvalloc, uptr size) {
   }
   return Allocate(stack, size, GetPageSizeCached(), kAlwaysClearMemory);
 }
+#define LSAN_MAYBE_INTERCEPT_PVALLOC INTERCEPT_FUNCTION(pvalloc)
+#else
+#define LSAN_MAYBE_INTERCEPT_PVALLOC
+#endif // SANITIZER_INTERCEPT_PVALLOC
 
+#if SANITIZER_INTERCEPT_CFREE
 INTERCEPTOR(void, cfree, void *p) ALIAS(WRAPPER_NAME(free));
+#define LSAN_MAYBE_INTERCEPT_CFREE INTERCEPT_FUNCTION(cfree)
+#else
+#define LSAN_MAYBE_INTERCEPT_CFREE
+#endif // SANITIZER_INTERCEPT_CFREE
 
 #define OPERATOR_NEW_BODY                              \
   ENSURE_LSAN_INITED;                                  \
@@ -161,13 +199,13 @@ INTERCEPTOR(void, cfree, void *p) ALIAS(WRAPPER_NAME(free));
   return Allocate(stack, size, 1, kAlwaysClearMemory);
 
 INTERCEPTOR_ATTRIBUTE
-void *operator new(uptr size) { OPERATOR_NEW_BODY; }
+void *operator new(size_t size) { OPERATOR_NEW_BODY; }
 INTERCEPTOR_ATTRIBUTE
-void *operator new[](uptr size) { OPERATOR_NEW_BODY; }
+void *operator new[](size_t size) { OPERATOR_NEW_BODY; }
 INTERCEPTOR_ATTRIBUTE
-void *operator new(uptr size, std::nothrow_t const&) { OPERATOR_NEW_BODY; }
+void *operator new(size_t size, std::nothrow_t const&) { OPERATOR_NEW_BODY; }
 INTERCEPTOR_ATTRIBUTE
-void *operator new[](uptr size, std::nothrow_t const&) { OPERATOR_NEW_BODY; }
+void *operator new[](size_t size, std::nothrow_t const&) { OPERATOR_NEW_BODY; }
 
 #define OPERATOR_DELETE_BODY \
   ENSURE_LSAN_INITED;        \
@@ -277,17 +315,18 @@ namespace __lsan {
 void InitializeInterceptors() {
   INTERCEPT_FUNCTION(malloc);
   INTERCEPT_FUNCTION(free);
-  INTERCEPT_FUNCTION(cfree);
+  LSAN_MAYBE_INTERCEPT_CFREE;
   INTERCEPT_FUNCTION(calloc);
   INTERCEPT_FUNCTION(realloc);
-  INTERCEPT_FUNCTION(memalign);
+  LSAN_MAYBE_INTERCEPT_MEMALIGN;
+  LSAN_MAYBE_INTERCEPT___LIBC_MEMALIGN;
+  LSAN_MAYBE_INTERCEPT_ALIGNED_ALLOC;
   INTERCEPT_FUNCTION(posix_memalign);
-  INTERCEPT_FUNCTION(__libc_memalign);
   INTERCEPT_FUNCTION(valloc);
-  INTERCEPT_FUNCTION(pvalloc);
-  INTERCEPT_FUNCTION(malloc_usable_size);
-  INTERCEPT_FUNCTION(mallinfo);
-  INTERCEPT_FUNCTION(mallopt);
+  LSAN_MAYBE_INTERCEPT_PVALLOC;
+  LSAN_MAYBE_INTERCEPT_MALLOC_USABLE_SIZE;
+  LSAN_MAYBE_INTERCEPT_MALLINFO;
+  LSAN_MAYBE_INTERCEPT_MALLOPT;
   INTERCEPT_FUNCTION(pthread_create);
   INTERCEPT_FUNCTION(pthread_join);
 

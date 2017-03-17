@@ -142,8 +142,15 @@ append_list_if(COMPILER_RT_HAS_FNO_STACK_PROTECTOR_FLAG -fno-stack-protector SAN
 append_list_if(COMPILER_RT_HAS_FNO_SANITIZE_SAFE_STACK_FLAG -fno-sanitize=safe-stack SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FVISIBILITY_HIDDEN_FLAG -fvisibility=hidden SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FVISIBILITY_INLINES_HIDDEN_FLAG -fvisibility-inlines-hidden SANITIZER_COMMON_CFLAGS)
-append_list_if(COMPILER_RT_HAS_FNO_FUNCTION_SECTIONS_FLAG -fno-function-sections SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FNO_LTO_FLAG -fno-lto SANITIZER_COMMON_CFLAGS)
+
+# The following is a workaround for powerpc64le. This is the only architecture
+# that requires -fno-function-sections to work properly. If lacking, the ASan
+# Linux test function-sections-are-bad.cc fails with the following error:
+# 'undefined symbol: __sanitizer_unaligned_load32'.
+if(DEFINED TARGET_powerpc64le_CFLAGS)
+  append_list_if(COMPILER_RT_HAS_FNO_FUNCTION_SECTIONS_FLAG -fno-function-sections TARGET_powerpc64le_CFLAGS)
+endif()
 
 if(MSVC)
   # Replace the /M[DT][d] flags with /MT, and strip any definitions of _DEBUG,
@@ -224,6 +231,17 @@ append_list_if(COMPILER_RT_HAS_WD4800_FLAG /wd4800 SANITIZER_COMMON_CFLAGS)
 
 # Warnings to turn off for all libraries, not just sanitizers.
 append_string_if(COMPILER_RT_HAS_WUNUSED_PARAMETER_FLAG -Wno-unused-parameter CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+
+if (CMAKE_LINKER MATCHES "link.exe$")
+  # Silence MSVC linker warnings caused by empty object files. The
+  # sanitizer libraries intentionally use ifdefs that result in empty
+  # files, rather than skipping these files in the build system.
+  # Ideally, we would pass this flag only for the libraries that need
+  # it, but CMake doesn't seem to have a way to set linker flags for
+  # individual static libraries, so we enable the suppression flag for
+  # the whole compiler-rt project.
+  append("/IGNORE:4221" CMAKE_STATIC_LINKER_FLAGS)
+endif()
 
 add_subdirectory(include)
 

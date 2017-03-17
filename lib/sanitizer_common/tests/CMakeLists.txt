@@ -26,6 +26,7 @@ set(SANITIZER_UNITTESTS
   sanitizer_posix_test.cc
   sanitizer_printf_test.cc
   sanitizer_procmaps_test.cc
+  sanitizer_quarantine_test.cc
   sanitizer_stackdepot_test.cc
   sanitizer_stacktrace_printer_test.cc
   sanitizer_stacktrace_test.cc
@@ -80,7 +81,10 @@ endif()
 
 if(APPLE)
   list(APPEND SANITIZER_TEST_CFLAGS_COMMON ${DARWIN_osx_CFLAGS})
-  list(APPEND SANITIZER_TEST_LINK_FLAGS_COMMON ${DARWIN_osx_LINKFLAGS})
+  list(APPEND SANITIZER_TEST_LINK_FLAGS_COMMON ${DARWIN_osx_LINK_FLAGS})
+
+  add_weak_symbols("sanitizer_common" WEAK_SYMBOL_LINK_FLAGS)
+  list(APPEND SANITIZER_TEST_LINK_FLAGS_COMMON ${WEAK_SYMBOL_LINK_FLAGS})
 endif()
 
 # MSVC linker is allocating 1M for the stack by default, which is not
