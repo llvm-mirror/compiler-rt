@@ -495,6 +495,52 @@ INTERCEPTOR(char*, strcasestr, const char *s1, const char *s2) {
 #define INIT_STRCASESTR
 #endif
 
+#if SANITIZER_INTERCEPT_STRTOK
+
+INTERCEPTOR(char*, strtok, char *str, const char *delimiters) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, strtok, str, delimiters);
+  if (!common_flags()->intercept_strtok) {
+    return REAL(strtok)(str, delimiters);
+  }
+  if (common_flags()->strict_string_checks) {
+    // If strict_string_checks is enabled, we check the whole first argument
+    // string on the first call (strtok saves this string in a static buffer
+    // for subsequent calls). We do not need to check strtok's result.
+    // As the delimiters can change, we check them every call.
+    if (str != nullptr) {
+      COMMON_INTERCEPTOR_READ_RANGE(ctx, str, REAL(strlen)(str) + 1);
+    }
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, delimiters,
+                                  REAL(strlen)(delimiters) + 1);
+    return REAL(strtok)(str, delimiters);
+  } else {
+    // However, when strict_string_checks is disabled we cannot check the
+    // whole string on the first call. Instead, we check the result string
+    // which is guaranteed to be a NULL-terminated substring of the first
+    // argument. We also conservatively check one character of str and the
+    // delimiters.
+    if (str != nullptr) {
+      COMMON_INTERCEPTOR_READ_STRING(ctx, str, 1);
+    }
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, delimiters, 1);
+    char *result = REAL(strtok)(str, delimiters);
+    if (result != nullptr) {
+      COMMON_INTERCEPTOR_READ_RANGE(ctx, result, REAL(strlen)(result) + 1);
+    } else if (str != nullptr) {
+      // No delimiter were found, it's safe to assume that the entire str was
+      // scanned.
+      COMMON_INTERCEPTOR_READ_RANGE(ctx, str, REAL(strlen)(str) + 1);
+    }
+    return result;
+  }
+}
+
+#define INIT_STRTOK COMMON_INTERCEPT_FUNCTION(strtok)
+#else
+#define INIT_STRTOK
+#endif
+
 #if SANITIZER_INTERCEPT_MEMMEM
 DECLARE_WEAK_INTERCEPTOR_HOOK(__sanitizer_weak_hook_memmem, uptr called_pc,
                               const void *s1, SIZE_T len1, const void *s2,
@@ -6047,6 +6093,21 @@ INTERCEPTOR(void *, getutxline, void *ut) {
 #define INIT_UTMPX
 #endif
 
+#if SANITIZER_INTERCEPT_GETLOADAVG
+INTERCEPTOR(int, getloadavg, double *loadavg, int nelem) {
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, getloadavg, loadavg, nelem);
+  int res = REAL(getloadavg)(loadavg, nelem);
+  if (res > 0)
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, loadavg, res * sizeof(*loadavg));
+  return res;
+}
+#define INIT_GETLOADAVG                      \
+  COMMON_INTERCEPT_FUNCTION(getloadavg);
+#else
+#define INIT_GETLOADAVG
+#endif
+
 static void InitializeCommonInterceptors() {
   static u64 metadata_mem[sizeof(MetadataHashMap) / sizeof(u64) + 1];
   interceptor_metadata_map = new((void *)&metadata_mem) MetadataHashMap();
@@ -6064,6 +6125,7 @@ static void InitializeCommonInterceptors() {
   INIT_STRCHRNUL;
   INIT_STRRCHR;
   INIT_STRSPN;
+  INIT_STRTOK;
   INIT_STRPBRK;
   INIT_MEMSET;
   INIT_MEMMOVE;
@@ -6245,4 +6307,5 @@ static void InitializeCommonInterceptors() {
   // FIXME: add other *stat interceptors.
   INIT_UTMP;
   INIT_UTMPX;
+  INIT_GETLOADAVG;
 }
