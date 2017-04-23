@@ -24,7 +24,8 @@
 //   COMMON_INTERCEPTOR_SET_THREAD_NAME
 //   COMMON_INTERCEPTOR_ON_DLOPEN
 //   COMMON_INTERCEPTOR_ON_EXIT
-//   COMMON_INTERCEPTOR_MUTEX_LOCK
+//   COMMON_INTERCEPTOR_MUTEX_PRE_LOCK
+//   COMMON_INTERCEPTOR_MUTEX_POST_LOCK
 //   COMMON_INTERCEPTOR_MUTEX_UNLOCK
 //   COMMON_INTERCEPTOR_MUTEX_REPAIR
 //   COMMON_INTERCEPTOR_SET_PTHREAD_NAME
@@ -89,8 +90,12 @@ bool PlatformHasDifferentMemcpyAndMemmove();
 #define COMMON_INTERCEPTOR_FD_ACCESS(ctx, fd) {}
 #endif
 
-#ifndef COMMON_INTERCEPTOR_MUTEX_LOCK
-#define COMMON_INTERCEPTOR_MUTEX_LOCK(ctx, m) {}
+#ifndef COMMON_INTERCEPTOR_MUTEX_PRE_LOCK
+#define COMMON_INTERCEPTOR_MUTEX_PRE_LOCK(ctx, m) {}
+#endif
+
+#ifndef COMMON_INTERCEPTOR_MUTEX_POST_LOCK
+#define COMMON_INTERCEPTOR_MUTEX_POST_LOCK(ctx, m) {}
 #endif
 
 #ifndef COMMON_INTERCEPTOR_MUTEX_UNLOCK
@@ -883,6 +888,23 @@ INTERCEPTOR(SSIZE_T, read, int fd, void *ptr, SIZE_T count) {
 #define INIT_READ
 #endif
 
+#if SANITIZER_INTERCEPT_FREAD
+INTERCEPTOR(SIZE_T, fread, void *ptr, SIZE_T size, SIZE_T nmemb, void *file) {
+  // libc file streams can call user-supplied functions, see fopencookie.
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, fread, ptr, size, nmemb, file);
+  // FIXME: under ASan the call below may write to freed memory and corrupt
+  // its metadata. See
+  // https://github.com/google/sanitizers/issues/321.
+  SIZE_T res = REAL(fread)(ptr, size, nmemb, file);
+  if (res > 0) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, res * size);
+  return res;
+}
+#define INIT_FREAD COMMON_INTERCEPT_FUNCTION(fread)
+#else
+#define INIT_FREAD
+#endif
+
 #if SANITIZER_INTERCEPT_PREAD
 INTERCEPTOR(SSIZE_T, pread, int fd, void *ptr, SIZE_T count, OFF_T offset) {
   void *ctx;
@@ -981,6 +1003,20 @@ INTERCEPTOR(SSIZE_T, write, int fd, void *ptr, SIZE_T count) {
 #define INIT_WRITE COMMON_INTERCEPT_FUNCTION(write)
 #else
 #define INIT_WRITE
+#endif
+
+#if SANITIZER_INTERCEPT_FWRITE
+INTERCEPTOR(SIZE_T, fwrite, const void *p, uptr size, uptr nmemb, void *file) {
+  // libc file streams can call user-supplied functions, see fopencookie.
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, fwrite, p, size, nmemb, file);
+  SIZE_T res = REAL(fwrite)(p, size, nmemb, file);
+  if (res > 0) COMMON_INTERCEPTOR_READ_RANGE(ctx, p, res * size);
+  return res;
+}
+#define INIT_FWRITE COMMON_INTERCEPT_FUNCTION(fwrite)
+#else
+#define INIT_FWRITE
 #endif
 
 #if SANITIZER_INTERCEPT_PWRITE
@@ -3466,7 +3502,8 @@ INTERCEPTOR(int, getgroups, int size, u32 *lst) {
   // its metadata. See
   // https://github.com/google/sanitizers/issues/321.
   int res = REAL(getgroups)(size, lst);
-  if (res && lst) COMMON_INTERCEPTOR_WRITE_RANGE(ctx, lst, res * sizeof(*lst));
+  if (res >= 0 && lst && size > 0)
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, lst, res * sizeof(*lst));
   return res;
 }
 #define INIT_GETGROUPS COMMON_INTERCEPT_FUNCTION(getgroups);
@@ -3721,11 +3758,12 @@ INTERCEPTOR(void, _exit, int status) {
 INTERCEPTOR(int, pthread_mutex_lock, void *m) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pthread_mutex_lock, m);
+  COMMON_INTERCEPTOR_MUTEX_PRE_LOCK(ctx, m);
   int res = REAL(pthread_mutex_lock)(m);
   if (res == errno_EOWNERDEAD)
     COMMON_INTERCEPTOR_MUTEX_REPAIR(ctx, m);
   if (res == 0 || res == errno_EOWNERDEAD)
-    COMMON_INTERCEPTOR_MUTEX_LOCK(ctx, m);
+    COMMON_INTERCEPTOR_MUTEX_POST_LOCK(ctx, m);
   if (res == errno_EINVAL)
     COMMON_INTERCEPTOR_MUTEX_INVALID(ctx, m);
   return res;
@@ -4599,7 +4637,7 @@ INTERCEPTOR(SIZE_T, iconv, void *cd, char **inbuf, SIZE_T *inbytesleft,
   // its metadata. See
   // https://github.com/google/sanitizers/issues/321.
   SIZE_T res = REAL(iconv)(cd, inbuf, inbytesleft, outbuf, outbytesleft);
-  if (res != (SIZE_T) - 1 && outbuf && *outbuf > outbuf_orig) {
+  if (outbuf && *outbuf > outbuf_orig) {
     SIZE_T sz = (char *)*outbuf - (char *)outbuf_orig;
     COMMON_INTERCEPTOR_WRITE_RANGE(ctx, outbuf_orig, sz);
   }
@@ -6135,12 +6173,14 @@ static void InitializeCommonInterceptors() {
   INIT_MEMRCHR;
   INIT_MEMMEM;
   INIT_READ;
+  INIT_FREAD;
   INIT_PREAD;
   INIT_PREAD64;
   INIT_READV;
   INIT_PREADV;
   INIT_PREADV64;
   INIT_WRITE;
+  INIT_FWRITE;
   INIT_PWRITE;
   INIT_PWRITE64;
   INIT_WRITEV;

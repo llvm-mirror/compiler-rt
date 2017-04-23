@@ -20,9 +20,11 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "sanitizer_common/sanitizer_common.h"
@@ -30,6 +32,8 @@
 #include "xray_buffer_queue.h"
 #include "xray_defs.h"
 #include "xray_fdr_log_records.h"
+#include "xray_flags.h"
+#include "xray_tsc.h"
 
 namespace __xray {
 
@@ -47,7 +51,7 @@ namespace __xray_fdr_internal {
 
 /// Writes the new buffer record and wallclock time that begin a buffer for a
 /// thread to MemPtr and increments MemPtr. Bypasses the thread local state
-// machine and writes directly to memory without checks.
+/// machine and writes directly to memory without checks.
 static void writeNewBufferPreamble(pid_t Tid, timespec TS, char *&MemPtr);
 
 /// Write a metadata record to switch to a new CPU to MemPtr and increments
@@ -71,8 +75,7 @@ static void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
 
 /// Sets up a new buffer in thread_local storage and writes a preamble. The
 /// wall_clock_reader function is used to populate the WallTimeRecord entry.
-static void setupNewBuffer(const BufferQueue::Buffer &Buffer,
-                           int (*wall_clock_reader)(clockid_t,
+static void setupNewBuffer(int (*wall_clock_reader)(clockid_t,
                                                     struct timespec *));
 
 /// Called to record CPU time for a new CPU within the current thread.
@@ -91,12 +94,12 @@ static void writeTSCWrapMetadata(uint64_t TSC);
 /// walk backward through its buffer and erase trivial functions to avoid
 /// polluting the log and may use the buffer queue to obtain or release a
 /// buffer.
-static void
-processFunctionHook(int32_t FuncId, XRayEntryType Entry, uint64_t TSC,
-                    unsigned char CPU,
-                    int (*wall_clock_reader)(clockid_t, struct timespec *),
-                    const std::atomic<XRayLogInitStatus> &LoggingStatus,
-                    const std::shared_ptr<BufferQueue> &BQ);
+static void processFunctionHook(int32_t FuncId, XRayEntryType Entry,
+                                uint64_t TSC, unsigned char CPU,
+                                int (*wall_clock_reader)(clockid_t,
+                                                         struct timespec *),
+                                __sanitizer::atomic_sint32_t &LoggingStatus,
+                                const std::shared_ptr<BufferQueue> &BQ);
 
 //-----------------------------------------------------------------------------|
 // The rest of the file is implementation.                                     |
@@ -106,8 +109,16 @@ processFunctionHook(int32_t FuncId, XRayEntryType Entry, uint64_t TSC,
 //-----------------------------------------------------------------------------|
 
 namespace {
+
 thread_local BufferQueue::Buffer Buffer;
 thread_local char *RecordPtr = nullptr;
+
+// The number of FunctionEntry records immediately preceding RecordPtr.
+thread_local uint8_t NumConsecutiveFnEnters = 0;
+
+// The number of adjacent, consecutive pairs of FunctionEntry, Tail Exit
+// records preceding RecordPtr.
+thread_local uint8_t NumTailCalls = 0;
 
 constexpr auto MetadataRecSize = sizeof(MetadataRecord);
 constexpr auto FunctionRecSize = sizeof(FunctionRecord);
@@ -166,8 +177,9 @@ public:
 };
 
 static inline bool loggingInitialized(
-    const std::atomic<XRayLogInitStatus> &LoggingStatus) XRAY_NEVER_INSTRUMENT {
-  return LoggingStatus.load(std::memory_order_acquire) ==
+    const __sanitizer::atomic_sint32_t &LoggingStatus) XRAY_NEVER_INSTRUMENT {
+  return __sanitizer::atomic_load(&LoggingStatus,
+                                  __sanitizer::memory_order_acquire) ==
          XRayLogInitStatus::XRAY_LOG_INITIALIZED;
 }
 
@@ -206,10 +218,11 @@ static inline void writeNewBufferPreamble(pid_t Tid, timespec TS,
   }
   std::memcpy(MemPtr, Records, sizeof(MetadataRecord) * InitRecordsCount);
   MemPtr += sizeof(MetadataRecord) * InitRecordsCount;
+  NumConsecutiveFnEnters = 0;
+  NumTailCalls = 0;
 }
 
-static inline void setupNewBuffer(const BufferQueue::Buffer &Buffer,
-                                  int (*wall_clock_reader)(clockid_t,
+static inline void setupNewBuffer(int (*wall_clock_reader)(clockid_t,
                                                            struct timespec *))
     XRAY_NEVER_INSTRUMENT {
   RecordPtr = static_cast<char *>(Buffer.Buffer);
@@ -218,6 +231,8 @@ static inline void setupNewBuffer(const BufferQueue::Buffer &Buffer,
   // This is typically clock_gettime, but callers have injection ability.
   wall_clock_reader(CLOCK_MONOTONIC, &TS);
   writeNewBufferPreamble(Tid, TS, RecordPtr);
+  NumConsecutiveFnEnters = 0;
+  NumTailCalls = 0;
 }
 
 static inline void writeNewCPUIdMetadata(uint16_t CPU, uint64_t TSC,
@@ -229,11 +244,13 @@ static inline void writeNewCPUIdMetadata(uint16_t CPU, uint64_t TSC,
   // The data for the New CPU will contain the following bytes:
   //   - CPU ID (uint16_t, 2 bytes)
   //   - Full TSC (uint64_t, 8 bytes)
-  // Total = 12 bytes.
+  // Total = 10 bytes.
   std::memcpy(&NewCPUId.Data, &CPU, sizeof(CPU));
   std::memcpy(&NewCPUId.Data[sizeof(CPU)], &TSC, sizeof(TSC));
   std::memcpy(MemPtr, &NewCPUId, sizeof(MetadataRecord));
   MemPtr += sizeof(MetadataRecord);
+  NumConsecutiveFnEnters = 0;
+  NumTailCalls = 0;
 }
 
 static inline void writeNewCPUIdMetadata(uint16_t CPU,
@@ -248,6 +265,8 @@ static inline void writeEOBMetadata(char *&MemPtr) XRAY_NEVER_INSTRUMENT {
   // For now we don't write any bytes into the Data field.
   std::memcpy(MemPtr, &EOBMeta, sizeof(MetadataRecord));
   MemPtr += sizeof(MetadataRecord);
+  NumConsecutiveFnEnters = 0;
+  NumTailCalls = 0;
 }
 
 static inline void writeEOBMetadata() XRAY_NEVER_INSTRUMENT {
@@ -266,6 +285,8 @@ static inline void writeTSCWrapMetadata(uint64_t TSC,
   std::memcpy(&TSCWrap.Data, &TSC, sizeof(TSC));
   std::memcpy(MemPtr, &TSCWrap, sizeof(MetadataRecord));
   MemPtr += sizeof(MetadataRecord);
+  NumConsecutiveFnEnters = 0;
+  NumTailCalls = 0;
 }
 
 static inline void writeTSCWrapMetadata(uint64_t TSC) XRAY_NEVER_INSTRUMENT {
@@ -286,13 +307,35 @@ static inline void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
 
   switch (EntryType) {
   case XRayEntryType::ENTRY:
+    ++NumConsecutiveFnEnters;
+    FuncRecord.RecordKind = uint8_t(FunctionRecord::RecordKinds::FunctionEnter);
+    break;
   case XRayEntryType::LOG_ARGS_ENTRY:
+    // We should not rewind functions with logged args.
+    NumConsecutiveFnEnters = 0;
+    NumTailCalls = 0;
     FuncRecord.RecordKind = uint8_t(FunctionRecord::RecordKinds::FunctionEnter);
     break;
   case XRayEntryType::EXIT:
+    // If we've decided to log the function exit, we will never erase the log
+    // before it.
+    NumConsecutiveFnEnters = 0;
+    NumTailCalls = 0;
     FuncRecord.RecordKind = uint8_t(FunctionRecord::RecordKinds::FunctionExit);
     break;
   case XRayEntryType::TAIL:
+    // If we just entered the function we're tail exiting from or erased every
+    // invocation since then, this function entry tail pair is a candidate to
+    // be erased when the child function exits.
+    if (NumConsecutiveFnEnters > 0) {
+      ++NumTailCalls;
+      NumConsecutiveFnEnters = 0;
+    } else {
+      // We will never be able to erase this tail call since we have logged
+      // something in between the function entry and tail exit.
+      NumTailCalls = 0;
+      NumConsecutiveFnEnters = 0;
+    }
     FuncRecord.RecordKind =
         uint8_t(FunctionRecord::RecordKinds::FunctionTailExit);
     break;
@@ -302,15 +345,113 @@ static inline void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
   MemPtr += sizeof(FunctionRecord);
 }
 
+static uint64_t thresholdTicks() {
+  static uint64_t TicksPerSec = probeRequiredCPUFeatures() ? getTSCFrequency() :
+                                __xray::NanosecondsPerSecond;
+  static const uint64_t ThresholdTicks =
+      TicksPerSec * flags()->xray_fdr_log_func_duration_threshold_us / 1000000;
+  return ThresholdTicks;
+}
+
+// Re-point the thread local pointer into this thread's Buffer before the recent
+// "Function Entry" record and any "Tail Call Exit" records after that.
+static void rewindRecentCall(uint64_t TSC, uint64_t &LastTSC,
+                             uint64_t &LastFunctionEntryTSC, int32_t FuncId) {
+  using AlignedFuncStorage =
+      std::aligned_storage<sizeof(FunctionRecord),
+                           alignof(FunctionRecord)>::type;
+  RecordPtr -= FunctionRecSize;
+  AlignedFuncStorage AlignedFuncRecordBuffer;
+  const auto &FuncRecord = *reinterpret_cast<FunctionRecord *>(
+      std::memcpy(&AlignedFuncRecordBuffer, RecordPtr, FunctionRecSize));
+  assert(FuncRecord.RecordKind ==
+             uint8_t(FunctionRecord::RecordKinds::FunctionEnter) &&
+         "Expected to find function entry recording when rewinding.");
+  assert(FuncRecord.FuncId == (FuncId & ~(0x0F << 28)) &&
+         "Expected matching function id when rewinding Exit");
+  --NumConsecutiveFnEnters;
+  LastTSC -= FuncRecord.TSCDelta;
+
+  // We unwound one call. Update the state and return without writing a log.
+  if (NumConsecutiveFnEnters != 0) {
+    LastFunctionEntryTSC -= FuncRecord.TSCDelta;
+    return;
+  }
+
+  // Otherwise we've rewound the stack of all function entries, we might be
+  // able to rewind further by erasing tail call functions that are being
+  // exited from via this exit.
+  LastFunctionEntryTSC = 0;
+  auto RewindingTSC = LastTSC;
+  auto RewindingRecordPtr = RecordPtr - FunctionRecSize;
+  while (NumTailCalls > 0) {
+    AlignedFuncStorage TailExitRecordBuffer;
+    // Rewind the TSC back over the TAIL EXIT record.
+    const auto &ExpectedTailExit =
+        *reinterpret_cast<FunctionRecord *>(std::memcpy(
+            &TailExitRecordBuffer, RewindingRecordPtr, FunctionRecSize));
+
+    assert(ExpectedTailExit.RecordKind ==
+               uint8_t(FunctionRecord::RecordKinds::FunctionTailExit) &&
+           "Expected to find tail exit when rewinding.");
+    RewindingRecordPtr -= FunctionRecSize;
+    RewindingTSC -= ExpectedTailExit.TSCDelta;
+    AlignedFuncStorage FunctionEntryBuffer;
+    const auto &ExpectedFunctionEntry =
+        *reinterpret_cast<FunctionRecord *>(std::memcpy(
+            &FunctionEntryBuffer, RewindingRecordPtr, FunctionRecSize));
+    assert(ExpectedFunctionEntry.RecordKind ==
+               uint8_t(FunctionRecord::RecordKinds::FunctionEnter) &&
+           "Expected to find function entry when rewinding tail call.");
+    assert(ExpectedFunctionEntry.FuncId == ExpectedTailExit.FuncId &&
+           "Expected funcids to match when rewinding tail call.");
+
+    // This tail call exceeded the threshold duration. It will not be erased.
+    if ((TSC - RewindingTSC) >= thresholdTicks()) {
+      NumTailCalls = 0;
+      return;
+    }
+
+    // We can erase a tail exit pair that we're exiting through since
+    // its duration is under threshold.
+    --NumTailCalls;
+    RewindingRecordPtr -= FunctionRecSize;
+    RewindingTSC -= ExpectedFunctionEntry.TSCDelta;
+    RecordPtr -= 2 * FunctionRecSize;
+    LastTSC = RewindingTSC;
+  }
+}
+
+static inline bool releaseThreadLocalBuffer(BufferQueue *BQ) {
+  auto EC = BQ->releaseBuffer(Buffer);
+  if (EC != BufferQueue::ErrorCode::Ok) {
+    Report("Failed to release buffer at %p; error=%s\n", Buffer.Buffer,
+           BufferQueue::getErrorString(EC));
+    return false;
+  }
+  return true;
+}
+
 static inline void processFunctionHook(
     int32_t FuncId, XRayEntryType Entry, uint64_t TSC, unsigned char CPU,
     int (*wall_clock_reader)(clockid_t, struct timespec *),
-    const std::atomic<XRayLogInitStatus> &LoggingStatus,
+    __sanitizer::atomic_sint32_t &LoggingStatus,
     const std::shared_ptr<BufferQueue> &BQ) XRAY_NEVER_INSTRUMENT {
   // Bail out right away if logging is not initialized yet.
-  if (LoggingStatus.load(std::memory_order_acquire) !=
-      XRayLogInitStatus::XRAY_LOG_INITIALIZED)
+  // We should take the opportunity to release the buffer though.
+  auto Status = __sanitizer::atomic_load(&LoggingStatus,
+                                         __sanitizer::memory_order_acquire);
+  if (Status != XRayLogInitStatus::XRAY_LOG_INITIALIZED) {
+    if (RecordPtr != nullptr &&
+        (Status == XRayLogInitStatus::XRAY_LOG_FINALIZING ||
+         Status == XRayLogInitStatus::XRAY_LOG_FINALIZED)) {
+      writeEOBMetadata();
+      if (!releaseThreadLocalBuffer(BQ.get()))
+        return;
+      RecordPtr = nullptr;
+    }
     return;
+  }
 
   // We use a thread_local variable to keep track of which CPUs we've already
   // run, and the TSC times for these CPUs. This allows us to stop repeating the
@@ -319,6 +460,7 @@ static inline void processFunctionHook(
   // We assume that we'll support only 65536 CPUs for x86_64.
   thread_local uint16_t CurrentCPU = std::numeric_limits<uint16_t>::max();
   thread_local uint64_t LastTSC = 0;
+  thread_local uint64_t LastFunctionEntryTSC = 0;
 
   // Make sure a thread that's ever called handleArg0 has a thread-local
   // live reference to the buffer queue for this particular instance of
@@ -340,19 +482,16 @@ static inline void processFunctionHook(
 
   if (!loggingInitialized(LoggingStatus) || LocalBQ->finalizing()) {
     writeEOBMetadata();
-    auto EC = BQ->releaseBuffer(Buffer);
-    if (EC != BufferQueue::ErrorCode::Ok) {
-      Report("Failed to release buffer at %p; error=%s\n", Buffer.Buffer,
-             BufferQueue::getErrorString(EC));
+    if (!releaseThreadLocalBuffer(BQ.get()))
       return;
-    }
     RecordPtr = nullptr;
   }
 
   if (Buffer.Buffer == nullptr) {
     auto EC = LocalBQ->getBuffer(Buffer);
     if (EC != BufferQueue::ErrorCode::Ok) {
-      auto LS = LoggingStatus.load(std::memory_order_acquire);
+      auto LS = __sanitizer::atomic_load(&LoggingStatus,
+                                         __sanitizer::memory_order_acquire);
       if (LS != XRayLogInitStatus::XRAY_LOG_FINALIZING &&
           LS != XRayLogInitStatus::XRAY_LOG_FINALIZED)
         Report("Failed to acquire a buffer; error=%s\n",
@@ -360,7 +499,7 @@ static inline void processFunctionHook(
       return;
     }
 
-    setupNewBuffer(Buffer, wall_clock_reader);
+    setupNewBuffer(wall_clock_reader);
   }
 
   if (CurrentCPU == std::numeric_limits<uint16_t>::max()) {
@@ -410,19 +549,15 @@ static inline void processFunctionHook(
   if ((RecordPtr + (MetadataRecSize + FunctionRecSize)) - BufferStart <
       static_cast<ptrdiff_t>(MetadataRecSize)) {
     writeEOBMetadata();
-    auto EC = LocalBQ->releaseBuffer(Buffer);
-    if (EC != BufferQueue::ErrorCode::Ok) {
-      Report("Failed to release buffer at %p; error=%s\n", Buffer.Buffer,
-             BufferQueue::getErrorString(EC));
+    if (!releaseThreadLocalBuffer(LocalBQ.get()))
       return;
-    }
-    EC = LocalBQ->getBuffer(Buffer);
+    auto EC = LocalBQ->getBuffer(Buffer);
     if (EC != BufferQueue::ErrorCode::Ok) {
       Report("Failed to acquire a buffer; error=%s\n",
              BufferQueue::getErrorString(EC));
       return;
     }
-    setupNewBuffer(Buffer, wall_clock_reader);
+    setupNewBuffer(wall_clock_reader);
   }
 
   // By this point, we are now ready to write at most 24 bytes (one metadata
@@ -467,10 +602,24 @@ static inline void processFunctionHook(
       RecordTSCDelta = Delta;
   }
 
-  // We then update our "LastTSC" and "CurrentCPU" thread-local variables to aid
-  // us in future computations of this TSC delta value.
   LastTSC = TSC;
   CurrentCPU = CPU;
+  switch (Entry) {
+  case XRayEntryType::ENTRY:
+  case XRayEntryType::LOG_ARGS_ENTRY:
+    // Update the thread local state for the next invocation.
+    LastFunctionEntryTSC = TSC;
+    break;
+  case XRayEntryType::TAIL:
+    break;
+  case XRayEntryType::EXIT:
+    // Break out and write the exit record if we can't erase any functions.
+    if (NumConsecutiveFnEnters == 0 ||
+        (TSC - LastFunctionEntryTSC) >= thresholdTicks())
+      break;
+    rewindRecentCall(TSC, LastTSC, LastFunctionEntryTSC, FuncId);
+    return; // without writing log.
+  }
 
   writeFunctionRecord(FuncId, RecordTSCDelta, Entry, RecordPtr);
 
@@ -478,12 +627,8 @@ static inline void processFunctionHook(
   // make sure that other threads may start using this buffer.
   if ((RecordPtr + MetadataRecSize) - BufferStart == MetadataRecSize) {
     writeEOBMetadata();
-    auto EC = LocalBQ->releaseBuffer(Buffer);
-    if (EC != BufferQueue::ErrorCode::Ok) {
-      Report("Failed releasing buffer at %p; error=%s\n", Buffer.Buffer,
-             BufferQueue::getErrorString(EC));
+    if (!releaseThreadLocalBuffer(LocalBQ.get()))
       return;
-    }
     RecordPtr = nullptr;
   }
 }
@@ -491,5 +636,4 @@ static inline void processFunctionHook(
 } // namespace __xray_fdr_internal
 
 } // namespace __xray
-
 #endif // XRAY_XRAY_FDR_LOGGING_IMPL_H

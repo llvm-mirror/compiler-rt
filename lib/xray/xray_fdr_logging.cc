@@ -17,15 +17,15 @@
 #include "xray_fdr_logging.h"
 #include <algorithm>
 #include <bitset>
-#include <cassert>
+#include <cerrno>
 #include <cstring>
-#include <memory>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 #include <unordered_map>
 
+#include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "xray/xray_interface.h"
 #include "xray/xray_records.h"
@@ -41,10 +41,10 @@ namespace __xray {
 // Global BufferQueue.
 std::shared_ptr<BufferQueue> BQ;
 
-std::atomic<XRayLogInitStatus> LoggingStatus{
+__sanitizer::atomic_sint32_t LoggingStatus = {
     XRayLogInitStatus::XRAY_LOG_UNINITIALIZED};
 
-std::atomic<XRayLogFlushStatus> LogFlushStatus{
+__sanitizer::atomic_sint32_t LogFlushStatus = {
     XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING};
 
 std::unique_ptr<FDRLoggingOptions> FDROptions;
@@ -52,18 +52,18 @@ std::unique_ptr<FDRLoggingOptions> FDROptions;
 XRayLogInitStatus fdrLoggingInit(std::size_t BufferSize, std::size_t BufferMax,
                                  void *Options,
                                  size_t OptionsSize) XRAY_NEVER_INSTRUMENT {
-  assert(OptionsSize == sizeof(FDRLoggingOptions));
-  XRayLogInitStatus CurrentStatus = XRayLogInitStatus::XRAY_LOG_UNINITIALIZED;
-  if (!LoggingStatus.compare_exchange_strong(
-          CurrentStatus, XRayLogInitStatus::XRAY_LOG_INITIALIZING,
-          std::memory_order_release, std::memory_order_relaxed))
-    return CurrentStatus;
+  if (OptionsSize != sizeof(FDRLoggingOptions))
+    return static_cast<XRayLogInitStatus>(__sanitizer::atomic_load(
+        &LoggingStatus, __sanitizer::memory_order_acquire));
+  s32 CurrentStatus = XRayLogInitStatus::XRAY_LOG_UNINITIALIZED;
+  if (!__sanitizer::atomic_compare_exchange_strong(
+          &LoggingStatus, &CurrentStatus,
+          XRayLogInitStatus::XRAY_LOG_INITIALIZING,
+          __sanitizer::memory_order_release))
+    return static_cast<XRayLogInitStatus>(CurrentStatus);
 
   FDROptions.reset(new FDRLoggingOptions());
-  *FDROptions = *reinterpret_cast<FDRLoggingOptions *>(Options);
-  if (FDROptions->ReportErrors)
-    SetPrintfAndReportCallback(printToStdErr);
-
+  memcpy(FDROptions.get(), Options, OptionsSize);
   bool Success = false;
   BQ = std::make_shared<BufferQueue>(BufferSize, BufferMax, Success);
   if (!Success) {
@@ -74,22 +74,25 @@ XRayLogInitStatus fdrLoggingInit(std::size_t BufferSize, std::size_t BufferMax,
   // Install the actual handleArg0 handler after initialising the buffers.
   __xray_set_handler(fdrLoggingHandleArg0);
 
-  LoggingStatus.store(XRayLogInitStatus::XRAY_LOG_INITIALIZED,
-                      std::memory_order_release);
+  __sanitizer::atomic_store(&LoggingStatus,
+                            XRayLogInitStatus::XRAY_LOG_INITIALIZED,
+                            __sanitizer::memory_order_release);
+  Report("XRay FDR init successful.\n");
   return XRayLogInitStatus::XRAY_LOG_INITIALIZED;
 }
 
 // Must finalize before flushing.
 XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
-  if (LoggingStatus.load(std::memory_order_acquire) !=
+  if (__sanitizer::atomic_load(&LoggingStatus,
+                               __sanitizer::memory_order_acquire) !=
       XRayLogInitStatus::XRAY_LOG_FINALIZED)
     return XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING;
 
-  XRayLogFlushStatus Result = XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING;
-  if (!LogFlushStatus.compare_exchange_strong(
-          Result, XRayLogFlushStatus::XRAY_LOG_FLUSHING,
-          std::memory_order_release, std::memory_order_relaxed))
-    return Result;
+  s32 Result = XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING;
+  if (!__sanitizer::atomic_compare_exchange_strong(
+          &LogFlushStatus, &Result, XRayLogFlushStatus::XRAY_LOG_FLUSHING,
+          __sanitizer::memory_order_release))
+    return static_cast<XRayLogFlushStatus>(Result);
 
   // Make a copy of the BufferQueue pointer to prevent other threads that may be
   // resetting it from blowing away the queue prematurely while we're dealing
@@ -110,62 +113,76 @@ XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
     Fd = getLogFD();
   if (Fd == -1) {
     auto Result = XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING;
-    LogFlushStatus.store(Result, std::memory_order_release);
+    __sanitizer::atomic_store(&LogFlushStatus, Result,
+                              __sanitizer::memory_order_release);
     return Result;
   }
+
+  // Test for required CPU features and cache the cycle frequency
+  static bool TSCSupported = probeRequiredCPUFeatures();
+  static uint64_t CycleFrequency = TSCSupported ? getTSCFrequency()
+                                   : __xray::NanosecondsPerSecond;
 
   XRayFileHeader Header;
   Header.Version = 1;
   Header.Type = FileTypes::FDR_LOG;
-  Header.CycleFrequency = getTSCFrequency();
+  Header.CycleFrequency = CycleFrequency;
   // FIXME: Actually check whether we have 'constant_tsc' and 'nonstop_tsc'
   // before setting the values in the header.
   Header.ConstantTSC = 1;
   Header.NonstopTSC = 1;
-  clock_gettime(CLOCK_REALTIME, &Header.TS);
+  Header.FdrData = FdrAdditionalHeaderData{LocalBQ->ConfiguredBufferSize()};
   retryingWriteAll(Fd, reinterpret_cast<char *>(&Header),
                    reinterpret_cast<char *>(&Header) + sizeof(Header));
+
   LocalBQ->apply([&](const BufferQueue::Buffer &B) {
-    retryingWriteAll(Fd, reinterpret_cast<char *>(B.Buffer),
-                     reinterpret_cast<char *>(B.Buffer) + B.Size);
+    uint64_t BufferSize = B.Size;
+    if (BufferSize > 0) {
+      retryingWriteAll(Fd, reinterpret_cast<char *>(B.Buffer),
+                       reinterpret_cast<char *>(B.Buffer) + B.Size);
+    }
   });
-  LogFlushStatus.store(XRayLogFlushStatus::XRAY_LOG_FLUSHED,
-                       std::memory_order_release);
+  __sanitizer::atomic_store(&LogFlushStatus,
+                            XRayLogFlushStatus::XRAY_LOG_FLUSHED,
+                            __sanitizer::memory_order_release);
   return XRayLogFlushStatus::XRAY_LOG_FLUSHED;
 }
 
 XRayLogInitStatus fdrLoggingFinalize() XRAY_NEVER_INSTRUMENT {
-  XRayLogInitStatus CurrentStatus = XRayLogInitStatus::XRAY_LOG_INITIALIZED;
-  if (!LoggingStatus.compare_exchange_strong(
-          CurrentStatus, XRayLogInitStatus::XRAY_LOG_FINALIZING,
-          std::memory_order_release, std::memory_order_relaxed))
-    return CurrentStatus;
+  s32 CurrentStatus = XRayLogInitStatus::XRAY_LOG_INITIALIZED;
+  if (!__sanitizer::atomic_compare_exchange_strong(
+          &LoggingStatus, &CurrentStatus,
+          XRayLogInitStatus::XRAY_LOG_FINALIZING,
+          __sanitizer::memory_order_release))
+    return static_cast<XRayLogInitStatus>(CurrentStatus);
 
   // Do special things to make the log finalize itself, and not allow any more
   // operations to be performed until re-initialized.
   BQ->finalize();
 
-  LoggingStatus.store(XRayLogInitStatus::XRAY_LOG_FINALIZED,
-                      std::memory_order_release);
+  __sanitizer::atomic_store(&LoggingStatus,
+                            XRayLogInitStatus::XRAY_LOG_FINALIZED,
+                            __sanitizer::memory_order_release);
   return XRayLogInitStatus::XRAY_LOG_FINALIZED;
 }
 
 XRayLogInitStatus fdrLoggingReset() XRAY_NEVER_INSTRUMENT {
-  XRayLogInitStatus CurrentStatus = XRayLogInitStatus::XRAY_LOG_FINALIZED;
-  if (!LoggingStatus.compare_exchange_strong(
-          CurrentStatus, XRayLogInitStatus::XRAY_LOG_UNINITIALIZED,
-          std::memory_order_release, std::memory_order_relaxed))
-    return CurrentStatus;
+  s32 CurrentStatus = XRayLogInitStatus::XRAY_LOG_FINALIZED;
+  if (__sanitizer::atomic_compare_exchange_strong(
+          &LoggingStatus, &CurrentStatus,
+          XRayLogInitStatus::XRAY_LOG_INITIALIZED,
+          __sanitizer::memory_order_release))
+    return static_cast<XRayLogInitStatus>(CurrentStatus);
 
   // Release the in-memory buffer queue.
   BQ.reset();
 
   // Spin until the flushing status is flushed.
-  XRayLogFlushStatus CurrentFlushingStatus =
-      XRayLogFlushStatus::XRAY_LOG_FLUSHED;
-  while (!LogFlushStatus.compare_exchange_weak(
-      CurrentFlushingStatus, XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING,
-      std::memory_order_release, std::memory_order_relaxed)) {
+  s32 CurrentFlushingStatus = XRayLogFlushStatus::XRAY_LOG_FLUSHED;
+  while (__sanitizer::atomic_compare_exchange_weak(
+      &LogFlushStatus, &CurrentFlushingStatus,
+      XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING,
+      __sanitizer::memory_order_release)) {
     if (CurrentFlushingStatus == XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING)
       break;
     CurrentFlushingStatus = XRayLogFlushStatus::XRAY_LOG_FLUSHED;
@@ -181,7 +198,24 @@ void fdrLoggingHandleArg0(int32_t FuncId,
   // we've seen this CPU before. We also do it before we load anything else, to
   // allow for forward progress with the scheduling.
   unsigned char CPU;
-  uint64_t TSC = __xray::readTSC(CPU);
+  uint64_t TSC;
+
+  // Test once for required CPU features
+  static bool TSCSupported = probeRequiredCPUFeatures();
+
+  if(TSCSupported) {
+    TSC = __xray::readTSC(CPU);
+  } else {
+    // FIXME: This code needs refactoring as it appears in multiple locations
+    timespec TS;
+    int result = clock_gettime(CLOCK_REALTIME, &TS);
+    if (result != 0) {
+      Report("clock_gettime(2) return %d, errno=%d", result, int(errno));
+      TS = {0, 0};
+    }
+    CPU = 0;
+    TSC = TS.tv_sec * __xray::NanosecondsPerSecond + TS.tv_nsec;
+  }
 
   __xray_fdr_internal::processFunctionHook(FuncId, Entry, TSC, CPU,
                                            clock_gettime, LoggingStatus, BQ);
