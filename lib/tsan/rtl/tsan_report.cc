@@ -164,12 +164,12 @@ static void PrintMop(const ReportMop *mop, bool first) {
   char thrbuf[kThreadBufSize];
   Printf("%s", d.Access());
   const char *object_type = GetObjectTypeFromTag(mop->external_tag);
-  if (!object_type) {
+  if (mop->external_tag == kExternalTagNone || !object_type) {
     Printf("  %s of size %d at %p by %s",
            MopDesc(first, mop->write, mop->atomic), mop->size,
            (void *)mop->addr, thread_name(thrbuf, mop->tid));
   } else {
-    Printf("  %s access of object %s at %p by %s",
+    Printf("  %s access of %s at %p by %s",
            ExternalMopDesc(first, mop->write), object_type,
            (void *)mop->addr, thread_name(thrbuf, mop->tid));
   }
@@ -202,7 +202,7 @@ static void PrintLocation(const ReportLocation *loc) {
              loc->heap_chunk_size, loc->heap_chunk_start,
              thread_name(thrbuf, loc->tid));
     } else {
-      Printf("  Location is %s object of size %zu at %p allocated by %s:\n",
+      Printf("  Location is %s of size %zu at %p allocated by %s:\n",
              object_type, loc->heap_chunk_size, loc->heap_chunk_start,
              thread_name(thrbuf, loc->tid));
     }

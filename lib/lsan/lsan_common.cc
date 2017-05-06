@@ -68,6 +68,15 @@ ALIGNED(64) static char suppression_placeholder[sizeof(SuppressionContext)];
 static SuppressionContext *suppression_ctx = nullptr;
 static const char kSuppressionLeak[] = "leak";
 static const char *kSuppressionTypes[] = { kSuppressionLeak };
+static const char kStdSuppressions[] =
+#if SANITIZER_SUPPRESS_LEAK_ON_PTHREAD_EXIT
+  // For more details refer to the SANITIZER_SUPPRESS_LEAK_ON_PTHREAD_EXIT
+  // definition.
+  "leak:*pthread_exit*\n"
+#endif  // SANITIZER_SUPPRESS_LEAK_ON_PTHREAD_EXIT
+  // TLS leak in some glibc versions, described in
+  // https://sourceware.org/bugzilla/show_bug.cgi?id=12650.
+  "leak:*tls_get_addr*\n";
 
 void InitializeSuppressions() {
   CHECK_EQ(nullptr, suppression_ctx);
@@ -76,6 +85,7 @@ void InitializeSuppressions() {
   suppression_ctx->ParseFromFile(flags()->suppressions);
   if (&__lsan_default_suppressions)
     suppression_ctx->Parse(__lsan_default_suppressions());
+  suppression_ctx->Parse(kStdSuppressions);
 }
 
 static SuppressionContext *GetSuppressionContext() {
