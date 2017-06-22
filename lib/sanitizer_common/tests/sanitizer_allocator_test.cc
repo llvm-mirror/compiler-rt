@@ -108,13 +108,17 @@ static const u64 kAddressSpaceSize = 1ULL << 32;
 static const uptr kRegionSizeLog = FIRST_32_SECOND_64(20, 24);
 static const uptr kFlatByteMapSize = kAddressSpaceSize >> kRegionSizeLog;
 
-typedef SizeClassAllocator32<
-  0, kAddressSpaceSize,
-  /*kMetadataSize*/16,
-  CompactSizeClassMap,
-  kRegionSizeLog,
-  FlatByteMap<kFlatByteMapSize> >
-  Allocator32Compact;
+struct AP32Compact {
+  static const uptr kSpaceBeg = 0;
+  static const u64 kSpaceSize = kAddressSpaceSize;
+  static const uptr kMetadataSize = 16;
+  typedef CompactSizeClassMap SizeClassMap;
+  static const uptr kRegionSizeLog = ::kRegionSizeLog;
+  typedef FlatByteMap<kFlatByteMapSize> ByteMap;
+  typedef NoOpMapUnmapCallback MapUnmapCallback;
+  static const uptr kFlags = 0;
+};
+typedef SizeClassAllocator32<AP32Compact> Allocator32Compact;
 
 template <class SizeClassMap>
 void TestSizeClassMap() {
@@ -386,17 +390,21 @@ TEST(SanitizerCommon, SizeClassAllocator64MapUnmapCallback) {
 #endif
 #endif
 
+struct AP32WithCallback {
+  static const uptr kSpaceBeg = 0;
+  static const u64 kSpaceSize = kAddressSpaceSize;
+  static const uptr kMetadataSize = 16;
+  typedef CompactSizeClassMap SizeClassMap;
+  static const uptr kRegionSizeLog = ::kRegionSizeLog;
+  typedef FlatByteMap<kFlatByteMapSize> ByteMap;
+  typedef TestMapUnmapCallback MapUnmapCallback;
+  static const uptr kFlags = 0;
+};
+
 TEST(SanitizerCommon, SizeClassAllocator32MapUnmapCallback) {
   TestMapUnmapCallback::map_count = 0;
   TestMapUnmapCallback::unmap_count = 0;
-  typedef SizeClassAllocator32<
-      0, kAddressSpaceSize,
-      /*kMetadataSize*/16,
-      CompactSizeClassMap,
-      kRegionSizeLog,
-      FlatByteMap<kFlatByteMapSize>,
-      TestMapUnmapCallback>
-    Allocator32WithCallBack;
+  typedef SizeClassAllocator32<AP32WithCallback> Allocator32WithCallBack;
   Allocator32WithCallBack *a = new Allocator32WithCallBack;
   a->Init(kReleaseToOSIntervalNever);
   EXPECT_EQ(TestMapUnmapCallback::map_count, 0);
@@ -418,8 +426,8 @@ TEST(SanitizerCommon, SizeClassAllocator32MapUnmapCallback) {
 TEST(SanitizerCommon, LargeMmapAllocatorMapUnmapCallback) {
   TestMapUnmapCallback::map_count = 0;
   TestMapUnmapCallback::unmap_count = 0;
-  LargeMmapAllocator<TestMapUnmapCallback> a;
-  a.Init(/* may_return_null */ false);
+  LargeMmapAllocator<TestMapUnmapCallback, DieOnFailure> a;
+  a.Init();
   AllocatorStats stats;
   stats.Init();
   void *x = a.Allocate(&stats, 1 << 20, 1);
@@ -455,8 +463,8 @@ TEST(SanitizerCommon, SizeClassAllocator64Overflow) {
 #endif
 
 TEST(SanitizerCommon, LargeMmapAllocator) {
-  LargeMmapAllocator<> a;
-  a.Init(/* may_return_null */ false);
+  LargeMmapAllocator<NoOpMapUnmapCallback, DieOnFailure> a;
+  a.Init();
   AllocatorStats stats;
   stats.Init();
 
@@ -538,8 +546,9 @@ void TestCombinedAllocator() {
   typedef
       CombinedAllocator<PrimaryAllocator, AllocatorCache, SecondaryAllocator>
       Allocator;
+  SetAllocatorMayReturnNull(true);
   Allocator *a = new Allocator;
-  a->Init(/* may_return_null */ true, kReleaseToOSIntervalNever);
+  a->Init(kReleaseToOSIntervalNever);
   std::mt19937 r;
 
   AllocatorCache cache;
@@ -553,7 +562,7 @@ void TestCombinedAllocator() {
   EXPECT_EQ(a->Allocate(&cache, (uptr)-1 - 1023, 1024), (void*)0);
 
   // Set to false
-  a->SetMayReturnNull(false);
+  SetAllocatorMayReturnNull(false);
   EXPECT_DEATH(a->Allocate(&cache, -1, 1),
                "allocator is terminating the process");
 
@@ -865,8 +874,8 @@ TEST(SanitizerCommon, SizeClassAllocator32Iteration) {
 }
 
 TEST(SanitizerCommon, LargeMmapAllocatorIteration) {
-  LargeMmapAllocator<> a;
-  a.Init(/* may_return_null */ false);
+  LargeMmapAllocator<NoOpMapUnmapCallback, DieOnFailure> a;
+  a.Init();
   AllocatorStats stats;
   stats.Init();
 
@@ -892,8 +901,8 @@ TEST(SanitizerCommon, LargeMmapAllocatorIteration) {
 }
 
 TEST(SanitizerCommon, LargeMmapAllocatorBlockBegin) {
-  LargeMmapAllocator<> a;
-  a.Init(/* may_return_null */ false);
+  LargeMmapAllocator<NoOpMapUnmapCallback, DieOnFailure> a;
+  a.Init();
   AllocatorStats stats;
   stats.Init();
 

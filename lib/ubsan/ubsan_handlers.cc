@@ -410,7 +410,8 @@ static void handleLoadInvalidValue(InvalidValueData *Data, ValueHandle Val,
   SourceLocation Loc = Data->Loc.acquire();
   // This check could be more precise if we used different handlers for
   // -fsanitize=bool and -fsanitize=enum.
-  bool IsBool = (0 == internal_strcmp(Data->Type.getTypeName(), "'bool'"));
+  bool IsBool = (0 == internal_strcmp(Data->Type.getTypeName(), "'bool'")) ||
+                (0 == internal_strncmp(Data->Type.getTypeName(), "'BOOL'", 6));
   ErrorType ET =
       IsBool ? ErrorType::InvalidBoolLoad : ErrorType::InvalidEnumLoad;
 
@@ -550,6 +551,43 @@ void __ubsan::__ubsan_handle_nullability_arg(NonNullArgData *Data) {
 void __ubsan::__ubsan_handle_nullability_arg_abort(NonNullArgData *Data) {
   GET_REPORT_OPTIONS(true);
   handleNonNullArg(Data, Opts, false);
+  Die();
+}
+
+static void handlePointerOverflowImpl(PointerOverflowData *Data,
+                                      ValueHandle Base,
+                                      ValueHandle Result,
+                                      ReportOptions Opts) {
+  SourceLocation Loc = Data->Loc.acquire();
+  ErrorType ET = ErrorType::PointerOverflow;
+
+  if (ignoreReport(Loc, Opts, ET))
+    return;
+
+  ScopedReport R(Opts, Loc, ET);
+
+  if ((sptr(Base) >= 0) == (sptr(Result) >= 0))
+    Diag(Loc, DL_Error, "unsigned pointer index expression result is %0, "
+                        "preceding its base %1")
+        << (void *)Result << (void *)Base;
+  else
+    Diag(Loc, DL_Error,
+         "pointer index expression with base %0 overflowed to %1")
+        << (void *)Base << (void *)Result;
+}
+
+void __ubsan::__ubsan_handle_pointer_overflow(PointerOverflowData *Data,
+                                              ValueHandle Base,
+                                              ValueHandle Result) {
+  GET_REPORT_OPTIONS(false);
+  handlePointerOverflowImpl(Data, Base, Result, Opts);
+}
+
+void __ubsan::__ubsan_handle_pointer_overflow_abort(PointerOverflowData *Data,
+                                                    ValueHandle Base,
+                                                    ValueHandle Result) {
+  GET_REPORT_OPTIONS(true);
+  handlePointerOverflowImpl(Data, Base, Result, Opts);
   Die();
 }
 

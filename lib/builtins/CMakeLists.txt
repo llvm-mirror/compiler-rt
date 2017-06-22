@@ -42,6 +42,8 @@ set(GENERIC_SOURCES
   ashlti3.c
   ashrdi3.c
   ashrti3.c
+  bswapdi2.c
+  bswapsi2.c
   clear_cache.c
   clzdi2.c
   clzsi2.c
@@ -66,7 +68,6 @@ set(GENERIC_SOURCES
   divti3.c
   divtf3.c
   divxc3.c
-  enable_execute_stack.c
   eprintf.c
   extendsfdf2.c
   extendhfsf2.c
@@ -164,12 +165,38 @@ set(GENERIC_SOURCES
   udivti3.c
   umoddi3.c
   umodsi3.c
-  umodti3.c
-  emutls.c)
+  umodti3.c)
+
+set(GENERIC_TF_SOURCES
+  comparetf2.c
+  extenddftf2.c
+  extendsftf2.c
+  fixtfdi.c
+  fixtfsi.c
+  fixtfti.c
+  fixunstfdi.c
+  fixunstfsi.c
+  fixunstfti.c
+  floatditf.c
+  floatsitf.c
+  floattitf.c
+  floatunditf.c
+  floatunsitf.c
+  floatuntitf.c
+  multc3.c
+  trunctfdf2.c
+  trunctfsf2.c)
 
 option(COMPILER_RT_EXCLUDE_ATOMIC_BUILTIN
   "Skip the atomic builtin (this may be needed if system headers are unavailable)"
   Off)
+
+if(NOT COMPILER_RT_BAREMETAL_BUILD)
+  set(GENERIC_SOURCES
+    ${GENERIC_SOURCES}
+    emutls.c 
+    enable_execute_stack.c)
+endif()
 
 if(COMPILER_RT_HAS_ATOMIC_KEYWORD AND NOT COMPILER_RT_EXCLUDE_ATOMIC_BUILTIN)
   set(GENERIC_SOURCES
@@ -390,7 +417,8 @@ if(MINGW)
       udivmoddi4.c
       udivmodsi4.c
       udivsi3.c
-      umoddi3.c)
+      umoddi3.c
+      emutls.c)
 elseif(NOT WIN32)
   # TODO the EABI sources should only be added to EABI targets
   set(arm_SOURCES
@@ -404,24 +432,7 @@ elseif(NOT WIN32)
 endif()
 
 set(aarch64_SOURCES
-  comparetf2.c
-  extenddftf2.c
-  extendsftf2.c
-  fixtfdi.c
-  fixtfsi.c
-  fixtfti.c
-  fixunstfdi.c
-  fixunstfsi.c
-  fixunstfti.c
-  floatditf.c
-  floatsitf.c
-  floattitf.c
-  floatunditf.c
-  floatunsitf.c
-  floatuntitf.c
-  multc3.c
-  trunctfdf2.c
-  trunctfsf2.c
+  ${GENERIC_TF_SOURCES}
   ${GENERIC_SOURCES})
 
 set(armhf_SOURCES ${arm_SOURCES})
@@ -437,8 +448,10 @@ set(armv7em_SOURCES ${arm_SOURCES})
 
 set(mips_SOURCES ${GENERIC_SOURCES})
 set(mipsel_SOURCES ${mips_SOURCES})
-set(mips64_SOURCES ${mips_SOURCES})
-set(mips64el_SOURCES ${mips_SOURCES})
+set(mips64_SOURCES ${GENERIC_TF_SOURCES}
+                   ${mips_SOURCES})
+set(mips64el_SOURCES ${GENERIC_TF_SOURCES}
+                     ${mips_SOURCES})
 
 set(wasm32_SOURCES ${GENERIC_SOURCES})
 set(wasm64_SOURCES ${GENERIC_SOURCES})
@@ -472,11 +485,18 @@ else ()
 
   foreach (arch ${BUILTIN_SUPPORTED_ARCH})
     if (CAN_TARGET_${arch})
+      # NOTE: some architectures (e.g. i386) have multiple names.  Ensure that
+      # we catch them all.
+      set(_arch ${arch})
+      if("${arch}" STREQUAL "i686")
+        set(_arch "i386|i686")
+      endif()
+
       # Filter out generic versions of routines that are re-implemented in
       # architecture specific manner.  This prevents multiple definitions of the
       # same symbols, making the symbol selection non-deterministic.
       foreach (_file ${${arch}_SOURCES})
-        if (${_file} MATCHES ${arch}/*)
+        if (${_file} MATCHES ${_arch}/*)
           get_filename_component(_name ${_file} NAME)
           string(REPLACE ".S" ".c" _cname "${_name}")
           list(REMOVE_ITEM ${arch}_SOURCES ${_cname})

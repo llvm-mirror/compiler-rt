@@ -241,9 +241,8 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
     CheckNoDeepBind(filename, flag);                                           \
   } while (false)
 #define COMMON_INTERCEPTOR_ON_EXIT(ctx) OnExit()
-#define COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, handle) \
-  CoverageUpdateMapping()
-#define COMMON_INTERCEPTOR_LIBRARY_UNLOADED() CoverageUpdateMapping()
+#define COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, handle)
+#define COMMON_INTERCEPTOR_LIBRARY_UNLOADED()
 #define COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED (!asan_inited)
 #define COMMON_INTERCEPTOR_GET_TLS_RANGE(begin, end)                           \
   if (AsanThread *t = GetCurrentThread()) {                                    \
@@ -357,28 +356,22 @@ DEFINE_REAL_PTHREAD_FUNCTIONS
 
 #if SANITIZER_ANDROID
 INTERCEPTOR(void*, bsd_signal, int signum, void *handler) {
-  if (!IsHandledDeadlySignal(signum) ||
-      common_flags()->allow_user_segv_handler) {
+  if (GetHandleSignalMode(signum) != kHandleSignalExclusive)
     return REAL(bsd_signal)(signum, handler);
-  }
   return 0;
 }
 #endif
 
 INTERCEPTOR(void*, signal, int signum, void *handler) {
-  if (!IsHandledDeadlySignal(signum) ||
-      common_flags()->allow_user_segv_handler) {
+  if (GetHandleSignalMode(signum) != kHandleSignalExclusive)
     return REAL(signal)(signum, handler);
-  }
   return nullptr;
 }
 
 INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
                             struct sigaction *oldact) {
-  if (!IsHandledDeadlySignal(signum) ||
-      common_flags()->allow_user_segv_handler) {
+  if (GetHandleSignalMode(signum) != kHandleSignalExclusive)
     return REAL(sigaction)(signum, act, oldact);
-  }
   return 0;
 }
 
@@ -440,6 +433,13 @@ INTERCEPTOR(void, longjmp, void *env, int val) {
 INTERCEPTOR(void, _longjmp, void *env, int val) {
   __asan_handle_no_return();
   REAL(_longjmp)(env, val);
+}
+#endif
+
+#if ASAN_INTERCEPT___LONGJMP_CHK
+INTERCEPTOR(void, __longjmp_chk, void *env, int val) {
+  __asan_handle_no_return();
+  REAL(__longjmp_chk)(env, val);
 }
 #endif
 
@@ -706,9 +706,7 @@ INTERCEPTOR(int, __cxa_atexit, void (*func)(void *), void *arg,
 #if ASAN_INTERCEPT_FORK
 INTERCEPTOR(int, fork, void) {
   ENSURE_ASAN_INITED();
-  if (common_flags()->coverage) CovBeforeFork();
   int pid = REAL(fork)();
-  if (common_flags()->coverage) CovAfterFork(pid);
   return pid;
 }
 #endif  // ASAN_INTERCEPT_FORK
@@ -757,6 +755,9 @@ void InitializeAsanInterceptors() {
 #endif
 #if ASAN_INTERCEPT__LONGJMP
   ASAN_INTERCEPT_FUNC(_longjmp);
+#endif
+#if ASAN_INTERCEPT___LONGJMP_CHK
+  ASAN_INTERCEPT_FUNC(__longjmp_chk);
 #endif
 #if ASAN_INTERCEPT_SIGLONGJMP
   ASAN_INTERCEPT_FUNC(siglongjmp);

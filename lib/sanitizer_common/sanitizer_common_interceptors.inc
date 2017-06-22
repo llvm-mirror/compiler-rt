@@ -34,6 +34,8 @@
 //   COMMON_INTERCEPTOR_MEMSET_IMPL
 //   COMMON_INTERCEPTOR_MEMMOVE_IMPL
 //   COMMON_INTERCEPTOR_MEMCPY_IMPL
+//   COMMON_INTERCEPTOR_COPY_STRING
+//   COMMON_INTERCEPTOR_STRNDUP_IMPL
 //===----------------------------------------------------------------------===//
 
 #include "interception/interception.h"
@@ -217,6 +219,24 @@ bool PlatformHasDifferentMemcpyAndMemmove();
   }
 #endif
 
+#ifndef COMMON_INTERCEPTOR_COPY_STRING
+#define COMMON_INTERCEPTOR_COPY_STRING(ctx, to, from, size) {}
+#endif
+
+#ifndef COMMON_INTERCEPTOR_STRNDUP_IMPL
+#define COMMON_INTERCEPTOR_STRNDUP_IMPL(ctx, s, size)                          \
+  COMMON_INTERCEPTOR_ENTER(ctx, strndup, s, size);                             \
+  uptr copy_length = internal_strnlen(s, size);                                \
+  char *new_mem = (char *)WRAP(malloc)(copy_length + 1);                       \
+  if (common_flags()->intercept_strndup) {                                     \
+    COMMON_INTERCEPTOR_READ_STRING(ctx, s, Min(size, copy_length + 1));        \
+  }                                                                            \
+  COMMON_INTERCEPTOR_COPY_STRING(ctx, new_mem, s, copy_length);                \
+  internal_memcpy(new_mem, s, copy_length);                                    \
+  new_mem[copy_length] = '\0';                                                 \
+  return new_mem;
+#endif
+
 struct FileMetadata {
   // For open_memstream().
   char **addr;
@@ -299,6 +319,26 @@ INTERCEPTOR(SIZE_T, strnlen, const char *s, SIZE_T maxlen) {
 #else
 #define INIT_STRNLEN
 #endif
+
+#if SANITIZER_INTERCEPT_STRNDUP
+INTERCEPTOR(char*, strndup, const char *s, uptr size) {
+  void *ctx;
+  COMMON_INTERCEPTOR_STRNDUP_IMPL(ctx, s, size);
+}
+#define INIT_STRNDUP COMMON_INTERCEPT_FUNCTION(strndup)
+#else
+#define INIT_STRNDUP
+#endif // SANITIZER_INTERCEPT_STRNDUP
+
+#if SANITIZER_INTERCEPT___STRNDUP
+INTERCEPTOR(char*, __strndup, const char *s, uptr size) {
+  void *ctx;
+  COMMON_INTERCEPTOR_STRNDUP_IMPL(ctx, s, size);
+}
+#define INIT___STRNDUP COMMON_INTERCEPT_FUNCTION(__strndup)
+#else
+#define INIT___STRNDUP
+#endif // SANITIZER_INTERCEPT___STRNDUP
 
 #if SANITIZER_INTERCEPT_TEXTDOMAIN
 INTERCEPTOR(char*, textdomain, const char *domainname) {
@@ -3355,7 +3395,10 @@ INTERCEPTOR(char *, strerror_r, int errnum, char *buf, SIZE_T buflen) {
   // its metadata. See
   // https://github.com/google/sanitizers/issues/321.
   char *res = REAL(strerror_r)(errnum, buf, buflen);
-  COMMON_INTERCEPTOR_WRITE_RANGE(ctx, res, REAL(strlen)(res) + 1);
+  if (res == buf)
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, res, REAL(strlen)(res) + 1);
+  else
+    COMMON_INTERCEPTOR_INITIALIZE_RANGE(res, REAL(strlen)(res) + 1);
   return res;
 }
 #endif //(_POSIX_C_SOURCE >= 200112L || _XOPEN_SOURCE >= 600) && !_GNU_SOURCE ||
@@ -6163,6 +6206,8 @@ static void InitializeCommonInterceptors() {
   INIT_TEXTDOMAIN;
   INIT_STRLEN;
   INIT_STRNLEN;
+  INIT_STRNDUP;
+  INIT___STRNDUP;
   INIT_STRCMP;
   INIT_STRNCMP;
   INIT_STRCASECMP;

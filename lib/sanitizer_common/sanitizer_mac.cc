@@ -370,6 +370,27 @@ uptr GetTlsSize() {
 void InitTlsSize() {
 }
 
+uptr TlsBaseAddr() {
+  uptr segbase = 0;
+#if defined(__x86_64__)
+  asm("movq %%gs:0,%0" : "=r"(segbase));
+#elif defined(__i386__)
+  asm("movl %%gs:0,%0" : "=r"(segbase));
+#endif
+  return segbase;
+}
+
+// The size of the tls on darwin does not appear to be well documented,
+// however the vm memory map suggests that it is 1024 uptrs in size,
+// with a size of 0x2000 bytes on x86_64 and 0x1000 bytes on i386.
+uptr TlsSize() {
+#if defined(__x86_64__) || defined(__i386__)
+  return 1024 * sizeof(uptr);
+#else
+  return 0;
+#endif
+}
+
 void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
                           uptr *tls_addr, uptr *tls_size) {
 #if !SANITIZER_GO
@@ -377,8 +398,8 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
   GetThreadStackTopAndBottom(main, &stack_top, &stack_bottom);
   *stk_addr = stack_bottom;
   *stk_size = stack_top - stack_bottom;
-  *tls_addr = 0;
-  *tls_size = 0;
+  *tls_addr = TlsBaseAddr();
+  *tls_size = TlsSize();
 #else
   *stk_addr = 0;
   *stk_size = 0;
@@ -393,19 +414,30 @@ void ListOfModules::init() {
   memory_mapping.DumpListOfModules(&modules_);
 }
 
-bool IsHandledDeadlySignal(int signum) {
+static HandleSignalMode GetHandleSignalModeImpl(int signum) {
+  switch (signum) {
+    case SIGABRT:
+      return common_flags()->handle_abort;
+    case SIGILL:
+      return common_flags()->handle_sigill;
+    case SIGFPE:
+      return common_flags()->handle_sigfpe;
+    case SIGSEGV:
+      return common_flags()->handle_segv;
+    case SIGBUS:
+      return common_flags()->handle_sigbus;
+  }
+  return kHandleSignalNo;
+}
+
+HandleSignalMode GetHandleSignalMode(int signum) {
+  // Handling fatal signals on watchOS and tvOS devices is disallowed.
   if ((SANITIZER_WATCHOS || SANITIZER_TVOS) && !(SANITIZER_IOSSIM))
-    // Handling fatal signals on watchOS and tvOS devices is disallowed.
-    return false;
-  if (common_flags()->handle_abort && signum == SIGABRT)
-    return true;
-  if (common_flags()->handle_sigill && signum == SIGILL)
-    return true;
-  if (common_flags()->handle_sigfpe && signum == SIGFPE)
-    return true;
-  if (common_flags()->handle_segv && signum == SIGSEGV)
-    return true;
-  return common_flags()->handle_sigbus && signum == SIGBUS;
+    return kHandleSignalNo;
+  HandleSignalMode result = GetHandleSignalModeImpl(signum);
+  if (result == kHandleSignalYes && !common_flags()->allow_user_segv_handler)
+    return kHandleSignalExclusive;
+  return result;
 }
 
 MacosVersion cached_macos_version = MACOS_VERSION_UNINITIALIZED;

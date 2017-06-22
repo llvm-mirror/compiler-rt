@@ -14,11 +14,10 @@
 
 #include "sanitizer_common/sanitizer_platform.h"
 
-#if SANITIZER_LINUX
+#if SANITIZER_LINUX && !SANITIZER_ANDROID
 
 #include "scudo_tls.h"
 
-#include <limits.h>
 #include <pthread.h>
 
 namespace __scudo {
@@ -26,19 +25,23 @@ namespace __scudo {
 static pthread_once_t GlobalInitialized = PTHREAD_ONCE_INIT;
 static pthread_key_t PThreadKey;
 
-thread_local ThreadState ScudoThreadState = ThreadNotInitialized;
-thread_local ScudoThreadContext ThreadLocalContext;
+__attribute__((tls_model("initial-exec")))
+THREADLOCAL ThreadState ScudoThreadState = ThreadNotInitialized;
+__attribute__((tls_model("initial-exec")))
+THREADLOCAL ScudoThreadContext ThreadLocalContext;
 
 static void teardownThread(void *Ptr) {
-  uptr Iteration = reinterpret_cast<uptr>(Ptr);
+  uptr I = reinterpret_cast<uptr>(Ptr);
   // The glibc POSIX thread-local-storage deallocation routine calls user
   // provided destructors in a loop of PTHREAD_DESTRUCTOR_ITERATIONS.
   // We want to be called last since other destructors might call free and the
   // like, so we wait until PTHREAD_DESTRUCTOR_ITERATIONS before draining the
   // quarantine and swallowing the cache.
-  if (Iteration < PTHREAD_DESTRUCTOR_ITERATIONS) {
-    pthread_setspecific(PThreadKey, reinterpret_cast<void *>(Iteration + 1));
-    return;
+  if (I > 1) {
+    // If pthread_setspecific fails, we will go ahead with the teardown.
+    if (LIKELY(pthread_setspecific(PThreadKey,
+                                   reinterpret_cast<void *>(I - 1)) == 0))
+      return;
   }
   ThreadLocalContext.commitBack();
   ScudoThreadState = ThreadTornDown;
@@ -51,12 +54,13 @@ static void initOnce() {
 }
 
 void initThread() {
-  pthread_once(&GlobalInitialized, initOnce);
-  pthread_setspecific(PThreadKey, reinterpret_cast<void *>(1));
+  CHECK_EQ(pthread_once(&GlobalInitialized, initOnce), 0);
+  CHECK_EQ(pthread_setspecific(PThreadKey, reinterpret_cast<void *>(
+      GetPthreadDestructorIterations())), 0);
   ThreadLocalContext.init();
   ScudoThreadState = ThreadInitialized;
 }
 
 }  // namespace __scudo
 
-#endif  // SANITIZER_LINUX
+#endif  // SANITIZER_LINUX && !SANITIZER_ANDROID
