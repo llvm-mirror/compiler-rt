@@ -22,8 +22,7 @@
 #include "sanitizer_common/sanitizer_allocator_interface.h"
 #include "sanitizer_common/sanitizer_quarantine.h"
 
-#include <limits.h>
-#include <pthread.h>
+#include <errno.h>
 #include <string.h>
 
 namespace __scudo {
@@ -74,7 +73,7 @@ struct ScudoChunk : UnpackedHeader {
   // beginning of the user data to the end of the backend allocated chunk.
   uptr getUsableSize(UnpackedHeader *Header) {
     uptr Size =
-        getBackendAllocator().GetActuallyAllocatedSize(getAllocBeg(Header),
+        getBackendAllocator().getActuallyAllocatedSize(getAllocBeg(Header),
                                                        Header->FromPrimary);
     if (Size == 0)
       return 0;
@@ -233,7 +232,10 @@ struct QuarantineCallback {
     }
     Chunk->eraseHeader();
     void *Ptr = Chunk->getAllocBeg(&Header);
-    getBackendAllocator().Deallocate(Cache_, Ptr, Header.FromPrimary);
+    if (Header.FromPrimary)
+      getBackendAllocator().deallocatePrimary(Cache_, Ptr);
+    else
+      getBackendAllocator().deallocateSecondary(Ptr);
   }
 
   // Internal quarantine allocation and deallocation functions. We first check
@@ -241,11 +243,11 @@ struct QuarantineCallback {
   // TODO(kostyak): figure out the best way to protect the batches.
   COMPILER_CHECK(sizeof(QuarantineBatch) < SizeClassMap::kMaxSize);
   void *Allocate(uptr Size) {
-    return getBackendAllocator().Allocate(Cache_, Size, MinAlignment, true);
+    return getBackendAllocator().allocatePrimary(Cache_, Size);
   }
 
   void Deallocate(void *Ptr) {
-    getBackendAllocator().Deallocate(Cache_, Ptr, true);
+    getBackendAllocator().deallocatePrimary(Cache_, Ptr);
   }
 
   AllocatorCache *Cache_;
@@ -265,7 +267,7 @@ ScudoQuarantineCache *getQuarantineCache(ScudoThreadContext *ThreadContext) {
       ScudoQuarantineCache *>(ThreadContext->QuarantineCachePlaceHolder);
 }
 
-Xorshift128Plus *getPrng(ScudoThreadContext *ThreadContext) {
+ScudoPrng *getPrng(ScudoThreadContext *ThreadContext) {
   return &ThreadContext->Prng;
 }
 
@@ -278,13 +280,16 @@ struct ScudoAllocator {
   ScudoBackendAllocator BackendAllocator;
   ScudoQuarantine AllocatorQuarantine;
 
+  StaticSpinMutex GlobalPrngMutex;
+  ScudoPrng GlobalPrng;
+
   // The fallback caches are used when the thread local caches have been
   // 'detroyed' on thread tear-down. They are protected by a Mutex as they can
   // be accessed by different threads.
   StaticSpinMutex FallbackMutex;
   AllocatorCache FallbackAllocatorCache;
   ScudoQuarantineCache FallbackQuarantineCache;
-  Xorshift128Plus FallbackPrng;
+  ScudoPrng FallbackPrng;
 
   bool DeallocationTypeMismatch;
   bool ZeroContents;
@@ -304,10 +309,10 @@ struct ScudoAllocator {
     // result, the maximum offset will be at most the maximum alignment for the
     // last size class minus the header size, in multiples of MinAlignment.
     UnpackedHeader Header = {};
-    uptr MaxPrimaryAlignment = 1 << MostSignificantSetBitIndex(
-        SizeClassMap::kMaxSize - MinAlignment);
-    uptr MaxOffset = (MaxPrimaryAlignment - AlignedChunkHeaderSize) >>
-        MinAlignmentLog;
+    uptr MaxPrimaryAlignment =
+        1 << MostSignificantSetBitIndex(SizeClassMap::kMaxSize - MinAlignment);
+    uptr MaxOffset =
+        (MaxPrimaryAlignment - AlignedChunkHeaderSize) >> MinAlignmentLog;
     Header.Offset = MaxOffset;
     if (Header.Offset != MaxOffset) {
       dieWithMessage("ERROR: the maximum possible offset doesn't fit in the "
@@ -329,19 +334,20 @@ struct ScudoAllocator {
     DeleteSizeMismatch = Options.DeleteSizeMismatch;
     ZeroContents = Options.ZeroContents;
     SetAllocatorMayReturnNull(Options.MayReturnNull);
-    BackendAllocator.Init(Options.ReleaseToOSIntervalMs);
+    BackendAllocator.init(Options.ReleaseToOSIntervalMs);
     AllocatorQuarantine.Init(
         static_cast<uptr>(Options.QuarantineSizeMb) << 20,
         static_cast<uptr>(Options.ThreadLocalQuarantineSizeKb) << 10);
-    BackendAllocator.InitCache(&FallbackAllocatorCache);
-    FallbackPrng.initFromURandom();
-    Cookie = FallbackPrng.getNext();
+    GlobalPrng.init();
+    Cookie = GlobalPrng.getU64();
+    BackendAllocator.initCache(&FallbackAllocatorCache);
+    FallbackPrng.init();
   }
 
   // Helper function that checks for a valid Scudo chunk. nullptr isn't.
   bool isValidPointer(const void *UserPtr) {
     initThreadMaybe();
-    if (!UserPtr)
+    if (UNLIKELY(!UserPtr))
       return false;
     uptr UserBeg = reinterpret_cast<uptr>(UserPtr);
     if (!IsAligned(UserBeg, MinAlignment))
@@ -353,22 +359,19 @@ struct ScudoAllocator {
   void *allocate(uptr Size, uptr Alignment, AllocType Type,
                  bool ForceZeroContents = false) {
     initThreadMaybe();
-    if (UNLIKELY(!IsPowerOfTwo(Alignment))) {
-      dieWithMessage("ERROR: alignment is not a power of 2\n");
-    }
-    if (Alignment > MaxAlignment)
+    if (UNLIKELY(Alignment > MaxAlignment))
       return FailureHandler::OnBadRequest();
-    if (Alignment < MinAlignment)
+    if (UNLIKELY(Alignment < MinAlignment))
       Alignment = MinAlignment;
-    if (Size >= MaxAllowedMallocSize)
+    if (UNLIKELY(Size >= MaxAllowedMallocSize))
       return FailureHandler::OnBadRequest();
-    if (Size == 0)
+    if (UNLIKELY(Size == 0))
       Size = 1;
 
     uptr NeededSize = RoundUpTo(Size, MinAlignment) + AlignedChunkHeaderSize;
     uptr AlignedSize = (Alignment > MinAlignment) ?
         NeededSize + (Alignment - AlignedChunkHeaderSize) : NeededSize;
-    if (AlignedSize >= MaxAllowedMallocSize)
+    if (UNLIKELY(AlignedSize >= MaxAllowedMallocSize))
       return FailureHandler::OnBadRequest();
 
     // Primary and Secondary backed allocations have a different treatment. We
@@ -377,34 +380,42 @@ struct ScudoAllocator {
     bool FromPrimary = PrimaryAllocator::CanAllocate(AlignedSize, MinAlignment);
 
     void *Ptr;
-    uptr Salt;
-    uptr AllocationSize = FromPrimary ? AlignedSize : NeededSize;
-    uptr AllocationAlignment = FromPrimary ? MinAlignment : Alignment;
-    ScudoThreadContext *ThreadContext = getThreadContextAndLock();
-    if (LIKELY(ThreadContext)) {
-      Salt = getPrng(ThreadContext)->getNext();
-      Ptr = BackendAllocator.Allocate(getAllocatorCache(ThreadContext),
-                                      AllocationSize, AllocationAlignment,
-                                      FromPrimary);
-      ThreadContext->unlock();
+    u8 Salt;
+    uptr AllocSize;
+    if (FromPrimary) {
+      AllocSize = AlignedSize;
+      ScudoThreadContext *ThreadContext = getThreadContextAndLock();
+      if (LIKELY(ThreadContext)) {
+        Salt = getPrng(ThreadContext)->getU8();
+        Ptr = BackendAllocator.allocatePrimary(getAllocatorCache(ThreadContext),
+                                               AllocSize);
+        ThreadContext->unlock();
+      } else {
+        SpinMutexLock l(&FallbackMutex);
+        Salt = FallbackPrng.getU8();
+        Ptr = BackendAllocator.allocatePrimary(&FallbackAllocatorCache,
+                                               AllocSize);
+      }
     } else {
-      SpinMutexLock l(&FallbackMutex);
-      Salt = FallbackPrng.getNext();
-      Ptr = BackendAllocator.Allocate(&FallbackAllocatorCache, AllocationSize,
-                                      AllocationAlignment, FromPrimary);
+      {
+        SpinMutexLock l(&GlobalPrngMutex);
+        Salt = GlobalPrng.getU8();
+      }
+      AllocSize = NeededSize;
+      Ptr = BackendAllocator.allocateSecondary(AllocSize, Alignment);
     }
-    if (!Ptr)
+    if (UNLIKELY(!Ptr))
       return FailureHandler::OnOOM();
 
     // If requested, we will zero out the entire contents of the returned chunk.
     if ((ForceZeroContents || ZeroContents) && FromPrimary)
-       memset(Ptr, 0,
-              BackendAllocator.GetActuallyAllocatedSize(Ptr, FromPrimary));
+      memset(Ptr, 0, BackendAllocator.getActuallyAllocatedSize(
+          Ptr, /*FromPrimary=*/true));
 
     UnpackedHeader Header = {};
     uptr AllocBeg = reinterpret_cast<uptr>(Ptr);
     uptr UserBeg = AllocBeg + AlignedChunkHeaderSize;
-    if (!IsAligned(UserBeg, Alignment)) {
+    if (UNLIKELY(!IsAligned(UserBeg, Alignment))) {
       // Since the Secondary takes care of alignment, a non-aligned pointer
       // means it is from the Primary. It is also the only case where the offset
       // field of the header would be non-zero.
@@ -413,11 +424,11 @@ struct ScudoAllocator {
       uptr Offset = UserBeg - AlignedChunkHeaderSize - AllocBeg;
       Header.Offset = Offset >> MinAlignmentLog;
     }
-    CHECK_LE(UserBeg + Size, AllocBeg + AllocationSize);
+    CHECK_LE(UserBeg + Size, AllocBeg + AllocSize);
     Header.State = ChunkAllocated;
     Header.AllocType = Type;
     if (FromPrimary) {
-      Header.FromPrimary = FromPrimary;
+      Header.FromPrimary = 1;
       Header.SizeOrUnusedBytes = Size;
     } else {
       // The secondary fits the allocations to a page, so the amount of unused
@@ -428,7 +439,7 @@ struct ScudoAllocator {
       if (TrailingBytes)
         Header.SizeOrUnusedBytes = PageSize - TrailingBytes;
     }
-    Header.Salt = static_cast<u8>(Salt);
+    Header.Salt = Salt;
     getScudoChunk(UserBeg)->storeHeader(&Header);
     void *UserPtr = reinterpret_cast<void *>(UserBeg);
     // if (&__sanitizer_malloc_hook) __sanitizer_malloc_hook(UserPtr, Size);
@@ -446,15 +457,18 @@ struct ScudoAllocator {
     if (BypassQuarantine) {
       Chunk->eraseHeader();
       void *Ptr = Chunk->getAllocBeg(Header);
-      ScudoThreadContext *ThreadContext = getThreadContextAndLock();
-      if (LIKELY(ThreadContext)) {
-        getBackendAllocator().Deallocate(getAllocatorCache(ThreadContext), Ptr,
-                                         FromPrimary);
-        ThreadContext->unlock();
+      if (FromPrimary) {
+        ScudoThreadContext *ThreadContext = getThreadContextAndLock();
+        if (LIKELY(ThreadContext)) {
+          getBackendAllocator().deallocatePrimary(
+              getAllocatorCache(ThreadContext), Ptr);
+          ThreadContext->unlock();
+        } else {
+          SpinMutexLock Lock(&FallbackMutex);
+          getBackendAllocator().deallocatePrimary(&FallbackAllocatorCache, Ptr);
+        }
       } else {
-        SpinMutexLock Lock(&FallbackMutex);
-        getBackendAllocator().Deallocate(&FallbackAllocatorCache, Ptr,
-                                         FromPrimary);
+        getBackendAllocator().deallocateSecondary(Ptr);
       }
     } else {
       UnpackedHeader NewHeader = *Header;
@@ -481,7 +495,7 @@ struct ScudoAllocator {
   void deallocate(void *UserPtr, uptr DeleteSize, AllocType Type) {
     initThreadMaybe();
     // if (&__sanitizer_free_hook) __sanitizer_free_hook(UserPtr);
-    if (!UserPtr)
+    if (UNLIKELY(!UserPtr))
       return;
     uptr UserBeg = reinterpret_cast<uptr>(UserPtr);
     if (UNLIKELY(!IsAligned(UserBeg, MinAlignment))) {
@@ -568,7 +582,7 @@ struct ScudoAllocator {
   // Helper function that returns the actual usable size of a chunk.
   uptr getUsableSize(const void *Ptr) {
     initThreadMaybe();
-    if (!Ptr)
+    if (UNLIKELY(!Ptr))
       return 0;
     uptr UserBeg = reinterpret_cast<uptr>(Ptr);
     ScudoChunk *Chunk = getScudoChunk(UserBeg);
@@ -584,23 +598,22 @@ struct ScudoAllocator {
 
   void *calloc(uptr NMemB, uptr Size) {
     initThreadMaybe();
-    uptr Total = NMemB * Size;
-    if (Size != 0 && Total / Size != NMemB)  // Overflow check
+    if (UNLIKELY(CheckForCallocOverflow(NMemB, Size)))
       return FailureHandler::OnBadRequest();
-    return allocate(Total, MinAlignment, FromMalloc, true);
+    return allocate(NMemB * Size, MinAlignment, FromMalloc, true);
   }
 
   void commitBack(ScudoThreadContext *ThreadContext) {
     AllocatorCache *Cache = getAllocatorCache(ThreadContext);
     AllocatorQuarantine.Drain(getQuarantineCache(ThreadContext),
                               QuarantineCallback(Cache));
-    BackendAllocator.DestroyCache(Cache);
+    BackendAllocator.destroyCache(Cache);
   }
 
   uptr getStats(AllocatorStat StatType) {
     initThreadMaybe();
     uptr stats[AllocatorStatCount];
-    BackendAllocator.GetStats(stats);
+    BackendAllocator.getStats(stats);
     return stats[StatType];
   }
 };
@@ -616,8 +629,8 @@ static void initScudoInternal(const AllocatorOptions &Options) {
 }
 
 void ScudoThreadContext::init() {
-  getBackendAllocator().InitCache(&Cache);
-  Prng.initFromURandom();
+  getBackendAllocator().initCache(&Cache);
+  Prng.init();
   memset(QuarantineCachePlaceHolder, 0, sizeof(QuarantineCachePlaceHolder));
 }
 
@@ -655,10 +668,6 @@ void *scudoValloc(uptr Size) {
   return Instance.allocate(Size, GetPageSizeCached(), FromMemalign);
 }
 
-void *scudoMemalign(uptr Alignment, uptr Size) {
-  return Instance.allocate(Size, Alignment, FromMemalign);
-}
-
 void *scudoPvalloc(uptr Size) {
   uptr PageSize = GetPageSizeCached();
   Size = RoundUpTo(Size, PageSize);
@@ -669,16 +678,27 @@ void *scudoPvalloc(uptr Size) {
   return Instance.allocate(Size, PageSize, FromMemalign);
 }
 
+void *scudoMemalign(uptr Alignment, uptr Size) {
+  if (UNLIKELY(!IsPowerOfTwo(Alignment)))
+    return ScudoAllocator::FailureHandler::OnBadRequest();
+  return Instance.allocate(Size, Alignment, FromMemalign);
+}
+
 int scudoPosixMemalign(void **MemPtr, uptr Alignment, uptr Size) {
+  if (UNLIKELY(!IsPowerOfTwo(Alignment) || (Alignment % sizeof(void *)) != 0)) {
+    *MemPtr = ScudoAllocator::FailureHandler::OnBadRequest();
+    return EINVAL;
+  }
   *MemPtr = Instance.allocate(Size, Alignment, FromMemalign);
+  if (!*MemPtr)
+    return ENOMEM;
   return 0;
 }
 
 void *scudoAlignedAlloc(uptr Alignment, uptr Size) {
-  // size must be a multiple of the alignment. To avoid a division, we first
-  // make sure that alignment is a power of 2.
-  CHECK(IsPowerOfTwo(Alignment));
-  CHECK_EQ((Size & (Alignment - 1)), 0);
+  // Alignment must be a power of 2, Size must be a multiple of Alignment.
+  if (UNLIKELY(!IsPowerOfTwo(Alignment) || (Size & (Alignment - 1)) != 0))
+    return ScudoAllocator::FailureHandler::OnBadRequest();
   return Instance.allocate(Size, Alignment, FromMalloc);
 }
 

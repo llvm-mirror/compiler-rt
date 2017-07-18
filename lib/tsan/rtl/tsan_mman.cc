@@ -162,7 +162,7 @@ void *user_alloc(ThreadState *thr, uptr pc, uptr sz, uptr align, bool signal) {
 }
 
 void *user_calloc(ThreadState *thr, uptr pc, uptr size, uptr n) {
-  if (CallocShouldReturnNullDueToOverflow(size, n))
+  if (CheckForCallocOverflow(size, n))
     return Allocator::FailureHandler::OnBadRequest();
   void *p = user_alloc(thr, pc, n * size);
   if (p)
@@ -294,6 +294,8 @@ uptr __sanitizer_get_allocated_size(const void *p) {
 
 void __tsan_on_thread_idle() {
   ThreadState *thr = cur_thread();
+  thr->clock.ResetCached(&thr->proc()->clock_cache);
+  thr->last_sleep_clock.ResetCached(&thr->proc()->clock_cache);
   allocator()->SwallowCache(&thr->proc()->alloc_cache);
   internal_allocator()->SwallowCache(&thr->proc()->internal_alloc_cache);
   ctx->metamap.OnProcIdle(thr->proc());
