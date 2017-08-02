@@ -12,7 +12,7 @@
 
 #include "sanitizer_platform.h"
 
-#if SANITIZER_FREEBSD || SANITIZER_LINUX
+#if SANITIZER_FREEBSD || SANITIZER_LINUX || SANITIZER_NETBSD
 
 #include "sanitizer_common.h"
 #include "sanitizer_placement_new.h"
@@ -62,6 +62,12 @@ bool IsHex(char c) {
 
 uptr ParseHex(const char **p) {
   return ParseNumber(p, 16);
+}
+
+void MemoryMappedSegment::AddAddressRanges(LoadedModule *module) {
+  // data_ should be unused on this platform
+  CHECK(!data_);
+  module->addAddressRange(start, end, IsExecutable(), IsWritable());
 }
 
 MemoryMappingLayout::MemoryMappingLayout(bool cache_enabled) {
@@ -139,8 +145,7 @@ void MemoryMappingLayout::DumpListOfModules(
     uptr base_address = (i ? segment.start : 0) - segment.offset;
     LoadedModule cur_module;
     cur_module.set(cur_name, base_address);
-    cur_module.addAddressRange(segment.start, segment.end,
-                               segment.IsExecutable(), segment.IsWritable());
+    segment.AddAddressRanges(&cur_module);
     modules->push_back(cur_module);
   }
 }
@@ -171,4 +176,4 @@ void GetMemoryProfile(fill_profile_f cb, uptr *stats, uptr stats_size) {
 
 } // namespace __sanitizer
 
-#endif // SANITIZER_FREEBSD || SANITIZER_LINUX
+#endif // SANITIZER_FREEBSD || SANITIZER_LINUX || SANITIZER_NETBSD
