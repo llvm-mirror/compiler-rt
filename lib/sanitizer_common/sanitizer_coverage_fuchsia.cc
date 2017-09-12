@@ -96,10 +96,13 @@ class TracePcGuardController {
       __sanitizer_publish_data(kSancovSinkName, vmo_);
       vmo_ = MX_HANDLE_INVALID;
 
-      // This will route to __sanitizer_log_write, which will ensure
-      // that information about shared libraries is written out.
-      Printf("SanitizerCoverage: published '%s' with up to %u PCs\n", vmo_name_,
-             next_index_ - 1);
+      // This will route to __sanitizer_log_write, which will ensure that
+      // information about shared libraries is written out.  This message
+      // uses the `dumpfile` symbolizer markup element to highlight the
+      // dump.  See the explanation for this in:
+      // https://fuchsia.googlesource.com/magenta/+/master/docs/symbolizer_markup.md
+      Printf("SanitizerCoverage: {{{dumpfile:%s:%s}}} with up to %u PCs\n",
+             kSancovSinkName, vmo_name_, next_index_ - 1);
     }
   }
 
@@ -223,6 +226,10 @@ SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_cmp1, void) {}
 SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_cmp2, void) {}
 SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_cmp4, void) {}
 SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_cmp8, void) {}
+SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_const_cmp1, void) {}
+SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_const_cmp2, void) {}
+SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_const_cmp4, void) {}
+SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_const_cmp8, void) {}
 SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_switch, void) {}
 SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_div4, void) {}
 SANITIZER_INTERFACE_WEAK_DEF(void, __sanitizer_cov_trace_div8, void) {}

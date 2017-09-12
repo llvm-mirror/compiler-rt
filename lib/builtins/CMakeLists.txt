@@ -235,8 +235,8 @@ if (NOT MSVC)
       x86_64/floatdixf.c
       x86_64/floatundidf.S
       x86_64/floatundisf.S
-      x86_64/floatundixf.S
-      ${GENERIC_SOURCES})
+      x86_64/floatundixf.S)
+  filter_builtin_sources(x86_64_SOURCES EXCLUDE x86_64_SOURCES "${x86_64_SOURCES};${GENERIC_SOURCES}")
   set(x86_64h_SOURCES ${x86_64_SOURCES})
 
   if (WIN32)
@@ -262,8 +262,8 @@ if (NOT MSVC)
       i386/moddi3.S
       i386/muldi3.S
       i386/udivdi3.S
-      i386/umoddi3.S
-      ${GENERIC_SOURCES})
+      i386/umoddi3.S)
+  filter_builtin_sources(i386_SOURCES EXCLUDE i386_SOURCES "${i386_SOURCES};${GENERIC_SOURCES}")
 
   if (WIN32)
     set(i386_SOURCES
@@ -271,9 +271,6 @@ if (NOT MSVC)
         i386/chkstk.S
         i386/chkstk2.S)
   endif()
-
-  set(i686_SOURCES
-      ${i386_SOURCES})
 else () # MSVC
   # Use C versions of functions when building on MSVC
   # MSVC's assembler takes Intel syntax, not AT&T syntax.
@@ -285,7 +282,6 @@ else () # MSVC
       ${GENERIC_SOURCES})
   set(x86_64h_SOURCES ${x86_64_SOURCES})
   set(i386_SOURCES ${GENERIC_SOURCES})
-  set(i686_SOURCES ${i386_SOURCES})
 endif () # if (NOT MSVC)
 
 set(arm_SOURCES
@@ -319,8 +315,8 @@ set(arm_SOURCES
   arm/sync_fetch_and_xor_8.S
   arm/udivmodsi4.S
   arm/udivsi3.S
-  arm/umodsi3.S
-  ${GENERIC_SOURCES})
+  arm/umodsi3.S)
+filter_builtin_sources(arm_SOURCES EXCLUDE arm_SOURCES "${arm_SOURCES};${GENERIC_SOURCES}")
 
 set(thumb1_SOURCES
   arm/divsi3.S
@@ -493,8 +489,10 @@ else ()
       # NOTE: some architectures (e.g. i386) have multiple names.  Ensure that
       # we catch them all.
       set(_arch ${arch})
-      if("${arch}" STREQUAL "i686")
-        set(_arch "i386|i686")
+      if("${arch}" STREQUAL "armv6m")
+        set(_arch "arm|armv6m")
+      elseif("${arch}" MATCHES "^(armhf|armv7|armv7s|armv7k|armv7m|armv7em)$")
+        set(_arch "arm")
       endif()
 
       # Filter out generic versions of routines that are re-implemented in

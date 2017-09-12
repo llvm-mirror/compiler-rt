@@ -109,7 +109,7 @@ static void *AllocateFromLocalPool(uptr size_in_bytes) {
 #define CHECK_UNPOISONED(x, n)                             \
   do {                                                     \
     if (!IsInInterceptorScope()) CHECK_UNPOISONED_0(x, n); \
-  } while (0);
+  } while (0)
 
 #define CHECK_UNPOISONED_STRING_OF_LEN(x, len, n)               \
   CHECK_UNPOISONED((x),                                         \
@@ -134,7 +134,7 @@ INTERCEPTOR(SIZE_T, fread_unlocked, void *ptr, SIZE_T size, SIZE_T nmemb,
 
 INTERCEPTOR(SSIZE_T, readlink, const char *path, char *buf, SIZE_T bufsiz) {
   ENSURE_MSAN_INITED();
-  CHECK_UNPOISONED_STRING(path, 0)
+  CHECK_UNPOISONED_STRING(path, 0);
   SSIZE_T res = REAL(readlink)(path, buf, bufsiz);
   if (res > 0)
     __msan_unpoison(buf, res);
@@ -601,7 +601,7 @@ static void UnpoisonEnviron() {
 
 INTERCEPTOR(int, setenv, const char *name, const char *value, int overwrite) {
   ENSURE_MSAN_INITED();
-  CHECK_UNPOISONED_STRING(name, 0)
+  CHECK_UNPOISONED_STRING(name, 0);
   int res = REAL(setenv)(name, value, overwrite);
   if (!res) UnpoisonEnviron();
   return res;
@@ -983,11 +983,19 @@ static void SignalAction(int signo, void *si, void *uc) {
   cb(signo, si, uc);
 }
 
+static void read_sigaction(const __sanitizer_sigaction *act) {
+  CHECK_UNPOISONED(&act->sa_flags, sizeof(act->sa_flags));
+  if (act->sa_flags & __sanitizer::sa_siginfo)
+    CHECK_UNPOISONED(&act->sigaction, sizeof(act->sigaction));
+  else
+    CHECK_UNPOISONED(&act->handler, sizeof(act->handler));
+  CHECK_UNPOISONED(&act->sa_mask, sizeof(act->sa_mask));
+}
+
 INTERCEPTOR(int, sigaction, int signo, const __sanitizer_sigaction *act,
             __sanitizer_sigaction *oldact) {
   ENSURE_MSAN_INITED();
-  // FIXME: check that *act is unpoisoned.
-  // That requires intercepting all of sigemptyset, sigfillset, etc.
+  if (act) read_sigaction(act);
   int res;
   if (flags()->wrap_signals) {
     SpinMutexLock lock(&sigactions_mu);
