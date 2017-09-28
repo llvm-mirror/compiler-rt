@@ -255,6 +255,21 @@ static void stat64_to_stat(struct stat64 *in, struct stat *out) {
 #endif
 
 #if defined(__mips64)
+// Undefine compatibility macros from <sys/stat.h>
+// so that they would not clash with the kernel_stat
+// st_[a|m|c]time fields
+#undef st_atime
+#undef st_mtime
+#undef st_ctime
+#if defined(SANITIZER_ANDROID)
+// Bionic sys/stat.h defines additional macros
+// for compatibility with the old NDKs and
+// they clash with the kernel_stat structure
+// st_[a|m|c]time_nsec fields.
+#undef st_atime_nsec
+#undef st_mtime_nsec
+#undef st_ctime_nsec
+#endif
 static void kernel_stat_to_stat(struct kernel_stat *in, struct stat *out) {
   internal_memset(out, 0, sizeof(*out));
   out->st_dev = in->st_dev;
@@ -267,9 +282,23 @@ static void kernel_stat_to_stat(struct kernel_stat *in, struct stat *out) {
   out->st_size = in->st_size;
   out->st_blksize = in->st_blksize;
   out->st_blocks = in->st_blocks;
-  out->st_atime = in->st_atime_nsec;
-  out->st_mtime = in->st_mtime_nsec;
-  out->st_ctime = in->st_ctime_nsec;
+#if defined(__USE_MISC)     || \
+    defined(__USE_XOPEN2K8) || \
+    defined(SANITIZER_ANDROID)
+  out->st_atim.tv_sec = in->st_atime;
+  out->st_atim.tv_nsec = in->st_atime_nsec;
+  out->st_mtim.tv_sec = in->st_mtime;
+  out->st_mtim.tv_nsec = in->st_mtime_nsec;
+  out->st_ctim.tv_sec = in->st_ctime;
+  out->st_ctim.tv_nsec = in->st_ctime_nsec;
+#else
+  out->st_atime = in->st_atime;
+  out->st_atimensec = in->st_atime_nsec;
+  out->st_mtime = in->st_mtime;
+  out->st_mtimensec = in->st_mtime_nsec;
+  out->st_ctime = in->st_ctime;
+  out->st_atimensec = in->st_ctime_nsec;
+#endif
 }
 #endif
 
@@ -1628,7 +1657,7 @@ static bool Aarch64GetESR(ucontext_t *ucontext, u64 *esr) {
 }
 #endif
 
-SignalContext::WriteFlag SignalContext::GetWriteFlag(void *context) {
+SignalContext::WriteFlag SignalContext::GetWriteFlag() const {
   ucontext_t *ucontext = (ucontext_t *)context;
 #if defined(__x86_64__) || defined(__i386__)
   static const uptr PF_WRITE = 1U << 1;
@@ -1659,7 +1688,7 @@ void SignalContext::DumpAllRegisters(void *context) {
   // FIXME: Implement this.
 }
 
-void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
+static void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 #if defined(__arm__)
   ucontext_t *ucontext = (ucontext_t*)context;
   *pc = ucontext->uc_mcontext.arm_pc;
@@ -1749,6 +1778,8 @@ void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 # error "Unsupported arch"
 #endif
 }
+
+void SignalContext::InitPcSpBp() { GetPcSpBp(context, &pc, &sp, &bp); }
 
 void MaybeReexec() {
   // No need to re-exec on Linux.

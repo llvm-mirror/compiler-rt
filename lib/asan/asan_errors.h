@@ -27,61 +27,28 @@ struct ErrorBase {
   u32 tid;
 };
 
-struct ErrorStackOverflow : ErrorBase {
-  uptr addr, pc, bp, sp;
-  // ErrorStackOverflow never owns the context.
-  void *context;
-  // VS2013 doesn't implement unrestricted unions, so we need a trivial default
-  // constructor
-  ErrorStackOverflow() = default;
-  ErrorStackOverflow(u32 tid, const SignalContext &sig)
-      : ErrorBase(tid),
-        addr(sig.addr),
-        pc(sig.pc),
-        bp(sig.bp),
-        sp(sig.sp),
-        context(sig.context) {
-    scariness.Clear();
-    scariness.Scare(10, "stack-overflow");
-  }
-  void Print();
-};
-
 struct ErrorDeadlySignal : ErrorBase {
-  uptr addr, pc, bp, sp;
-  // ErrorDeadlySignal never owns the context.
-  void *context;
-  int signo;
-  SignalContext::WriteFlag write_flag;
-  bool is_memory_access;
+  SignalContext signal;
   // VS2013 doesn't implement unrestricted unions, so we need a trivial default
   // constructor
   ErrorDeadlySignal() = default;
-  ErrorDeadlySignal(u32 tid, const SignalContext &sig, int signo_)
-      : ErrorBase(tid),
-        addr(sig.addr),
-        pc(sig.pc),
-        bp(sig.bp),
-        sp(sig.sp),
-        context(sig.context),
-        signo(signo_),
-        write_flag(sig.write_flag),
-        is_memory_access(sig.is_memory_access) {
+  ErrorDeadlySignal(u32 tid, const SignalContext &sig)
+      : ErrorBase(tid), signal(sig) {
     scariness.Clear();
-    if (is_memory_access) {
-      if (addr < GetPageSizeCached()) {
-        scariness.Scare(10, "null-deref");
-      } else if (addr == pc) {
-        scariness.Scare(60, "wild-jump");
-      } else if (write_flag == SignalContext::WRITE) {
-        scariness.Scare(30, "wild-addr-write");
-      } else if (write_flag == SignalContext::READ) {
-        scariness.Scare(20, "wild-addr-read");
-      } else {
-        scariness.Scare(25, "wild-addr");
-      }
-    } else {
+    if (signal.IsStackOverflow()) {
+      scariness.Scare(10, "stack-overflow");
+    } else if (!signal.is_memory_access) {
       scariness.Scare(10, "signal");
+    } else if (signal.addr < GetPageSizeCached()) {
+      scariness.Scare(10, "null-deref");
+    } else if (signal.addr == signal.pc) {
+      scariness.Scare(60, "wild-jump");
+    } else if (signal.write_flag == SignalContext::WRITE) {
+      scariness.Scare(30, "wild-addr-write");
+    } else if (signal.write_flag == SignalContext::READ) {
+      scariness.Scare(20, "wild-addr-read");
+    } else {
+      scariness.Scare(25, "wild-addr");
     }
   }
   void Print();
@@ -324,7 +291,6 @@ struct ErrorGeneric : ErrorBase {
 
 // clang-format off
 #define ASAN_FOR_EACH_ERROR_KIND(macro)         \
-  macro(StackOverflow)                          \
   macro(DeadlySignal)                           \
   macro(DoubleFree)                             \
   macro(NewDeleteSizeMismatch)                  \

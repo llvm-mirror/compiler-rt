@@ -495,7 +495,13 @@ struct ScudoAllocator {
   // Deallocates a Chunk, which means adding it to the delayed free list (or
   // Quarantine).
   void deallocate(void *UserPtr, uptr DeleteSize, AllocType Type) {
-    initThreadMaybe();
+    // For a deallocation, we only ensure minimal initialization, meaning thread
+    // local data will be left uninitialized for now (when using ELF TLS). The
+    // fallback cache will be used instead. This is a workaround for a situation
+    // where the only heap operation performed in a thread would be a free past
+    // the TLS destructors, ending up in initialized thread specific data never
+    // being destroyed properly. Any other heap operation will do a full init.
+    initThreadMaybe(/*MinimalInit=*/true);
     // if (&__sanitizer_free_hook) __sanitizer_free_hook(UserPtr);
     if (UNLIKELY(!UserPtr))
       return;
@@ -614,6 +620,11 @@ struct ScudoAllocator {
     BackendAllocator.getStats(stats);
     return stats[StatType];
   }
+
+  void *handleBadRequest() {
+    initThreadMaybe();
+    return FailureHandler::OnBadRequest();
+  }
 };
 
 static ScudoAllocator Instance(LINKER_INITIALIZED);
@@ -671,7 +682,7 @@ void *scudoPvalloc(uptr Size) {
   uptr PageSize = GetPageSizeCached();
   if (UNLIKELY(CheckForPvallocOverflow(Size, PageSize))) {
     errno = errno_ENOMEM;
-    return ScudoAllocator::FailureHandler::OnBadRequest();
+    return Instance.handleBadRequest();
   }
   // pvalloc(0) should allocate one page.
   Size = Size ? RoundUpTo(Size, PageSize) : PageSize;
@@ -681,14 +692,14 @@ void *scudoPvalloc(uptr Size) {
 void *scudoMemalign(uptr Alignment, uptr Size) {
   if (UNLIKELY(!IsPowerOfTwo(Alignment))) {
     errno = errno_EINVAL;
-    return ScudoAllocator::FailureHandler::OnBadRequest();
+    return Instance.handleBadRequest();
   }
   return SetErrnoOnNull(Instance.allocate(Size, Alignment, FromMemalign));
 }
 
 int scudoPosixMemalign(void **MemPtr, uptr Alignment, uptr Size) {
   if (UNLIKELY(!CheckPosixMemalignAlignment(Alignment))) {
-    ScudoAllocator::FailureHandler::OnBadRequest();
+    Instance.handleBadRequest();
     return errno_EINVAL;
   }
   void *Ptr = Instance.allocate(Size, Alignment, FromMemalign);
@@ -701,7 +712,7 @@ int scudoPosixMemalign(void **MemPtr, uptr Alignment, uptr Size) {
 void *scudoAlignedAlloc(uptr Alignment, uptr Size) {
   if (UNLIKELY(!CheckAlignedAllocAlignmentAndSize(Alignment, Size))) {
     errno = errno_EINVAL;
-    return ScudoAllocator::FailureHandler::OnBadRequest();
+    return Instance.handleBadRequest();
   }
   return SetErrnoOnNull(Instance.allocate(Size, Alignment, FromMalloc));
 }
