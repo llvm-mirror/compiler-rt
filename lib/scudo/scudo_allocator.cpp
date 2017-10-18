@@ -17,14 +17,14 @@
 #include "scudo_allocator.h"
 #include "scudo_crc32.h"
 #include "scudo_flags.h"
-#include "scudo_tls.h"
+#include "scudo_tsd.h"
 #include "scudo_utils.h"
 
 #include "sanitizer_common/sanitizer_allocator_checks.h"
 #include "sanitizer_common/sanitizer_allocator_interface.h"
-#include "sanitizer_common/sanitizer_errno.h"
 #include "sanitizer_common/sanitizer_quarantine.h"
 
+#include <errno.h>
 #include <string.h>
 
 namespace __scudo {
@@ -250,19 +250,11 @@ struct QuarantineCallback {
 typedef Quarantine<QuarantineCallback, ScudoChunk> ScudoQuarantine;
 typedef ScudoQuarantine::Cache ScudoQuarantineCache;
 COMPILER_CHECK(sizeof(ScudoQuarantineCache) <=
-               sizeof(ScudoThreadContext::QuarantineCachePlaceHolder));
+               sizeof(ScudoTSD::QuarantineCachePlaceHolder));
 
-AllocatorCache *getAllocatorCache(ScudoThreadContext *ThreadContext) {
-  return &ThreadContext->Cache;
-}
-
-ScudoQuarantineCache *getQuarantineCache(ScudoThreadContext *ThreadContext) {
-  return reinterpret_cast<
-      ScudoQuarantineCache *>(ThreadContext->QuarantineCachePlaceHolder);
-}
-
-ScudoPrng *getPrng(ScudoThreadContext *ThreadContext) {
-  return &ThreadContext->Prng;
+ScudoQuarantineCache *getQuarantineCache(ScudoTSD *TSD) {
+  return reinterpret_cast<ScudoQuarantineCache *>(
+      TSD->QuarantineCachePlaceHolder);
 }
 
 struct ScudoAllocator {
@@ -277,14 +269,6 @@ struct ScudoAllocator {
   StaticSpinMutex GlobalPrngMutex;
   ScudoPrng GlobalPrng;
 
-  // The fallback caches are used when the thread local caches have been
-  // 'detroyed' on thread tear-down. They are protected by a Mutex as they can
-  // be accessed by different threads.
-  StaticSpinMutex FallbackMutex;
-  AllocatorCache FallbackAllocatorCache;
-  ScudoQuarantineCache FallbackQuarantineCache;
-  ScudoPrng FallbackPrng;
-
   u32 QuarantineChunksUpToSize;
 
   bool DeallocationTypeMismatch;
@@ -292,8 +276,7 @@ struct ScudoAllocator {
   bool DeleteSizeMismatch;
 
   explicit ScudoAllocator(LinkerInitialized)
-    : AllocatorQuarantine(LINKER_INITIALIZED),
-      FallbackQuarantineCache(LINKER_INITIALIZED) {}
+    : AllocatorQuarantine(LINKER_INITIALIZED) {}
 
   void init(const AllocatorOptions &Options) {
     // Verify that the header offset field can hold the maximum offset. In the
@@ -337,8 +320,6 @@ struct ScudoAllocator {
     QuarantineChunksUpToSize = Options.QuarantineChunksUpToSize;
     GlobalPrng.init();
     Cookie = GlobalPrng.getU64();
-    BackendAllocator.initCache(&FallbackAllocatorCache);
-    FallbackPrng.init();
   }
 
   // Helper function that checks for a valid Scudo chunk. nullptr isn't.
@@ -381,18 +362,10 @@ struct ScudoAllocator {
     uptr AllocSize;
     if (FromPrimary) {
       AllocSize = AlignedSize;
-      ScudoThreadContext *ThreadContext = getThreadContextAndLock();
-      if (LIKELY(ThreadContext)) {
-        Salt = getPrng(ThreadContext)->getU8();
-        Ptr = BackendAllocator.allocatePrimary(getAllocatorCache(ThreadContext),
-                                               AllocSize);
-        ThreadContext->unlock();
-      } else {
-        SpinMutexLock l(&FallbackMutex);
-        Salt = FallbackPrng.getU8();
-        Ptr = BackendAllocator.allocatePrimary(&FallbackAllocatorCache,
-                                               AllocSize);
-      }
+      ScudoTSD *TSD = getTSDAndLock();
+      Salt = TSD->Prng.getU8();
+      Ptr = BackendAllocator.allocatePrimary(&TSD->Cache, AllocSize);
+      TSD->unlock();
     } else {
       {
         SpinMutexLock l(&GlobalPrngMutex);
@@ -454,15 +427,9 @@ struct ScudoAllocator {
       Chunk->eraseHeader();
       void *Ptr = Chunk->getAllocBeg(Header);
       if (Header->FromPrimary) {
-        ScudoThreadContext *ThreadContext = getThreadContextAndLock();
-        if (LIKELY(ThreadContext)) {
-          getBackendAllocator().deallocatePrimary(
-              getAllocatorCache(ThreadContext), Ptr);
-          ThreadContext->unlock();
-        } else {
-          SpinMutexLock Lock(&FallbackMutex);
-          getBackendAllocator().deallocatePrimary(&FallbackAllocatorCache, Ptr);
-        }
+        ScudoTSD *TSD = getTSDAndLock();
+        getBackendAllocator().deallocatePrimary(&TSD->Cache, Ptr);
+        TSD->unlock();
       } else {
         getBackendAllocator().deallocateSecondary(Ptr);
       }
@@ -476,19 +443,11 @@ struct ScudoAllocator {
       UnpackedHeader NewHeader = *Header;
       NewHeader.State = ChunkQuarantine;
       Chunk->compareExchangeHeader(&NewHeader, Header);
-      ScudoThreadContext *ThreadContext = getThreadContextAndLock();
-      if (LIKELY(ThreadContext)) {
-        AllocatorQuarantine.Put(getQuarantineCache(ThreadContext),
-                                QuarantineCallback(
-                                    getAllocatorCache(ThreadContext)),
-                                Chunk, EstimatedSize);
-        ThreadContext->unlock();
-      } else {
-        SpinMutexLock l(&FallbackMutex);
-        AllocatorQuarantine.Put(&FallbackQuarantineCache,
-                                QuarantineCallback(&FallbackAllocatorCache),
-                                Chunk, EstimatedSize);
-      }
+      ScudoTSD *TSD = getTSDAndLock();
+      AllocatorQuarantine.Put(getQuarantineCache(TSD),
+                              QuarantineCallback(&TSD->Cache),
+                              Chunk, EstimatedSize);
+      TSD->unlock();
     }
   }
 
@@ -607,11 +566,10 @@ struct ScudoAllocator {
     return allocate(NMemB * Size, MinAlignment, FromMalloc, true);
   }
 
-  void commitBack(ScudoThreadContext *ThreadContext) {
-    AllocatorCache *Cache = getAllocatorCache(ThreadContext);
-    AllocatorQuarantine.Drain(getQuarantineCache(ThreadContext),
-                              QuarantineCallback(Cache));
-    BackendAllocator.destroyCache(Cache);
+  void commitBack(ScudoTSD *TSD) {
+    AllocatorQuarantine.Drain(getQuarantineCache(TSD),
+                              QuarantineCallback(&TSD->Cache));
+    BackendAllocator.destroyCache(&TSD->Cache);
   }
 
   uptr getStats(AllocatorStat StatType) {
@@ -637,13 +595,14 @@ static void initScudoInternal(const AllocatorOptions &Options) {
   Instance.init(Options);
 }
 
-void ScudoThreadContext::init() {
+void ScudoTSD::init(bool Shared) {
+  UnlockRequired = Shared;
   getBackendAllocator().initCache(&Cache);
   Prng.init();
   memset(QuarantineCachePlaceHolder, 0, sizeof(QuarantineCachePlaceHolder));
 }
 
-void ScudoThreadContext::commitBack() {
+void ScudoTSD::commitBack() {
   Instance.commitBack(this);
 }
 
@@ -681,7 +640,7 @@ void *scudoValloc(uptr Size) {
 void *scudoPvalloc(uptr Size) {
   uptr PageSize = GetPageSizeCached();
   if (UNLIKELY(CheckForPvallocOverflow(Size, PageSize))) {
-    errno = errno_ENOMEM;
+    errno = ENOMEM;
     return Instance.handleBadRequest();
   }
   // pvalloc(0) should allocate one page.
@@ -691,7 +650,7 @@ void *scudoPvalloc(uptr Size) {
 
 void *scudoMemalign(uptr Alignment, uptr Size) {
   if (UNLIKELY(!IsPowerOfTwo(Alignment))) {
-    errno = errno_EINVAL;
+    errno = EINVAL;
     return Instance.handleBadRequest();
   }
   return SetErrnoOnNull(Instance.allocate(Size, Alignment, FromMemalign));
@@ -700,18 +659,18 @@ void *scudoMemalign(uptr Alignment, uptr Size) {
 int scudoPosixMemalign(void **MemPtr, uptr Alignment, uptr Size) {
   if (UNLIKELY(!CheckPosixMemalignAlignment(Alignment))) {
     Instance.handleBadRequest();
-    return errno_EINVAL;
+    return EINVAL;
   }
   void *Ptr = Instance.allocate(Size, Alignment, FromMemalign);
   if (UNLIKELY(!Ptr))
-    return errno_ENOMEM;
+    return ENOMEM;
   *MemPtr = Ptr;
   return 0;
 }
 
 void *scudoAlignedAlloc(uptr Alignment, uptr Size) {
   if (UNLIKELY(!CheckAlignedAllocAlignmentAndSize(Alignment, Size))) {
-    errno = errno_EINVAL;
+    errno = EINVAL;
     return Instance.handleBadRequest();
   }
   return SetErrnoOnNull(Instance.allocate(Size, Alignment, FromMalloc));

@@ -28,7 +28,6 @@
 #include "sanitizer_libc.h"
 #include "sanitizer_mutex.h"
 #include "sanitizer_placement_new.h"
-#include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
 #include "sanitizer_symbolizer.h"
 #include "sanitizer_win_defs.h"
@@ -525,7 +524,7 @@ static uptr GetPreferredBase(const char *modname) {
 }
 
 void ListOfModules::init() {
-  clear();
+  clearOrInit();
   HANDLE cur_process = GetCurrentProcess();
 
   // Query the list of modules.  Start by assuming there are no more than 256
@@ -584,7 +583,9 @@ void ListOfModules::init() {
     modules_.push_back(cur_module);
   }
   UnmapOrDie(hmodules, modules_buffer_size);
-};
+}
+
+void ListOfModules::fallbackInit() { clear(); }
 
 // We can't use atexit() directly at __asan_init time as the CRT is not fully
 // initialized at this point.  Place the functions into a vector and use

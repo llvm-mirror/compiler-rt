@@ -116,6 +116,16 @@ XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
                        reinterpret_cast<char *>(B.Buffer) + B.Size);
     }
   });
+
+  // The buffer for this particular thread would have been finalised after
+  // we've written everything to disk, and we'd lose the thread's trace.
+  auto &TLD = __xray::__xray_fdr_internal::getThreadLocalData();
+  if (TLD.Buffer.Buffer != nullptr) {
+    __xray::__xray_fdr_internal::writeEOBMetadata();
+    auto Start = reinterpret_cast<char *>(TLD.Buffer.Buffer);
+    retryingWriteAll(Fd, Start, Start + TLD.Buffer.Size);
+  }
+
   __sanitizer::atomic_store(&LogFlushStatus,
                             XRayLogFlushStatus::XRAY_LOG_FLUSHED,
                             __sanitizer::memory_order_release);
@@ -196,9 +206,17 @@ getTimestamp() XRAY_NEVER_INSTRUMENT {
 void fdrLoggingHandleArg0(int32_t FuncId,
                           XRayEntryType Entry) XRAY_NEVER_INSTRUMENT {
   auto TSC_CPU = getTimestamp();
-  __xray_fdr_internal::processFunctionHook(FuncId, Entry, std::get<0>(TSC_CPU),
-                                           std::get<1>(TSC_CPU), clock_gettime,
-                                           LoggingStatus, *BQ);
+  __xray_fdr_internal::processFunctionHook(
+      FuncId, Entry, std::get<0>(TSC_CPU), std::get<1>(TSC_CPU), 0,
+      clock_gettime, *BQ);
+}
+
+void fdrLoggingHandleArg1(int32_t FuncId, XRayEntryType Entry,
+                          uint64_t Arg) XRAY_NEVER_INSTRUMENT {
+  auto TSC_CPU = getTimestamp();
+  __xray_fdr_internal::processFunctionHook(
+      FuncId, Entry, std::get<0>(TSC_CPU), std::get<1>(TSC_CPU), Arg,
+      clock_gettime, *BQ);
 }
 
 void fdrLoggingHandleCustomEvent(void *Event,
@@ -280,6 +298,9 @@ XRayLogInitStatus fdrLoggingInit(std::size_t BufferSize, std::size_t BufferMax,
     return XRayLogInitStatus::XRAY_LOG_UNINITIALIZED;
   }
 
+  // Arg1 handler should go in first to avoid concurrent code accidentally
+  // falling back to arg0 when it should have ran arg1.
+  __xray_set_handler_arg1(fdrLoggingHandleArg1);
   // Install the actual handleArg0 handler after initialising the buffers.
   __xray_set_handler(fdrLoggingHandleArg0);
   __xray_set_customevent_handler(fdrLoggingHandleCustomEvent);

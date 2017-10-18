@@ -128,6 +128,14 @@ void CheckVMASize();
 void RunMallocHooks(const void *ptr, uptr size);
 void RunFreeHooks(const void *ptr);
 
+typedef void (*fill_profile_f)(uptr start, uptr rss, bool file,
+                               /*out*/uptr *stats, uptr stats_size);
+
+// Parse the contents of /proc/self/smaps and generate a memory profile.
+// |cb| is a tool-specific callback that fills the |stats| array containing
+// |stats_size| elements.
+void GetMemoryProfile(fill_profile_f cb, uptr *stats, uptr stats_size);
+
 // InternalScopedBuffer can be used instead of large stack arrays to
 // keep frame size low.
 // FIXME: use InternalAlloc instead of MmapOrDie once
@@ -205,7 +213,17 @@ void SetPrintfAndReportCallback(void (*callback)(const char *));
   } while (0)
 
 // Can be used to prevent mixing error reports from different sanitizers.
+// FIXME: Replace with ScopedErrorReportLock and hide.
 extern StaticSpinMutex CommonSanitizerReportMutex;
+
+// Lock sanitizer error reporting and protects against nested errors.
+class ScopedErrorReportLock {
+ public:
+  ScopedErrorReportLock();
+  ~ScopedErrorReportLock();
+
+  static void CheckLocked();
+};
 
 extern uptr stoptheworld_tracer_pid;
 extern uptr stoptheworld_tracer_ppid;
@@ -310,15 +328,24 @@ void SetSoftRssLimitExceededCallback(void (*Callback)(bool exceeded));
 typedef void (*SignalHandlerType)(int, void *, void *);
 HandleSignalMode GetHandleSignalMode(int signum);
 void InstallDeadlySignalHandlers(SignalHandlerType handler);
+
 // Signal reporting.
-void StartReportDeadlySignal();
 // Each sanitizer uses slightly different implementation of stack unwinding.
 typedef void (*UnwindSignalStackCallbackType)(const SignalContext &sig,
                                               const void *callback_context,
                                               BufferedStackTrace *stack);
+// Print deadly signal report and die.
+void HandleDeadlySignal(void *siginfo, void *context, u32 tid,
+                        UnwindSignalStackCallbackType unwind,
+                        const void *unwind_context);
+
+// Part of HandleDeadlySignal, exposed for asan.
+void StartReportDeadlySignal();
+// Part of HandleDeadlySignal, exposed for asan.
 void ReportDeadlySignal(const SignalContext &sig, u32 tid,
                         UnwindSignalStackCallbackType unwind,
                         const void *unwind_context);
+
 // Alternative signal stack (POSIX-only).
 void SetAlternateSignalStack();
 void UnsetAlternateSignalStack();
@@ -700,9 +727,10 @@ class LoadedModule {
 // filling this information.
 class ListOfModules {
  public:
-  ListOfModules() : modules_(kInitialCapacity) {}
+  ListOfModules() : initialized(false) {}
   ~ListOfModules() { clear(); }
   void init();
+  void fallbackInit();  // Uses fallback init if available, otherwise clears
   const LoadedModule *begin() const { return modules_.begin(); }
   LoadedModule *begin() { return modules_.begin(); }
   const LoadedModule *end() const { return modules_.end(); }
@@ -718,10 +746,15 @@ class ListOfModules {
     for (auto &module : modules_) module.clear();
     modules_.clear();
   }
+  void clearOrInit() {
+    initialized ? clear() : modules_.Initialize(kInitialCapacity);
+    initialized = true;
+  }
 
-  InternalMmapVector<LoadedModule> modules_;
+  InternalMmapVectorNoCtor<LoadedModule> modules_;
   // We rarely have more than 16K loaded modules.
   static const uptr kInitialCapacity = 1 << 14;
+  bool initialized;
 };
 
 // Callback type for iterating over a set of memory ranges.

@@ -18,10 +18,11 @@
 // clang-format on
 
 // Remove when fixed: https://github.com/google/sanitizers/issues/637
-// XFAIL: lsan
 // XFAIL: msan
 // XFAIL: tsan
-// XFAIL: ubsan
+
+// Flaky errors in debuggerd with "waitpid returned unexpected pid (0)" in logcat.
+// UNSUPPORTED: android
 
 #include <signal.h>
 #include <stdio.h>

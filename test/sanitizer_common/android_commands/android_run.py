@@ -5,15 +5,14 @@ from android_common import *
 
 ANDROID_TMPDIR = '/data/local/tmp/Output'
 
-here = os.path.abspath(os.path.dirname(sys.argv[0]))
-device_binary = os.path.join(ANDROID_TMPDIR, os.path.basename(sys.argv[0]))
+device_binary = host_to_device_path(sys.argv[0])
 
 def build_env():
     args = []
     # Android linker ignores RPATH. Set LD_LIBRARY_PATH to Output dir.
     args.append('LD_LIBRARY_PATH=%s' % (ANDROID_TMPDIR,))
     for (key, value) in os.environ.items():
-        if key in ['ASAN_OPTIONS', 'ASAN_ACTIVATION_OPTIONS', 'SCUDO_OPTIONS']:
+        if key in ['ASAN_OPTIONS', 'ASAN_ACTIVATION_OPTIONS', 'SCUDO_OPTIONS', 'UBSAN_OPTIONS']:
             args.append('%s="%s"' % (key, value))
     return ' '.join(args)
 

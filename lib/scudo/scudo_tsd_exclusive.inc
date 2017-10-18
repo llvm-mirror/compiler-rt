@@ -1,4 +1,4 @@
-//===-- scudo_tls_linux.inc -------------------------------------*- C++ -*-===//
+//===-- scudo_tsd_exclusive.inc ---------------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,19 +7,15 @@
 //
 //===----------------------------------------------------------------------===//
 ///
-/// Scudo thread local structure fastpath functions implementation for platforms
-/// supporting thread_local.
+/// Scudo exclusive TSD fastpath functions implementation.
 ///
 //===----------------------------------------------------------------------===//
 
-#ifndef SCUDO_TLS_LINUX_H_
-#define SCUDO_TLS_LINUX_H_
+#ifndef SCUDO_TSD_H_
+# error "This file must be included inside scudo_tsd.h."
+#endif  // SCUDO_TSD_H_
 
-#ifndef SCUDO_TLS_H_
-# error "This file must be included inside scudo_tls.h."
-#endif  // SCUDO_TLS_H_
-
-#if SANITIZER_LINUX && !SANITIZER_ANDROID
+#if SCUDO_TSD_EXCLUSIVE
 
 enum ThreadState : u8 {
   ThreadNotInitialized = 0,
@@ -29,7 +25,9 @@ enum ThreadState : u8 {
 __attribute__((tls_model("initial-exec")))
 extern THREADLOCAL ThreadState ScudoThreadState;
 __attribute__((tls_model("initial-exec")))
-extern THREADLOCAL ScudoThreadContext ThreadLocalContext;
+extern THREADLOCAL ScudoTSD TSD;
+
+extern ScudoTSD FallbackTSD;
 
 ALWAYS_INLINE void initThreadMaybe(bool MinimalInit = false) {
   if (LIKELY(ScudoThreadState != ThreadNotInitialized))
@@ -37,12 +35,12 @@ ALWAYS_INLINE void initThreadMaybe(bool MinimalInit = false) {
   initThread(MinimalInit);
 }
 
-ALWAYS_INLINE ScudoThreadContext *getThreadContextAndLock() {
-  if (UNLIKELY(ScudoThreadState != ThreadInitialized))
-    return nullptr;
-  return &ThreadLocalContext;
+ALWAYS_INLINE ScudoTSD *getTSDAndLock() {
+  if (UNLIKELY(ScudoThreadState != ThreadInitialized)) {
+    FallbackTSD.lock();
+    return &FallbackTSD;
+  }
+  return &TSD;
 }
 
-#endif  // SANITIZER_LINUX && !SANITIZER_ANDROID
-
-#endif  // SCUDO_TLS_LINUX_H_
+#endif  // SCUDO_TSD_EXCLUSIVE
