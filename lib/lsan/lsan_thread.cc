@@ -77,7 +77,7 @@ u32 ThreadCreate(u32 parent_tid, uptr user_id, bool detached) {
                                        /* arg */ nullptr);
 }
 
-void ThreadStart(u32 tid, uptr os_id) {
+void ThreadStart(u32 tid, tid_t os_id, bool workerthread) {
   OnStartedArgs args;
   uptr stack_size = 0;
   uptr tls_size = 0;
@@ -87,11 +87,12 @@ void ThreadStart(u32 tid, uptr os_id) {
   args.tls_end = args.tls_begin + tls_size;
   GetAllocatorCacheRange(&args.cache_begin, &args.cache_end);
   args.dtls = DTLS_Get();
-  thread_registry->StartThread(tid, os_id, /*workerthread*/ false, &args);
+  thread_registry->StartThread(tid, os_id, workerthread, &args);
 }
 
 void ThreadFinish() {
   thread_registry->FinishThread(GetCurrentThread());
+  SetCurrentThread(kInvalidTid);
 }
 
 ThreadContext *CurrentThreadContext() {
@@ -126,7 +127,7 @@ void EnsureMainThreadIDIsCorrect() {
 
 ///// Interface to the common LSan module. /////
 
-bool GetThreadRangesLocked(uptr os_id, uptr *stack_begin, uptr *stack_end,
+bool GetThreadRangesLocked(tid_t os_id, uptr *stack_begin, uptr *stack_end,
                            uptr *tls_begin, uptr *tls_end, uptr *cache_begin,
                            uptr *cache_end, DTLS **dtls) {
   ThreadContext *context = static_cast<ThreadContext *>(
@@ -142,7 +143,7 @@ bool GetThreadRangesLocked(uptr os_id, uptr *stack_begin, uptr *stack_end,
   return true;
 }
 
-void ForEachExtraStackRange(uptr os_id, RangeIteratorCallback callback,
+void ForEachExtraStackRange(tid_t os_id, RangeIteratorCallback callback,
                             void *arg) {
 }
 

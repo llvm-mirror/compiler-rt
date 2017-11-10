@@ -69,15 +69,23 @@ void InitializePlatformExceptionHandlers();
 bool IsSystemHeapAddress(uptr addr);
 
 // asan_rtl.cc
+void PrintAddressSpaceLayout();
 void NORETURN ShowStatsAndAbort();
+
+// asan_shadow_setup.cc
+void InitializeShadowMemory();
 
 // asan_malloc_linux.cc / asan_malloc_mac.cc
 void ReplaceSystemMalloc();
 
 // asan_linux.cc / asan_mac.cc / asan_win.cc
+uptr FindDynamicShadowStart();
 void *AsanDoesNotSupportStaticLinkage();
 void AsanCheckDynamicRTPrereqs();
 void AsanCheckIncompatibleRT();
+
+// asan_thread.cc
+AsanThread *CreateMainThread();
 
 // Support function for __asan_(un)register_image_globals. Searches for the
 // loaded image containing `needle' and then enumerates all global metadata

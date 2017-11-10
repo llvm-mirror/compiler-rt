@@ -1,3 +1,6 @@
+// RUN: %clang_builtins %s %librt -o %t && %run %t
+// REQUIRES: x86-target-arch
+
 //===-- floatuntixf.c - Test __floatuntixf --------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure

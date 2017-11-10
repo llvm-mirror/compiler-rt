@@ -1,3 +1,6 @@
+// RUN: %clang_builtins %s %librt -o %t && %run %t
+// REQUIRES: x86-target-arch
+
 //===-- fixxfti_test.c - Test __fixxfti -----------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure

@@ -30,11 +30,11 @@
 #include <stdint.h>
 #include <assert.h>
 #include <algorithm>
+#include <setjmp.h>
 
 #if !defined(_WIN32)
 # include <strings.h>
 # include <sys/mman.h>
-# include <setjmp.h>
 #endif
 
 #ifdef __linux__
@@ -45,7 +45,7 @@
 #include <unistd.h>
 #endif
 
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__NetBSD__)
 #include <malloc.h>
 #endif
 

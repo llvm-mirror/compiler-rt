@@ -8,6 +8,11 @@
 
 // FIXME: Windows symbolizer needs work to make this pass.
 // XFAIL: android,win32
+// UNSUPPORTED: ios
+
+// FIXME: atos does not work for inlined functions, yet llvm-symbolizer
+// does not always work with debug info on Darwin.
+// UNSUPPORTED: darwin
 
 #include <stdio.h>
 #include <stdlib.h>

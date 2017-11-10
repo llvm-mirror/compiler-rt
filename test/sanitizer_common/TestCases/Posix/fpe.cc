@@ -5,8 +5,8 @@
 // RUN: %env_tool_opts=handle_sigfpe=1 not         %run %t 2>&1 | FileCheck --check-prefix=CHECK1 %s
 // FIXME: implement in other sanitizers, not just asan.
 // XFAIL: msan
-// XFAIL: lsan
 // XFAIL: tsan
+// XFAIL: ubsan
 //
 // FIXME: seems to fail on ARM
 // REQUIRES: x86_64-target-arch

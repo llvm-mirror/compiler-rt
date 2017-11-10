@@ -28,16 +28,23 @@ struct XRaySledEntry {
   uint64_t Function;
   unsigned char Kind;
   unsigned char AlwaysInstrument;
-  unsigned char Padding[14]; // Need 32 bytes
+  unsigned char Version;
+  unsigned char Padding[13]; // Need 32 bytes
 #elif SANITIZER_WORDSIZE == 32
   uint32_t Address;
   uint32_t Function;
   unsigned char Kind;
   unsigned char AlwaysInstrument;
-  unsigned char Padding[6]; // Need 16 bytes
+  unsigned char Version;
+  unsigned char Padding[5]; // Need 16 bytes
 #else
 #error "Unsupported word size."
 #endif
+};
+
+struct XRayFunctionSledIndex {
+  const XRaySledEntry* Begin;
+  const XRaySledEntry* End;
 };
 }
 
@@ -46,6 +53,8 @@ namespace __xray {
 struct XRaySledMap {
   const XRaySledEntry *Sleds;
   size_t Entries;
+  const XRayFunctionSledIndex *SledsIndex;
+  size_t Functions;
 };
 
 bool patchFunctionEntry(bool Enable, uint32_t FuncId,
@@ -53,6 +62,7 @@ bool patchFunctionEntry(bool Enable, uint32_t FuncId,
 bool patchFunctionExit(bool Enable, uint32_t FuncId, const XRaySledEntry &Sled);
 bool patchFunctionTailExit(bool Enable, uint32_t FuncId,
                            const XRaySledEntry &Sled);
+bool patchCustomEvent(bool Enable, uint32_t FuncId, const XRaySledEntry &Sled);
 
 } // namespace __xray
 
@@ -63,6 +73,7 @@ extern void __xray_FunctionEntry();
 extern void __xray_FunctionExit();
 extern void __xray_FunctionTailExit();
 extern void __xray_ArgLoggerEntry();
+extern void __xray_CustomEvent();
 }
 
 #endif

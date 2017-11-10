@@ -11,16 +11,15 @@ set(LSAN_COMMON_SOURCES
 set(LSAN_SOURCES
   lsan.cc
   lsan_allocator.cc
+  lsan_linux.cc
   lsan_interceptors.cc
+  lsan_mac.cc
+  lsan_malloc_mac.cc
   lsan_preinit.cc
   lsan_thread.cc)
 
 set(LSAN_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
-# FIXME(fjricci) - remove this once lsan for darwin is fully enabled
-if(APPLE AND COMPILER_RT_HAS_LSAN)
-  set(LSAN_CFLAGS ${LSAN_CFLAGS} -DCAN_SANITIZE_LEAKS_MAC=1)
-endif()
 add_compiler_rt_object_libraries(RTLSanCommon
     OS ${SANITIZER_COMMON_SUPPORTED_OS}
     ARCHS ${LSAN_COMMON_SUPPORTED_ARCH}
@@ -30,6 +29,8 @@ add_compiler_rt_object_libraries(RTLSanCommon
 if(COMPILER_RT_HAS_LSAN)
   add_compiler_rt_component(lsan)
   if(APPLE)
+    set(LSAN_LINK_LIBS ${SANITIZER_COMMON_LINK_LIBS})
+
     add_weak_symbols("lsan" WEAK_SYMBOL_LINK_FLAGS)
     add_weak_symbols("sanitizer_common" WEAK_SYMBOL_LINK_FLAGS)
 
@@ -43,7 +44,8 @@ if(COMPILER_RT_HAS_LSAN)
                   RTSanitizerCommon
                   RTSanitizerCommonLibc
       CFLAGS ${LSAN_CFLAGS}
-      LINK_FLAGS ${WEAK_SYMBOL_LINK_FLAGS}
+      LINK_FLAGS ${SANITIZER_COMMON_LINK_FLAGS} ${WEAK_SYMBOL_LINK_FLAGS}
+      LINK_LIBS ${LSAN_LINK_LIBS}
       PARENT_TARGET lsan)
   else()
     foreach(arch ${LSAN_SUPPORTED_ARCH})

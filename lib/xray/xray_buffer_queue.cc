@@ -13,64 +13,94 @@
 //
 //===----------------------------------------------------------------------===//
 #include "xray_buffer_queue.h"
-#include <cassert>
-#include <cstdlib>
+#include "sanitizer_common/sanitizer_allocator_internal.h"
+#include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_libc.h"
 
 using namespace __xray;
+using namespace __sanitizer;
 
-BufferQueue::BufferQueue(std::size_t B, std::size_t N, bool &Success)
-    : BufferSize(B), Buffers(N), Mutex(), OwnedBuffers(), Finalizing(false) {
-  for (auto &T : Buffers) {
-    void *Tmp = malloc(BufferSize);
+BufferQueue::BufferQueue(size_t B, size_t N, bool &Success)
+    : BufferSize(B),
+      Buffers(new BufferRep[N]()),
+      BufferCount(N),
+      Finalizing{0},
+      OwnedBuffers(new void *[N]()),
+      Next(Buffers),
+      First(Buffers),
+      LiveBuffers(0) {
+  for (size_t i = 0; i < N; ++i) {
+    auto &T = Buffers[i];
+    void *Tmp = InternalAlloc(BufferSize);
     if (Tmp == nullptr) {
       Success = false;
       return;
     }
-
-    auto &Buf = std::get<0>(T);
+    auto &Buf = T.Buff;
     Buf.Buffer = Tmp;
     Buf.Size = B;
-    OwnedBuffers.emplace(Tmp);
+    OwnedBuffers[i] = Tmp;
   }
   Success = true;
 }
 
-std::error_code BufferQueue::getBuffer(Buffer &Buf) {
-  if (Finalizing.load(std::memory_order_acquire))
-    return std::make_error_code(std::errc::state_not_recoverable);
-  std::lock_guard<std::mutex> Guard(Mutex);
-  if (Buffers.empty())
-    return std::make_error_code(std::errc::not_enough_memory);
-  auto &T = Buffers.front();
-  auto &B = std::get<0>(T);
+BufferQueue::ErrorCode BufferQueue::getBuffer(Buffer &Buf) {
+  if (__sanitizer::atomic_load(&Finalizing, __sanitizer::memory_order_acquire))
+    return ErrorCode::QueueFinalizing;
+  __sanitizer::SpinMutexLock Guard(&Mutex);
+  if (LiveBuffers == BufferCount) return ErrorCode::NotEnoughMemory;
+
+  auto &T = *Next;
+  auto &B = T.Buff;
   Buf = B;
-  B.Buffer = nullptr;
-  B.Size = 0;
-  Buffers.pop_front();
-  return {};
+  ++LiveBuffers;
+
+  if (++Next == (Buffers + BufferCount)) Next = Buffers;
+
+  return ErrorCode::Ok;
 }
 
-std::error_code BufferQueue::releaseBuffer(Buffer &Buf) {
-  if (OwnedBuffers.count(Buf.Buffer) == 0)
-    return std::make_error_code(std::errc::argument_out_of_domain);
-  std::lock_guard<std::mutex> Guard(Mutex);
+BufferQueue::ErrorCode BufferQueue::releaseBuffer(Buffer &Buf) {
+  // Blitz through the buffers array to find the buffer.
+  bool Found = false;
+  for (auto I = OwnedBuffers, E = OwnedBuffers + BufferCount; I != E; ++I) {
+    if (*I == Buf.Buffer) {
+      Found = true;
+      break;
+    }
+  }
+  if (!Found) return ErrorCode::UnrecognizedBuffer;
+
+  __sanitizer::SpinMutexLock Guard(&Mutex);
+
+  // This points to a semantic bug, we really ought to not be releasing more
+  // buffers than we actually get.
+  if (LiveBuffers == 0) return ErrorCode::NotEnoughMemory;
 
   // Now that the buffer has been released, we mark it as "used".
-  Buffers.emplace(Buffers.end(), Buf, true /* used */);
+  First->Buff = Buf;
+  First->Used = true;
   Buf.Buffer = nullptr;
   Buf.Size = 0;
-  return {};
+  --LiveBuffers;
+  if (++First == (Buffers + BufferCount)) First = Buffers;
+
+  return ErrorCode::Ok;
 }
 
-std::error_code BufferQueue::finalize() {
-  if (Finalizing.exchange(true, std::memory_order_acq_rel))
-    return std::make_error_code(std::errc::state_not_recoverable);
-  return {};
+BufferQueue::ErrorCode BufferQueue::finalize() {
+  if (__sanitizer::atomic_exchange(&Finalizing, 1,
+                                   __sanitizer::memory_order_acq_rel))
+    return ErrorCode::QueueFinalizing;
+  return ErrorCode::Ok;
 }
 
 BufferQueue::~BufferQueue() {
-  for (auto &T : Buffers) {
-    auto &Buf = std::get<0>(T);
-    free(Buf.Buffer);
+  for (auto I = Buffers, E = Buffers + BufferCount; I != E; ++I) {
+    auto &T = *I;
+    auto &Buf = T.Buff;
+    InternalFree(Buf.Buffer);
   }
+  delete[] Buffers;
+  delete[] OwnedBuffers;
 }

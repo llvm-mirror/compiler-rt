@@ -14,6 +14,7 @@
 
 #include "sanitizer_common/sanitizer_allocator_internal.h"
 #include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_file.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_platform.h"
@@ -72,12 +73,12 @@ TEST(SanitizerCommon, SortTest) {
   EXPECT_TRUE(IsSorted(array, 2));
 }
 
-TEST(SanitizerCommon, MmapAlignedOrDie) {
+TEST(SanitizerCommon, MmapAlignedOrDieOnFatalError) {
   uptr PageSize = GetPageSizeCached();
   for (uptr size = 1; size <= 32; size *= 2) {
     for (uptr alignment = 1; alignment <= 32; alignment *= 2) {
       for (int iter = 0; iter < 100; iter++) {
-        uptr res = (uptr)MmapAlignedOrDie(
+        uptr res = (uptr)MmapAlignedOrDieOnFatalError(
             size * PageSize, alignment * PageSize, "MmapAlignedOrDieTest");
         EXPECT_EQ(0U, res % (alignment * PageSize));
         internal_memset((void*)res, 1, size * PageSize);
@@ -298,6 +299,90 @@ TEST(SanitizerCommon, InternalScopedString) {
   str.append("0123456789");
   EXPECT_EQ(9U, str.length());
   EXPECT_STREQ("012345678", str.data());
+}
+
+#if SANITIZER_LINUX
+TEST(SanitizerCommon, GetRandom) {
+  u8 buffer_1[32], buffer_2[32];
+  for (bool blocking : { false, true }) {
+    EXPECT_FALSE(GetRandom(nullptr, 32, blocking));
+    EXPECT_FALSE(GetRandom(buffer_1, 0, blocking));
+    EXPECT_FALSE(GetRandom(buffer_1, 512, blocking));
+    EXPECT_EQ(ARRAY_SIZE(buffer_1), ARRAY_SIZE(buffer_2));
+    for (uptr size = 4; size <= ARRAY_SIZE(buffer_1); size += 4) {
+      for (uptr i = 0; i < 100; i++) {
+        EXPECT_TRUE(GetRandom(buffer_1, size, blocking));
+        EXPECT_TRUE(GetRandom(buffer_2, size, blocking));
+        EXPECT_NE(internal_memcmp(buffer_1, buffer_2, size), 0);
+      }
+    }
+  }
+}
+#endif
+
+TEST(SanitizerCommon, ReservedAddressRangeInit) {
+  uptr init_size = 0xffff;
+  ReservedAddressRange address_range;
+  uptr res = address_range.Init(init_size);
+  CHECK_NE(res, (void*)-1);
+  UnmapOrDie((void*)res, init_size);
+  // Should be able to map into the same space now.
+  ReservedAddressRange address_range2;
+  uptr res2 = address_range2.Init(init_size, nullptr, res);
+  CHECK_EQ(res, res2);
+
+  // TODO(flowerhack): Once this is switched to the "real" implementation
+  // (rather than passing through to MmapNoAccess*), enforce and test "no
+  // double initializations allowed"
+}
+
+TEST(SanitizerCommon, ReservedAddressRangeMap) {
+  constexpr uptr init_size = 0xffff;
+  ReservedAddressRange address_range;
+  uptr res = address_range.Init(init_size);
+  CHECK_NE(res, (void*) -1);
+
+  // Valid mappings should succeed.
+  CHECK_EQ(res, address_range.Map(res, init_size));
+
+  // Valid mappings should be readable.
+  unsigned char buffer[init_size];
+  memcpy(buffer, reinterpret_cast<void *>(res), init_size);
+
+  // TODO(flowerhack): Once this is switched to the "real" implementation, make
+  // sure you can only mmap into offsets in the Init range.
+}
+
+TEST(SanitizerCommon, ReservedAddressRangeUnmap) {
+  uptr PageSize = GetPageSizeCached();
+  uptr init_size = PageSize * 8;
+  ReservedAddressRange address_range;
+  uptr base_addr = address_range.Init(init_size);
+  CHECK_NE(base_addr, (void*)-1);
+  CHECK_EQ(base_addr, address_range.Map(base_addr, init_size));
+
+  // Unmapping the entire range should succeed.
+  address_range.Unmap(base_addr, init_size);
+
+  // Map a new range.
+  base_addr = address_range.Init(init_size);
+  CHECK_EQ(base_addr, address_range.Map(base_addr, init_size));
+
+  // Windows doesn't allow partial unmappings.
+  #if !SANITIZER_WINDOWS
+
+  // Unmapping at the beginning should succeed.
+  address_range.Unmap(base_addr, PageSize);
+
+  // Unmapping at the end should succeed.
+  uptr new_start = reinterpret_cast<uptr>(address_range.base()) +
+                   address_range.size() - PageSize;
+  address_range.Unmap(new_start, PageSize);
+
+  #endif
+
+  // Unmapping in the middle of the ReservedAddressRange should fail.
+  EXPECT_DEATH(address_range.Unmap(base_addr + (PageSize * 2), PageSize), ".*");
 }
 
 }  // namespace __sanitizer
