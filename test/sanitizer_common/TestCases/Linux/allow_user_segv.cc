@@ -22,7 +22,7 @@
 // XFAIL: tsan
 
 // Flaky errors in debuggerd with "waitpid returned unexpected pid (0)" in logcat.
-// UNSUPPORTED: android
+// UNSUPPORTED: android && i386-target-arch
 
 #include <signal.h>
 #include <stdio.h>
