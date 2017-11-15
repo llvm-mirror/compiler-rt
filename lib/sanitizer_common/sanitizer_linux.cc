@@ -18,6 +18,7 @@
 
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
+#include "sanitizer_getauxval.h"
 #include "sanitizer_internal_defs.h"
 #include "sanitizer_libc.h"
 #include "sanitizer_linux.h"
@@ -95,20 +96,6 @@ extern struct ps_strings *__ps_strings;
 #include <sys/signal.h>
 #endif
 
-#ifndef __GLIBC_PREREQ
-#define __GLIBC_PREREQ(x, y) 0
-#endif
-
-#if SANITIZER_LINUX && __GLIBC_PREREQ(2, 16)
-# define SANITIZER_USE_GETAUXVAL 1
-#else
-# define SANITIZER_USE_GETAUXVAL 0
-#endif
-
-#if SANITIZER_USE_GETAUXVAL
-#include <sys/auxv.h>
-#endif
-
 #if SANITIZER_LINUX
 // <linux/time.h>
 struct kernel_timeval {
@@ -152,6 +139,8 @@ namespace __sanitizer {
 #include "sanitizer_syscall_linux_x86_64.inc"
 #elif SANITIZER_LINUX && defined(__aarch64__)
 #include "sanitizer_syscall_linux_aarch64.inc"
+#elif SANITIZER_LINUX && defined(__arm__)
+#include "sanitizer_syscall_linux_arm.inc"
 #else
 #include "sanitizer_syscall_generic.inc"
 #endif
@@ -965,7 +954,7 @@ static uptr GetKernelAreaSize() {
 }
 #endif  // SANITIZER_WORDSIZE == 32
 
-uptr GetMaxVirtualAddress() {
+uptr GetMaxUserVirtualAddress() {
 #if SANITIZER_NETBSD && defined(__x86_64__)
   return 0x7f7ffffff000ULL;  // (0x00007f8000000000 - PAGE_SIZE)
 #elif SANITIZER_WORDSIZE == 64
