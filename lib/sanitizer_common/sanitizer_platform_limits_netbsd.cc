@@ -83,6 +83,7 @@ unsigned siginfo_t_sz = sizeof(siginfo_t);
 unsigned struct_sigaction_sz = sizeof(struct sigaction);
 unsigned struct_itimerval_sz = sizeof(struct itimerval);
 unsigned pthread_t_sz = sizeof(pthread_t);
+unsigned pthread_mutex_t_sz = sizeof(pthread_mutex_t);
 unsigned pthread_cond_t_sz = sizeof(pthread_cond_t);
 unsigned pid_t_sz = sizeof(pid_t);
 unsigned timeval_sz = sizeof(timeval);
@@ -105,9 +106,10 @@ unsigned struct_msqid_ds_sz = sizeof(struct msqid_ds);
 unsigned struct_mq_attr_sz = sizeof(struct mq_attr);
 unsigned struct_statvfs_sz = sizeof(struct statvfs);
 
-uptr sig_ign = (uptr)SIG_IGN;
-uptr sig_dfl = (uptr)SIG_DFL;
-uptr sa_siginfo = (uptr)SA_SIGINFO;
+const uptr sig_ign = (uptr)SIG_IGN;
+const uptr sig_dfl = (uptr)SIG_DFL;
+const uptr sig_err = (uptr)SIG_ERR;
+const uptr sa_siginfo = (uptr)SA_SIGINFO;
 
 int shmctl_ipc_stat = (int)IPC_STAT;
 

@@ -21,6 +21,7 @@ set(ASAN_SOURCES
   asan_memory_profile.cc
   asan_poisoning.cc
   asan_posix.cc
+  asan_premap_shadow.cc
   asan_report.cc
   asan_rtl.cc
   asan_shadow_setup.cc
@@ -39,6 +40,7 @@ set(ASAN_PREINIT_SOURCES
 include_directories(..)
 
 set(ASAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
+set(ASAN_COMMON_DEFINITIONS ${COMPILER_RT_ASAN_SHADOW_SCALE_DEFINITION})
 
 append_rtti_flag(OFF ASAN_CFLAGS)
 
@@ -167,12 +169,17 @@ else()
     PARENT_TARGET asan)
 
   foreach(arch ${ASAN_SUPPORTED_ARCH})
-    if (UNIX AND NOT ${arch} STREQUAL "i386")
+    if (UNIX)
       add_sanitizer_rt_version_list(clang_rt.asan-dynamic-${arch}
                                     LIBS clang_rt.asan-${arch} clang_rt.asan_cxx-${arch}
                                     EXTRA asan.syms.extra)
       set(VERSION_SCRIPT_FLAG
            -Wl,--version-script,${CMAKE_CURRENT_BINARY_DIR}/clang_rt.asan-dynamic-${arch}.vers)
+      # The Solaris 11.4 linker supports a subset of GNU ld version scripts,
+      # but requires a special option to enable it.
+      if (OS_NAME MATCHES "SunOS")
+          list(APPEND VERSION_SCRIPT_FLAG -Wl,-z,gnu-version-script-compat)
+      endif()
       set_property(SOURCE
         ${CMAKE_CURRENT_BINARY_DIR}/dummy.cc
         APPEND PROPERTY

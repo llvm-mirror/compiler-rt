@@ -185,7 +185,7 @@ uptr internal_getpid() {
 
 int internal_sigaction(int signum, const void *act, void *oldact) {
   return sigaction(signum,
-                   (struct sigaction *)act, (struct sigaction *)oldact);
+                   (const struct sigaction *)act, (struct sigaction *)oldact);
 }
 
 void internal_sigfillset(__sanitizer_sigset_t *set) { sigfillset(set); }
@@ -362,6 +362,10 @@ void BlockingMutex::CheckLocked() {
 }
 
 u64 NanoTime() {
+  return 0;
+}
+
+u64 MonotonicNanoTime() {
   return 0;
 }
 
@@ -741,6 +745,9 @@ void MaybeReexec() {
   if (!lib_is_in_env)
     return;
 
+  if (!common_flags()->strip_env)
+    return;
+
   // DYLD_INSERT_LIBRARIES is set and contains the runtime library. Let's remove
   // the dylib from the environment variable, because interceptors are installed
   // and we don't want our children to inherit the variable.
@@ -864,6 +871,10 @@ uptr GetMaxUserVirtualAddress() {
 #endif  // SANITIZER_WORDSIZE
 }
 
+uptr GetMaxVirtualAddress() {
+  return GetMaxUserVirtualAddress();
+}
+
 uptr FindAvailableMemoryRange(uptr shadow_size,
                               uptr alignment,
                               uptr left_padding,
@@ -886,6 +897,11 @@ uptr FindAvailableMemoryRange(uptr shadow_size,
     mach_msg_type_number_t count = kRegionInfoSize;
     kr = mach_vm_region_recurse(mach_task_self(), &address, &vmsize, &depth,
                                 (vm_region_info_t)&vminfo, &count);
+    if (kr == KERN_INVALID_ADDRESS) {
+      // No more regions beyond "address", consider the gap at the end of VM.
+      address = GetMaxVirtualAddress() + 1;
+      vmsize = 0;
+    }
     if (free_begin != address) {
       // We found a free region [free_begin..address-1].
       uptr gap_start = RoundUpTo((uptr)free_begin + left_padding, alignment);
@@ -997,6 +1013,11 @@ void CheckNoDeepBind(const char *filename, int flag) {
 
 // FIXME: implement on this platform.
 bool GetRandom(void *buffer, uptr length, bool blocking) {
+  UNIMPLEMENTED();
+}
+
+// FIXME: implement on this platform.
+u32 GetNumberOfCPUs() {
   UNIMPLEMENTED();
 }
 

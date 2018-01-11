@@ -1,9 +1,5 @@
 # CMake build for CompilerRT.
 #
-# This build assumes that CompilerRT is checked out into the
-# 'projects/compiler-rt' or 'runtimes/compiler-rt' inside of an LLVM tree.
-# Standalone build system for CompilerRT is not yet ready.
-#
 # An important constraint of the build is that it only produces libraries
 # based on the ability of the host toolchain to target various platforms.
 
@@ -42,6 +38,25 @@ option(COMPILER_RT_BUILD_PROFILE "Build profile runtime" ON)
 mark_as_advanced(COMPILER_RT_BUILD_PROFILE)
 option(COMPILER_RT_BUILD_XRAY_NO_PREINIT "Build xray with no preinit patching" OFF)
 mark_as_advanced(COMPILER_RT_BUILD_XRAY_NO_PREINIT)
+
+set(COMPILER_RT_ASAN_SHADOW_SCALE ""
+    CACHE STRING "Override the shadow scale to be used in ASan runtime")
+
+if (NOT COMPILER_RT_ASAN_SHADOW_SCALE STREQUAL "")
+  # Check that the shadow scale value is valid.
+  if (NOT (COMPILER_RT_ASAN_SHADOW_SCALE GREATER -1 AND
+           COMPILER_RT_ASAN_SHADOW_SCALE LESS 8))
+    message(FATAL_ERROR "
+      Invalid ASan Shadow Scale '${COMPILER_RT_ASAN_SHADOW_SCALE}'.")
+  endif()
+
+  set(COMPILER_RT_ASAN_SHADOW_SCALE_LLVM_FLAG
+      -mllvm -asan-mapping-scale=${COMPILER_RT_ASAN_SHADOW_SCALE})
+  set(COMPILER_RT_ASAN_SHADOW_SCALE_DEFINITION
+      ASAN_SHADOW_SCALE=${COMPILER_RT_ASAN_SHADOW_SCALE})
+  set(COMPILER_RT_ASAN_SHADOW_SCALE_FLAG
+      -D${COMPILER_RT_ASAN_SHADOW_SCALE_DEFINITION})
+endif()
 
 set(COMPILER_RT_BAREMETAL_BUILD OFF CACHE BOOLEAN
   "Build for a bare-metal target.")
@@ -195,7 +210,9 @@ append_list_if(COMPILER_RT_HAS_FUNWIND_TABLES_FLAG -funwind-tables SANITIZER_COM
 append_list_if(COMPILER_RT_HAS_FNO_STACK_PROTECTOR_FLAG -fno-stack-protector SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FNO_SANITIZE_SAFE_STACK_FLAG -fno-sanitize=safe-stack SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FVISIBILITY_HIDDEN_FLAG -fvisibility=hidden SANITIZER_COMMON_CFLAGS)
-append_list_if(COMPILER_RT_HAS_FVISIBILITY_INLINES_HIDDEN_FLAG -fvisibility-inlines-hidden SANITIZER_COMMON_CFLAGS)
+if(NOT COMPILER_RT_HAS_FVISIBILITY_HIDDEN_FLAG)
+  append_list_if(COMPILER_RT_HAS_FVISIBILITY_INLINES_HIDDEN_FLAG -fvisibility-inlines-hidden SANITIZER_COMMON_CFLAGS)
+endif()
 append_list_if(COMPILER_RT_HAS_FNO_LTO_FLAG -fno-lto SANITIZER_COMMON_CFLAGS)
 
 # The following is a workaround for powerpc64le. This is the only architecture
@@ -327,17 +344,15 @@ endif()
 
 add_subdirectory(include)
 
-set(COMPILER_RT_LIBCXX_PATH ${LLVM_MAIN_SRC_DIR}/projects/libcxx)
-if(EXISTS ${COMPILER_RT_LIBCXX_PATH}/)
-  set(COMPILER_RT_HAS_LIBCXX_SOURCES TRUE)
-else()
-  set(COMPILER_RT_LIBCXX_PATH ${LLVM_MAIN_SRC_DIR}/../libcxx)
-  if(EXISTS ${COMPILER_RT_LIBCXX_PATH}/)
-    set(COMPILER_RT_HAS_LIBCXX_SOURCES TRUE)
-  else()
-    set(COMPILER_RT_HAS_LIBCXX_SOURCES FALSE)
+foreach(path IN ITEMS ${LLVM_MAIN_SRC_DIR}/projects/libcxx
+                      ${LLVM_MAIN_SRC_DIR}/runtimes/libcxx
+                      ${LLVM_MAIN_SRC_DIR}/../libcxx
+                      ${LLVM_EXTERNAL_LIBCXX_SOURCE_DIR})
+  if(IS_DIRECTORY ${path})
+    set(COMPILER_RT_LIBCXX_PATH ${path})
+    break()
   endif()
-endif()
+endforeach()
 
 set(COMPILER_RT_LLD_PATH ${LLVM_MAIN_SRC_DIR}/tools/lld)
 if(EXISTS ${COMPILER_RT_LLD_PATH}/ AND LLVM_TOOL_LLD_BUILD)

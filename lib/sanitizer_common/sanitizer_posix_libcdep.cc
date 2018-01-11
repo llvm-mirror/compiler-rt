@@ -20,6 +20,7 @@
 #include "sanitizer_flags.h"
 #include "sanitizer_platform_limits_netbsd.h"
 #include "sanitizer_platform_limits_posix.h"
+#include "sanitizer_platform_limits_solaris.h"
 #include "sanitizer_posix.h"
 #include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
@@ -62,7 +63,11 @@ void ReleaseMemoryPagesToOS(uptr beg, uptr end) {
   uptr beg_aligned = RoundUpTo(beg, page_size);
   uptr end_aligned = RoundDownTo(end, page_size);
   if (beg_aligned < end_aligned)
-    madvise((void*)beg_aligned, end_aligned - beg_aligned, MADV_DONTNEED);
+    // In the default Solaris compilation environment, madvise() is declared
+    // to take a caddr_t arg; casting it to void * results in an invalid
+    // conversion error, so use char * instead.
+    madvise((char *)beg_aligned, end_aligned - beg_aligned,
+            SANITIZER_MADVISE_DONTNEED);
 }
 
 void NoHugePagesInRegion(uptr addr, uptr size) {
@@ -350,6 +355,7 @@ uptr ReservedAddressRange::Init(uptr size, const char *name, uptr fixed_addr) {
   }
   size_ = size;
   name_ = name;
+  (void)os_handle_;  // unsupported
   return reinterpret_cast<uptr>(base_);
 }
 
@@ -370,6 +376,10 @@ void ReservedAddressRange::Unmap(uptr addr, uptr size) {
   CHECK((addr_as_void == base_) || (addr + size == base_as_uptr + size_));
   CHECK_LE(size, size_);
   UnmapOrDie(reinterpret_cast<void*>(addr), size);
+  if (addr_as_void == base_) {
+    base_ = reinterpret_cast<void*>(addr + size);
+  }
+  size_ = size_ - size;
 }
 
 void *MmapFixedNoAccess(uptr fixed_addr, uptr size, const char *name) {

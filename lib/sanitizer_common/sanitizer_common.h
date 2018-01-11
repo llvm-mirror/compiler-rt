@@ -73,6 +73,7 @@ INLINE uptr GetPageSizeCached() {
   return PageSizeCached;
 }
 uptr GetMmapGranularity();
+uptr GetMaxVirtualAddress();
 uptr GetMaxUserVirtualAddress();
 // Threads
 tid_t GetTid();
@@ -141,6 +142,7 @@ class ReservedAddressRange {
   void* base_;
   uptr size_;
   const char* name_;
+  uptr os_handle_;
 };
 
 typedef void (*fill_profile_f)(uptr start, uptr rss, bool file,
@@ -205,6 +207,8 @@ class LowLevelAllocator {
   char *allocated_end_;
   char *allocated_current_;
 };
+// Set the min alignment of LowLevelAllocator to at least alignment.
+void SetLowLevelAllocateMinAlignment(uptr alignment);
 typedef void (*LowLevelAllocateCallback)(uptr ptr, uptr size);
 // Allows to register tool-specific callbacks for LowLevelAllocator.
 // Passing NULL removes the callback.
@@ -226,10 +230,6 @@ void SetPrintfAndReportCallback(void (*callback)(const char *));
   do {                                                                   \
     if ((uptr)Verbosity() >= (level)) Printf(__VA_ARGS__); \
   } while (0)
-
-// Can be used to prevent mixing error reports from different sanitizers.
-// FIXME: Replace with ScopedErrorReportLock and hide.
-extern StaticSpinMutex CommonSanitizerReportMutex;
 
 // Lock sanitizer error reporting and protects against nested errors.
 class ScopedErrorReportLock {
@@ -295,6 +295,7 @@ uptr GetTlsSize();
 void SleepForSeconds(int seconds);
 void SleepForMillis(int millis);
 u64 NanoTime();
+u64 MonotonicNanoTime();
 int Atexit(void (*function)(void));
 void SortArray(uptr *array, uptr size);
 void SortArray(u32 *array, uptr size);
@@ -932,6 +933,15 @@ void CheckNoDeepBind(const char *filename, int flag);
 // Returns the requested amount of random data (up to 256 bytes) that can then
 // be used to seed a PRNG. Defaults to blocking like the underlying syscall.
 bool GetRandom(void *buffer, uptr length, bool blocking = true);
+
+// Returns the number of logical processors on the system.
+u32 GetNumberOfCPUs();
+extern u32 NumberOfCPUsCached;
+INLINE u32 GetNumberOfCPUsCached() {
+  if (!NumberOfCPUsCached)
+    NumberOfCPUsCached = GetNumberOfCPUs();
+  return NumberOfCPUsCached;
+}
 
 }  // namespace __sanitizer
 

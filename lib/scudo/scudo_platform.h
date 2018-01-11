@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 ///
 /// Scudo platform specific definitions.
+/// TODO(kostyak): add tests for the compile time defines.
 ///
 //===----------------------------------------------------------------------===//
 
@@ -45,28 +46,34 @@
 # define SCUDO_SHARED_TSD_POOL_SIZE 32U
 #endif  // SCUDO_SHARED_TSD_POOL_SIZE
 
+// The following allows the public interface functions to be disabled.
+#ifndef SCUDO_CAN_USE_PUBLIC_INTERFACE
+# define SCUDO_CAN_USE_PUBLIC_INTERFACE 1
+#endif
+
 namespace __scudo {
 
 #if SANITIZER_CAN_USE_ALLOCATOR64
 # if defined(__aarch64__) && SANITIZER_ANDROID
-const uptr AllocatorSize = 0x2000000000ULL;  // 128G.
-typedef VeryCompactSizeClassMap SizeClassMap;
+const uptr AllocatorSize = 0x4000000000ULL;  // 256G.
 # elif defined(__aarch64__)
 const uptr AllocatorSize = 0x10000000000ULL;  // 1T.
-typedef CompactSizeClassMap SizeClassMap;
 # else
 const uptr AllocatorSize = 0x40000000000ULL;  // 4T.
-typedef CompactSizeClassMap SizeClassMap;
 # endif
 #else
-# if SANITIZER_ANDROID
-static const uptr RegionSizeLog = 19;
-typedef VeryCompactSizeClassMap SizeClassMap;
-# else
-static const uptr RegionSizeLog = 20;
-typedef CompactSizeClassMap SizeClassMap;
-# endif
+const uptr RegionSizeLog = SANITIZER_ANDROID ? 19 : 20;
 #endif  // SANITIZER_CAN_USE_ALLOCATOR64
+
+#if !defined(SCUDO_SIZE_CLASS_MAP)
+# define SCUDO_SIZE_CLASS_MAP Default
+#endif
+
+#define SIZE_CLASS_MAP_TYPE SIZE_CLASS_MAP_TYPE_(SCUDO_SIZE_CLASS_MAP)
+#define SIZE_CLASS_MAP_TYPE_(T) SIZE_CLASS_MAP_TYPE__(T)
+#define SIZE_CLASS_MAP_TYPE__(T) T##SizeClassMap
+
+typedef SIZE_CLASS_MAP_TYPE SizeClassMap;
 
 }  // namespace __scudo
 
