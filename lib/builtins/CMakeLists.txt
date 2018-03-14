@@ -480,6 +480,12 @@ set(powerpc64_SOURCES
   ${GENERIC_SOURCES})
 set(powerpc64le_SOURCES ${powerpc64_SOURCES})
 
+set(riscv_SOURCES ${GENERIC_SOURCES} ${GENERIC_TF_SOURCES})
+set(riscv32_SOURCES
+  riscv/mulsi3.S
+  ${riscv_SOURCES})
+set(riscv64_SOURCES ${riscv_SOURCES})
+
 set(wasm32_SOURCES
   ${GENERIC_TF_SOURCES}
   ${GENERIC_SOURCES})
@@ -540,6 +546,12 @@ else ()
       # Release mode already sets it via -O2/3, Debug mode doesn't.
       if (${arch} STREQUAL "armhf")
         list(APPEND BUILTIN_CFLAGS -fomit-frame-pointer -DCOMPILER_RT_ARMHF_TARGET)
+      endif()
+
+      # For RISCV32, we must force enable int128 for compiling long
+      # double routines.
+      if("${arch}" STREQUAL "riscv32")
+        list(APPEND BUILTIN_CFLAGS -fforce-enable-int128)
       endif()
 
       add_compiler_rt_runtime(clang_rt.builtins

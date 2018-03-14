@@ -329,6 +329,8 @@ void Fuzzer::PrintStats(const char *Where, const char *End, size_t Units) {
         Printf("/%zdMb", N >> 20);
     }
   }
+  if (TmpMaxMutationLen)
+    Printf(" lim: %zd", TmpMaxMutationLen);
   if (Units)
     Printf(" units: %zd", Units);
 
@@ -755,16 +757,12 @@ void Fuzzer::Loop(const Vector<std::string> &CorpusDirs) {
       break;
 
     // Update TmpMaxMutationLen
-    if (Options.ExperimentalLenControl) {
+    if (Options.LenControl) {
       if (TmpMaxMutationLen < MaxMutationLen &&
           TotalNumberOfRuns - LastCorpusUpdateRun >
-              Options.ExperimentalLenControl * Log(TmpMaxMutationLen)) {
+              Options.LenControl * Log(TmpMaxMutationLen)) {
         TmpMaxMutationLen =
             Min(MaxMutationLen, TmpMaxMutationLen + Log(TmpMaxMutationLen));
-        if (TmpMaxMutationLen <= MaxMutationLen)
-          Printf("#%zd\tTEMP_MAX_LEN: %zd (%zd %zd)\n", TotalNumberOfRuns,
-                 TmpMaxMutationLen, Options.ExperimentalLenControl,
-                 LastCorpusUpdateRun);
         LastCorpusUpdateRun = TotalNumberOfRuns;
       }
     } else {
@@ -826,13 +824,15 @@ void Fuzzer::AnnounceOutput(const uint8_t *Data, size_t Size) {
 
 extern "C" {
 
-size_t LLVMFuzzerMutate(uint8_t *Data, size_t Size, size_t MaxSize) {
+__attribute__((visibility("default"))) size_t
+LLVMFuzzerMutate(uint8_t *Data, size_t Size, size_t MaxSize) {
   assert(fuzzer::F);
   return fuzzer::F->GetMD().DefaultMutate(Data, Size, MaxSize);
 }
 
 // Experimental
-void LLVMFuzzerAnnounceOutput(const uint8_t *Data, size_t Size) {
+__attribute__((visibility("default"))) void
+LLVMFuzzerAnnounceOutput(const uint8_t *Data, size_t Size) {
   assert(fuzzer::F);
   fuzzer::F->AnnounceOutput(Data, Size);
 }

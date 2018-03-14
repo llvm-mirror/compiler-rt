@@ -74,20 +74,24 @@ static void ProtectGap(uptr addr, uptr size) {
   Die();
 }
 
+// LowMem covers as much of the first 4GB as possible.
+const uptr kLowMemEnd = 1UL<<32;
+const uptr kLowShadowEnd = kLowMemEnd >> kShadowScale;
+const uptr kLowShadowStart = kLowShadowEnd >> kShadowScale;
+static uptr kHighShadowStart;
+static uptr kHighShadowEnd;
+static uptr kHighMemStart;
+
 bool InitShadow() {
   const uptr maxVirtualAddress = GetMaxUserVirtualAddress();
 
-  // LowMem covers as much of the first 4GB as possible.
-  const uptr kLowMemEnd = 1UL<<32;
-  const uptr kLowShadowEnd = kLowMemEnd >> kShadowScale;
-  const uptr kLowShadowStart = kLowShadowEnd >> kShadowScale;
 
   // HighMem covers the upper part of the address space.
-  const uptr kHighShadowEnd = (maxVirtualAddress >> kShadowScale) + 1;
-  const uptr kHighShadowStart = Max(kLowMemEnd, kHighShadowEnd >> kShadowScale);
+  kHighShadowEnd = (maxVirtualAddress >> kShadowScale) + 1;
+  kHighShadowStart = Max(kLowMemEnd, kHighShadowEnd >> kShadowScale);
   CHECK(kHighShadowStart < kHighShadowEnd);
 
-  const uptr kHighMemStart = kHighShadowStart << kShadowScale;
+  kHighMemStart = kHighShadowStart << kShadowScale;
   CHECK(kHighShadowEnd <= kHighMemStart);
 
   if (Verbosity()) {
@@ -118,6 +122,11 @@ bool InitShadow() {
     ProtectGap(kHighShadowEnd, kHighMemStart - kHighShadowEnd);
 
   return true;
+}
+
+bool MemIsApp(uptr p) {
+  CHECK(GetTagFromPointer(p) == 0);
+  return p >= kHighMemStart || (p >= kLowShadowEnd && p < kLowMemEnd);
 }
 
 static void HwasanAtExit(void) {
@@ -179,7 +188,7 @@ struct AccessInfo {
 
 #if defined(__aarch64__)
 static AccessInfo GetAccessInfo(siginfo_t *info, ucontext_t *uc) {
-  // Access type is encoded in HLT immediate as 0x1XY,
+  // Access type is encoded in BRK immediate as 0x9XY,
   // where X&1 is 1 for store, 0 for load,
   // and X&2 is 1 if the error is recoverable.
   // Valid values of Y are 0 to 4, which are interpreted as log2(access_size),
@@ -188,7 +197,7 @@ static AccessInfo GetAccessInfo(siginfo_t *info, ucontext_t *uc) {
   AccessInfo ai;
   uptr pc = (uptr)info->si_addr;
   unsigned code = ((*(u32 *)pc) >> 5) & 0xffff;
-  if ((code & 0xff00) != 0x100)
+  if ((code & 0xff00) != 0x900)
     return AccessInfo{0, 0, false, false}; // Not ours.
   bool is_store = code & 0x10;
   bool recover = code & 0x20;
@@ -212,7 +221,7 @@ static AccessInfo GetAccessInfo(siginfo_t *info, ucontext_t *uc) {
 }
 #endif
 
-static bool HwasanOnSIGILL(int signo, siginfo_t *info, ucontext_t *uc) {
+static bool HwasanOnSIGTRAP(int signo, siginfo_t *info, ucontext_t *uc) {
   SignalContext sig{info, uc};
   AccessInfo ai = GetAccessInfo(info, uc);
   if (!ai.is_store && !ai.is_load)
@@ -242,8 +251,8 @@ static void OnStackUnwind(const SignalContext &sig, const void *,
 
 void HwasanOnDeadlySignal(int signo, void *info, void *context) {
   // Probably a tag mismatch.
-  if (signo == SIGILL)
-    if (HwasanOnSIGILL(signo, (siginfo_t *)info, (ucontext_t*)context))
+  if (signo == SIGTRAP)
+    if (HwasanOnSIGTRAP(signo, (siginfo_t *)info, (ucontext_t*)context))
       return;
 
   HandleDeadlySignal(info, context, GetTid(), &OnStackUnwind, nullptr);

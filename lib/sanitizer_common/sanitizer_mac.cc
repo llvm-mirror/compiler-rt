@@ -59,6 +59,7 @@ extern "C" {
 #include <libkern/OSAtomic.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <mach/vm_statistics.h>
 #include <pthread.h>
 #include <sched.h>
@@ -362,11 +363,17 @@ void BlockingMutex::CheckLocked() {
 }
 
 u64 NanoTime() {
-  return 0;
+  timeval tv;
+  internal_memset(&tv, 0, sizeof(tv));
+  gettimeofday(&tv, 0);
+  return (u64)tv.tv_sec * 1000*1000*1000 + tv.tv_usec * 1000;
 }
 
+// This needs to be called during initialization to avoid being racy.
 u64 MonotonicNanoTime() {
-  return 0;
+  static mach_timebase_info_data_t timebase_info;
+  if (timebase_info.denom == 0) mach_timebase_info(&timebase_info);
+  return (mach_absolute_time() * timebase_info.numer) / timebase_info.denom;
 }
 
 uptr GetTlsSize() {
@@ -428,6 +435,8 @@ static HandleSignalMode GetHandleSignalModeImpl(int signum) {
       return common_flags()->handle_abort;
     case SIGILL:
       return common_flags()->handle_sigill;
+    case SIGTRAP:
+      return common_flags()->handle_sigtrap;
     case SIGFPE:
       return common_flags()->handle_sigfpe;
     case SIGSEGV:
@@ -673,6 +682,9 @@ bool DyldNeedsEnvVariable() {
 }
 
 void MaybeReexec() {
+  // FIXME: This should really live in some "InitializePlatform" method.
+  MonotonicNanoTime();
+
   if (ReexecDisabled()) return;
 
   // Make sure the dynamic runtime library is preloaded so that the
@@ -875,10 +887,9 @@ uptr GetMaxVirtualAddress() {
   return GetMaxUserVirtualAddress();
 }
 
-uptr FindAvailableMemoryRange(uptr shadow_size,
-                              uptr alignment,
-                              uptr left_padding,
-                              uptr *largest_gap_found) {
+uptr FindAvailableMemoryRange(uptr size, uptr alignment, uptr left_padding,
+                              uptr *largest_gap_found,
+                              uptr *max_occupied_addr) {
   typedef vm_region_submap_short_info_data_64_t RegionInfo;
   enum { kRegionInfoSize = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64 };
   // Start searching for available memory region past PAGEZERO, which is
@@ -890,6 +901,7 @@ uptr FindAvailableMemoryRange(uptr shadow_size,
   mach_vm_address_t free_begin = start_address;
   kern_return_t kr = KERN_SUCCESS;
   if (largest_gap_found) *largest_gap_found = 0;
+  if (max_occupied_addr) *max_occupied_addr = 0;
   while (kr == KERN_SUCCESS) {
     mach_vm_size_t vmsize = 0;
     natural_t depth = 0;
@@ -901,13 +913,15 @@ uptr FindAvailableMemoryRange(uptr shadow_size,
       // No more regions beyond "address", consider the gap at the end of VM.
       address = GetMaxVirtualAddress() + 1;
       vmsize = 0;
+    } else {
+      if (max_occupied_addr) *max_occupied_addr = address + vmsize;
     }
     if (free_begin != address) {
       // We found a free region [free_begin..address-1].
       uptr gap_start = RoundUpTo((uptr)free_begin + left_padding, alignment);
       uptr gap_end = RoundDownTo((uptr)address, alignment);
       uptr gap_size = gap_end > gap_start ? gap_end - gap_start : 0;
-      if (shadow_size < gap_size) {
+      if (size < gap_size) {
         return gap_start;
       }
 

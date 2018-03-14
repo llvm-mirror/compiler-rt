@@ -33,6 +33,11 @@
 #include "sanitizer_common/sanitizer_posix.h"
 #endif
 
+#if ASAN_INTERCEPT__UNWIND_RAISEEXCEPTION || \
+    ASAN_INTERCEPT__SJLJ_UNWIND_RAISEEXCEPTION
+#include <unwind.h>
+#endif
+
 #if defined(__i386) && SANITIZER_LINUX
 #define ASAN_PTHREAD_CREATE_VERSION "GLIBC_2.1"
 #elif defined(__mips__) && SANITIZER_LINUX
@@ -178,6 +183,7 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
     (void)(s);                                \
   } while (false)
 #include "sanitizer_common/sanitizer_common_syscalls.inc"
+#include "sanitizer_common/sanitizer_syscalls_netbsd.inc"
 
 struct ThreadStartParam {
   atomic_uintptr_t t;
@@ -315,6 +321,32 @@ INTERCEPTOR(void, __cxa_throw, void *a, void *b, void *c) {
   CHECK(REAL(__cxa_throw));
   __asan_handle_no_return();
   REAL(__cxa_throw)(a, b, c);
+}
+#endif
+
+#if ASAN_INTERCEPT___CXA_RETHROW_PRIMARY_EXCEPTION
+INTERCEPTOR(void, __cxa_rethrow_primary_exception, void *a) {
+  CHECK(REAL(__cxa_rethrow_primary_exception));
+  __asan_handle_no_return();
+  REAL(__cxa_rethrow_primary_exception)(a);
+}
+#endif
+
+#if ASAN_INTERCEPT__UNWIND_RAISEEXCEPTION
+INTERCEPTOR(_Unwind_Reason_Code, _Unwind_RaiseException,
+            _Unwind_Exception *object) {
+  CHECK(REAL(_Unwind_RaiseException));
+  __asan_handle_no_return();
+  return REAL(_Unwind_RaiseException)(object);
+}
+#endif
+
+#if ASAN_INTERCEPT__SJLJ_UNWIND_RAISEEXCEPTION
+INTERCEPTOR(_Unwind_Reason_Code, _Unwind_SjLj_RaiseException,
+            _Unwind_Exception *object) {
+  CHECK(REAL(_Unwind_SjLj_RaiseException));
+  __asan_handle_no_return();
+  return REAL(_Unwind_SjLj_RaiseException)(object);
 }
 #endif
 
@@ -597,6 +629,17 @@ void InitializeAsanInterceptors() {
   // Intercept exception handling functions.
 #if ASAN_INTERCEPT___CXA_THROW
   ASAN_INTERCEPT_FUNC(__cxa_throw);
+#endif
+#if ASAN_INTERCEPT___CXA_RETHROW_PRIMARY_EXCEPTION
+  ASAN_INTERCEPT_FUNC(__cxa_rethrow_primary_exception);
+#endif
+  // Indirectly intercept std::rethrow_exception.
+#if ASAN_INTERCEPT__UNWIND_RAISEEXCEPTION
+  INTERCEPT_FUNCTION(_Unwind_RaiseException);
+#endif
+  // Indirectly intercept std::rethrow_exception.
+#if ASAN_INTERCEPT__UNWIND_SJLJ_RAISEEXCEPTION
+  INTERCEPT_FUNCTION(_Unwind_SjLj_RaiseException);
 #endif
 
   // Intercept threading-related functions

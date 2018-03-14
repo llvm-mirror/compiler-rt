@@ -54,7 +54,7 @@ namespace __xray_fdr_internal {
 
 /// Writes the new buffer record and wallclock time that begin a buffer for the
 /// current thread.
-static void writeNewBufferPreamble(pid_t Tid, timespec TS);
+static void writeNewBufferPreamble(tid_t Tid, timespec TS);
 
 /// Writes a Function Record to the buffer associated with the current thread.
 static void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
@@ -185,7 +185,7 @@ public:
 
 } // namespace
 
-static void writeNewBufferPreamble(pid_t Tid,
+static void writeNewBufferPreamble(tid_t Tid,
                                    timespec TS) XRAY_NEVER_INSTRUMENT {
   static constexpr int InitRecordsCount = 2;
   auto &TLD = getThreadLocalData();
@@ -195,11 +195,12 @@ static void writeNewBufferPreamble(pid_t Tid,
     // buffer, associated with a particular thread, with a new CPU.  For the
     // data, we have 15 bytes to squeeze as much information as we can.  At this
     // point we only write down the following bytes:
-    //   - Thread ID (pid_t, 4 bytes)
+    //   - Thread ID (tid_t, cast to 4 bytes type due to Darwin being 8 bytes)
     auto &NewBuffer = Metadata[0];
     NewBuffer.Type = uint8_t(RecordType::Metadata);
     NewBuffer.RecordKind = uint8_t(MetadataRecord::RecordKinds::NewBuffer);
-    std::memcpy(&NewBuffer.Data, &Tid, sizeof(pid_t));
+    int32_t tid = static_cast<int32_t>(Tid);
+    std::memcpy(&NewBuffer.Data, &tid, sizeof(tid));
   }
 
   // Also write the WalltimeMarker record.
@@ -235,8 +236,8 @@ inline void setupNewBuffer(int (*wall_clock_reader)(
     clockid_t, struct timespec *)) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
   auto &B = TLD.Buffer;
-  TLD.RecordPtr = static_cast<char *>(B.Buffer);
-  pid_t Tid = syscall(SYS_gettid);
+  TLD.RecordPtr = static_cast<char *>(B.Data);
+  tid_t Tid = __sanitizer::GetTid();
   timespec TS{0, 0};
   // This is typically clock_gettime, but callers have injection ability.
   wall_clock_reader(CLOCK_MONOTONIC, &TS);
@@ -447,7 +448,7 @@ inline bool releaseThreadLocalBuffer(BufferQueue &BQArg) {
   auto &TLD = getThreadLocalData();
   auto EC = BQArg.releaseBuffer(TLD.Buffer);
   if (EC != BufferQueue::ErrorCode::Ok) {
-    Report("Failed to release buffer at %p; error=%s\n", TLD.Buffer.Buffer,
+    Report("Failed to release buffer at %p; error=%s\n", TLD.Buffer.Data,
            BufferQueue::getErrorString(EC));
     return false;
   }
@@ -459,7 +460,7 @@ inline bool prepareBuffer(uint64_t TSC, unsigned char CPU,
                                                    struct timespec *),
                           size_t MaxSize) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
-  char *BufferStart = static_cast<char *>(TLD.Buffer.Buffer);
+  char *BufferStart = static_cast<char *>(TLD.Buffer.Data);
   if ((TLD.RecordPtr + MaxSize) > (BufferStart + TLD.Buffer.Size)) {
     if (!releaseThreadLocalBuffer(*TLD.BQ))
       return false;
@@ -507,7 +508,7 @@ isLogInitializedAndReady(BufferQueue *LBQ, uint64_t TSC, unsigned char CPU,
     TLD.RecordPtr = nullptr;
   }
 
-  if (TLD.Buffer.Buffer == nullptr) {
+  if (TLD.Buffer.Data == nullptr) {
     auto EC = LBQ->getBuffer(TLD.Buffer);
     if (EC != BufferQueue::ErrorCode::Ok) {
       auto LS = __sanitizer::atomic_load(&LoggingStatus,
@@ -573,7 +574,7 @@ inline uint32_t writeCurrentCPUTSC(ThreadLocalData &TLD, uint64_t TSC,
 
 inline void endBufferIfFull() XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
-  auto BufferStart = static_cast<char *>(TLD.Buffer.Buffer);
+  auto BufferStart = static_cast<char *>(TLD.Buffer.Data);
   if ((TLD.RecordPtr + MetadataRecSize) - BufferStart <=
       ptrdiff_t{MetadataRecSize}) {
     if (!releaseThreadLocalBuffer(*TLD.BQ))
@@ -656,7 +657,7 @@ inline void processFunctionHook(int32_t FuncId, XRayEntryType Entry,
   }
 
   // By this point, we are now ready to write up to 40 bytes (explained above).
-  assert((TLD.RecordPtr + MaxSize) - static_cast<char *>(TLD.Buffer.Buffer) >=
+  assert((TLD.RecordPtr + MaxSize) - static_cast<char *>(TLD.Buffer.Data) >=
              static_cast<ptrdiff_t>(MetadataRecSize) &&
          "Misconfigured BufferQueue provided; Buffer size not large enough.");
 

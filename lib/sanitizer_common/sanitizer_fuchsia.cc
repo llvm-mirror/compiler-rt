@@ -49,9 +49,9 @@ unsigned int internal_sleep(unsigned int seconds) {
   return 0;
 }
 
-u64 NanoTime() { return _zx_time_get(ZX_CLOCK_UTC); }
+u64 NanoTime() { return _zx_clock_get(ZX_CLOCK_UTC); }
 
-u64 MonotonicNanoTime() { return _zx_time_get(ZX_CLOCK_MONOTONIC); }
+u64 MonotonicNanoTime() { return _zx_clock_get(ZX_CLOCK_MONOTONIC); }
 
 uptr internal_getpid() {
   zx_info_handle_basic_t info;
@@ -66,7 +66,7 @@ uptr internal_getpid() {
 
 uptr GetThreadSelf() { return reinterpret_cast<uptr>(thrd_current()); }
 
-uptr GetTid() { return GetThreadSelf(); }
+tid_t GetTid() { return GetThreadSelf(); }
 
 void Abort() { abort(); }
 
