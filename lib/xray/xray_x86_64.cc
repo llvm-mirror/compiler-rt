@@ -3,8 +3,12 @@
 #include "xray_defs.h"
 #include "xray_interface_internal.h"
 
-#if SANITIZER_FREEBSD || SANITIZER_NETBSD
+#if SANITIZER_FREEBSD || SANITIZER_NETBSD || SANITIZER_OPENBSD
 #include <sys/types.h>
+#if SANITIZER_OPENBSD
+#include <sys/time.h>
+#include <machine/cpu.h>
+#endif
 #include <sys/sysctl.h>
 #endif
 
@@ -77,20 +81,24 @@ uint64_t getTSCFrequency() XRAY_NEVER_INSTRUMENT {
   }
   return TSCFrequency == -1 ? 0 : static_cast<uint64_t>(TSCFrequency);
 }
-#elif SANITIZER_FREEBSD || SANITIZER_NETBSD
+#elif SANITIZER_FREEBSD || SANITIZER_NETBSD || SANITIZER_OPENBSD
 uint64_t getTSCFrequency() XRAY_NEVER_INSTRUMENT {
     long long TSCFrequency = -1;
     size_t tscfreqsz = sizeof(TSCFrequency);
+#if SANITIZER_OPENBSD
+    int Mib[2] = { CTL_MACHDEP, CPU_TSCFREQ };
+    if (sysctl(Mib, 2, &TSCFrequency, &tscfreqsz, NULL, 0) != -1) {
 
+#else
     if (sysctlbyname("machdep.tsc_freq", &TSCFrequency, &tscfreqsz,
         NULL, 0) != -1) {
+#endif
         return static_cast<uint64_t>(TSCFrequency);
     } else {
       Report("Unable to determine CPU frequency for TSC accounting.\n");
     }
 
     return 0;
-    
 }
 #else
 uint64_t getTSCFrequency() XRAY_NEVER_INSTRUMENT {
@@ -275,6 +283,37 @@ bool patchCustomEvent(const bool Enable, const uint32_t FuncId,
       break;
     }
     }
+  return false;
+}
+
+bool patchTypedEvent(const bool Enable, const uint32_t FuncId,
+                      const XRaySledEntry &Sled) XRAY_NEVER_INSTRUMENT {
+  // Here we do the dance of replacing the following sled:
+  //
+  // xray_sled_n:
+  //   jmp +20          // 2 byte instruction
+  //   ...
+  //
+  // With the following:
+  //
+  //   nopw             // 2 bytes
+  //   ...
+  //
+  //
+  // The "unpatch" should just turn the 'nopw' back to a 'jmp +20'.
+  // The 20 byte sled stashes three argument registers, calls the trampoline,
+  // unstashes the registers and returns. If the arguments are already in
+  // the correct registers, the stashing and unstashing become equivalently
+  // sized nops.
+  if (Enable) {
+    std::atomic_store_explicit(
+        reinterpret_cast<std::atomic<uint16_t> *>(Sled.Address), NopwSeq,
+        std::memory_order_release);
+  } else {
+      std::atomic_store_explicit(
+          reinterpret_cast<std::atomic<uint16_t> *>(Sled.Address), Jmp20Seq,
+          std::memory_order_release);
+  }
   return false;
 }
 

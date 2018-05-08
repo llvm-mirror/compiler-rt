@@ -39,11 +39,7 @@ struct StackTrace;
 const uptr kWordSize = SANITIZER_WORDSIZE / 8;
 const uptr kWordSizeInBits = 8 * kWordSize;
 
-#if defined(__powerpc__) || defined(__powerpc64__)
-  const uptr kCacheLineSize = 128;
-#else
-  const uptr kCacheLineSize = 64;
-#endif
+const uptr kCacheLineSize = SANITIZER_CACHE_LINE_SIZE;
 
 const uptr kMaxPathLength = 4096;
 
@@ -52,7 +48,7 @@ const uptr kMaxThreadStackSize = 1 << 30;  // 1Gb
 static const uptr kErrorMessageBufferSize = 1 << 16;
 
 // Denotes fake PC values that come from JIT/JAVA/etc.
-// For such PC values __tsan_symbolize_external() will be called.
+// For such PC values __tsan_symbolize_external_ex() will be called.
 const u64 kExternalPCBit = 1ULL << 60;
 
 extern const char *SanitizerToolName;  // Can be changed by the tool.
@@ -109,6 +105,8 @@ void *MmapAlignedOrDieOnFatalError(uptr size, uptr alignment,
 // unaccessible memory.
 bool MprotectNoAccess(uptr addr, uptr size);
 bool MprotectReadOnly(uptr addr, uptr size);
+
+void MprotectMallocZones(void *addr, int prot);
 
 // Find an available address space.
 uptr FindAvailableMemoryRange(uptr size, uptr alignment, uptr left_padding,
@@ -283,7 +281,7 @@ void SetStackSizeLimitInBytes(uptr limit);
 bool AddressSpaceIsUnlimited();
 void SetAddressSpaceUnlimited();
 void AdjustStackSize(void *attr);
-void PrepareForSandboxing(__sanitizer_sandbox_arguments *args);
+void PlatformPrepareForSandboxing(__sanitizer_sandbox_arguments *args);
 void SetSandboxingCallback(void (*f)());
 
 void InitializeCoverage(bool enabled, const char *coverage_dir);
@@ -309,13 +307,6 @@ CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2);
 void NORETURN ReportMmapFailureAndDie(uptr size, const char *mem_type,
                                       const char *mmap_type, error_t err,
                                       bool raw_report = false);
-
-// Set the name of the current thread to 'name', return true on succees.
-// The name may be truncated to a system-dependent limit.
-bool SanitizerSetThreadName(const char *name);
-// Get the name of the current thread (no more than max_len bytes),
-// return true on succees. name should have space for at least max_len+1 bytes.
-bool SanitizerGetThreadName(char *name, int max_len);
 
 // Specific tools may override behavior of "Die" and "CheckFailed" functions
 // to do tool-specific job.
@@ -381,6 +372,8 @@ void ReportErrorSummary(const char *error_type, const AddressInfo &info,
 // Same as above, but obtains AddressInfo by symbolizing top stack trace frame.
 void ReportErrorSummary(const char *error_type, const StackTrace *trace,
                         const char *alt_tool_name = nullptr);
+
+void ReportMmapWriteExec(int prot);
 
 // Math
 #if SANITIZER_WINDOWS && !defined(__clang__) && !defined(__GNUC__)

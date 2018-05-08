@@ -15,7 +15,7 @@
 
 #if !defined(__linux__) && !defined(__FreeBSD__) && !defined(__NetBSD__) && \
   !defined(__OpenBSD__) && !defined(__APPLE__) && !defined(_WIN32) && \
-  !defined(__Fuchsia__) && !(defined(__sun__) && defined(__srv4__))
+  !defined(__Fuchsia__) && !(defined(__sun__) && defined(__svr4__))
 # error "This operating system is not supported"
 #endif
 
@@ -307,6 +307,14 @@
 # define SANITIZER_MADVISE_DONTNEED MADV_FREE
 #else
 # define SANITIZER_MADVISE_DONTNEED MADV_DONTNEED
+#endif
+
+// Older gcc have issues aligning to a constexpr, and require an integer.
+// See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=56859 among others.
+#if defined(__powerpc__) || defined(__powerpc64__)
+# define SANITIZER_CACHE_LINE_SIZE 128
+#else
+# define SANITIZER_CACHE_LINE_SIZE 64
 #endif
 
 #endif // SANITIZER_PLATFORM_H

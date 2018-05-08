@@ -20,6 +20,7 @@
 #include "sanitizer_common/sanitizer_stackdepot.h"
 #include "hwasan.h"
 #include "hwasan_allocator.h"
+#include "hwasan_mapping.h"
 #include "hwasan_thread.h"
 #include "hwasan_poisoning.h"
 
@@ -70,8 +71,8 @@ struct HwasanMapUnmapCallback {
   }
 };
 
-#if !defined(__aarch64__)
-#error unsupported platform
+#if !defined(__aarch64__) && !defined(__x86_64__)
+#error Unsupported platform
 #endif
 
 static const uptr kMaxAllowedMallocSize = 2UL << 30;  // 2G

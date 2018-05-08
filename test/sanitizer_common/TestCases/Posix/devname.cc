@@ -1,22 +1,18 @@
 // RUN: %clangxx -O0 -g %s -o %t && %run %t 2>&1 | FileCheck %s
-
-#include <sys/cdefs.h>
-#include <sys/stat.h>
+// UNSUPPORTED: linux, solaris
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 int main(void) {
   struct stat st;
-  char name[10];
-  mode_t type;
+  char *name;
 
   if (stat("/dev/null", &st))
     exit(1);
 
-  type = S_ISCHR(st.st_mode) ? S_IFCHR : S_IFBLK;
-
-  if (devname_r(st.st_rdev, type, name, __arraycount(name)))
+  if (!(name = devname(st.st_rdev, S_ISCHR(st.st_mode) ? S_IFCHR : S_IFBLK)))
     exit(1);
 
   printf("%s\n", name);

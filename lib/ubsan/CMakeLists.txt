@@ -76,6 +76,8 @@ if(APPLE)
                   RTUbsan_standalone
                   RTSanitizerCommon
                   RTSanitizerCommonLibc
+                  RTSanitizerCommonCoverage
+                  RTSanitizerCommonSymbolizer
                   RTInterception
       LINK_FLAGS ${WEAK_SYMBOL_LINK_FLAGS}
       PARENT_TARGET ubsan)
@@ -88,6 +90,8 @@ if(APPLE)
                   RTUbsan_standalone
                   RTSanitizerCommonNoHooks
                   RTSanitizerCommonLibcNoHooks
+                  RTSanitizerCommonCoverage
+                  RTSanitizerCommonSymbolizerNoHooks
                   RTInterception
       LINK_FLAGS ${WEAK_SYMBOL_LINK_FLAGS}
       PARENT_TARGET ubsan)
@@ -154,6 +158,8 @@ else()
       SOURCES ubsan_init_standalone_preinit.cc
       OBJECT_LIBS RTSanitizerCommon
               RTSanitizerCommonLibc
+              RTSanitizerCommonCoverage
+              RTSanitizerCommonSymbolizer
               RTUbsan
               RTUbsan_standalone
               RTInterception
@@ -173,6 +179,8 @@ else()
         ARCHS ${UBSAN_SUPPORTED_ARCH}
         OBJECT_LIBS RTSanitizerCommon
               RTSanitizerCommonLibc
+              RTSanitizerCommonCoverage
+              RTSanitizerCommonSymbolizer
               RTUbsan
               RTUbsan_cxx
               RTUbsan_standalone

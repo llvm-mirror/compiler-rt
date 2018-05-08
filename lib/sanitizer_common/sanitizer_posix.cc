@@ -21,7 +21,6 @@
 #include "sanitizer_libc.h"
 #include "sanitizer_posix.h"
 #include "sanitizer_procmaps.h"
-#include "sanitizer_stacktrace.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -152,6 +151,10 @@ bool MprotectNoAccess(uptr addr, uptr size) {
 bool MprotectReadOnly(uptr addr, uptr size) {
   return 0 == internal_mprotect((void *)addr, size, PROT_READ);
 }
+
+#if !SANITIZER_MAC
+void MprotectMallocZones(void *addr, int prot) {}
+#endif
 
 fd_t OpenFile(const char *filename, FileAccessMode mode, error_t *errno_p) {
   int flags;

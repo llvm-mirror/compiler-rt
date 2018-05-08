@@ -1,16 +1,16 @@
-//===-- sanitizer_fuchsia.cc ---------------------------------------------===//
+//===-- sanitizer_fuchsia.cc ----------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
 //
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // This file is shared between AddressSanitizer and other sanitizer
 // run-time libraries and implements Fuchsia-specific functions from
 // sanitizer_common.h.
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 #include "sanitizer_fuchsia.h"
 #if SANITIZER_FUCHSIA
@@ -18,13 +18,11 @@
 #include "sanitizer_common.h"
 #include "sanitizer_libc.h"
 #include "sanitizer_mutex.h"
-#include "sanitizer_stacktrace.h"
 
 #include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <unwind.h>
 #include <zircon/errors.h>
 #include <zircon/process.h>
 #include <zircon/syscalls.h>
@@ -89,13 +87,9 @@ void GetThreadStackTopAndBottom(bool, uptr *stack_top, uptr *stack_bottom) {
 }
 
 void MaybeReexec() {}
-void PrepareForSandboxing(__sanitizer_sandbox_arguments *args) {}
+void PlatformPrepareForSandboxing(__sanitizer_sandbox_arguments *args) {}
 void DisableCoreDumperIfNecessary() {}
 void InstallDeadlySignalHandlers(SignalHandlerType handler) {}
-void StartReportDeadlySignal() {}
-void ReportDeadlySignal(const SignalContext &sig, u32 tid,
-                        UnwindSignalStackCallbackType unwind,
-                        const void *unwind_context) {}
 void SetAlternateSignalStack() {}
 void UnsetAlternateSignalStack() {}
 void InitTlsSize() {}
@@ -105,42 +99,6 @@ void PrintModuleMap() {}
 bool SignalContext::IsStackOverflow() const { return false; }
 void SignalContext::DumpAllRegisters(void *context) { UNIMPLEMENTED(); }
 const char *SignalContext::Describe() const { UNIMPLEMENTED(); }
-
-struct UnwindTraceArg {
-  BufferedStackTrace *stack;
-  u32 max_depth;
-};
-
-_Unwind_Reason_Code Unwind_Trace(struct _Unwind_Context *ctx, void *param) {
-  UnwindTraceArg *arg = static_cast<UnwindTraceArg *>(param);
-  CHECK_LT(arg->stack->size, arg->max_depth);
-  uptr pc = _Unwind_GetIP(ctx);
-  if (pc < PAGE_SIZE) return _URC_NORMAL_STOP;
-  arg->stack->trace_buffer[arg->stack->size++] = pc;
-  return (arg->stack->size == arg->max_depth ? _URC_NORMAL_STOP
-                                             : _URC_NO_REASON);
-}
-
-void BufferedStackTrace::SlowUnwindStack(uptr pc, u32 max_depth) {
-  CHECK_GE(max_depth, 2);
-  size = 0;
-  UnwindTraceArg arg = {this, Min(max_depth + 1, kStackTraceMax)};
-  _Unwind_Backtrace(Unwind_Trace, &arg);
-  CHECK_GT(size, 0);
-  // We need to pop a few frames so that pc is on top.
-  uptr to_pop = LocatePcInTrace(pc);
-  // trace_buffer[0] belongs to the current function so we always pop it,
-  // unless there is only 1 frame in the stack trace (1 frame is always better
-  // than 0!).
-  PopStackFrames(Min(to_pop, static_cast<uptr>(1)));
-  trace_buffer[0] = pc;
-}
-
-void BufferedStackTrace::SlowUnwindStackWithContext(uptr pc, void *context,
-                                                    u32 max_depth) {
-  CHECK_NE(context, nullptr);
-  UNREACHABLE("signal context doesn't exist");
-}
 
 enum MutexState : int { MtxUnlocked = 0, MtxLocked = 1, MtxSleeping = 2 };
 
@@ -272,7 +230,7 @@ static uptr DoMmapFixedOrDie(zx_handle_t vmar, uptr fixed_addr, uptr map_size,
       ReportMmapFailureAndDie(map_size, name, "zx_vmo_create", status);
     return 0;
   }
-  _zx_object_set_property(vmo, ZX_PROP_NAME, name, sizeof(name) - 1);
+  _zx_object_set_property(vmo, ZX_PROP_NAME, name, internal_strlen(name));
   DCHECK_GE(base + size_, map_size + offset);
   uintptr_t addr;
 
@@ -316,20 +274,16 @@ void UnmapOrDieVmar(void *addr, uptr size, zx_handle_t target_vmar) {
   DecreaseTotalMmap(size);
 }
 
-void ReservedAddressRange::Unmap(uptr fixed_addr, uptr size) {
-  uptr offset = fixed_addr - reinterpret_cast<uptr>(base_);
-  uptr addr = reinterpret_cast<uptr>(base_) + offset;
-  void *addr_as_void = reinterpret_cast<void *>(addr);
-  uptr base_as_uptr = reinterpret_cast<uptr>(base_);
-  // Only unmap at the beginning or end of the range.
-  CHECK((addr_as_void == base_) || (addr + size == base_as_uptr + size_));
+void ReservedAddressRange::Unmap(uptr addr, uptr size) {
   CHECK_LE(size, size_);
+  if (addr == reinterpret_cast<uptr>(base_))
+    // If we unmap the whole range, just null out the base.
+    base_ = (size == size_) ? nullptr : reinterpret_cast<void*>(addr + size);
+  else
+    CHECK_EQ(addr + size, reinterpret_cast<uptr>(base_) + size_);
+  size_ -= size;
   UnmapOrDieVmar(reinterpret_cast<void *>(addr), size,
                  static_cast<zx_handle_t>(os_handle_));
-  if (addr_as_void == base_) {
-    base_ = reinterpret_cast<void *>(addr + size);
-  }
-  size_ = size_ - size;
 }
 
 // This should never be called.
@@ -418,16 +372,7 @@ bool IsAccessibleMemoryRange(uptr beg, uptr size) {
   zx_handle_t vmo;
   zx_status_t status = _zx_vmo_create(size, 0, &vmo);
   if (status == ZX_OK) {
-    while (size > 0) {
-      size_t wrote;
-      status = _zx_vmo_write(vmo, reinterpret_cast<const void *>(beg), 0, size,
-                             &wrote);
-      if (status != ZX_OK) break;
-      CHECK_GT(wrote, 0);
-      CHECK_LE(wrote, size);
-      beg += wrote;
-      size -= wrote;
-    }
+    status = _zx_vmo_write(vmo, reinterpret_cast<const void *>(beg), 0, size);
     _zx_handle_close(vmo);
   }
   return status == ZX_OK;

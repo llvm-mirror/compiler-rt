@@ -24,6 +24,10 @@
 
 namespace __sanitizer {
 
+// Allows the tools to name their allocations appropriately.
+extern const char *PrimaryAllocatorName;
+extern const char *SecondaryAllocatorName;
+
 // Since flags are immutable and allocator behavior can be changed at runtime
 // (unit tests or ASan on Android are some examples), allocator_may_return_null
 // flag value is cached here and can be altered later.
@@ -43,9 +47,12 @@ struct DieOnFailure {
   static void NORETURN *OnOOM();
 };
 
+void PrintHintAllocatorCannotReturnNull(const char *options_name);
+
 // Returns true if allocator detected OOM condition. Can be used to avoid memory
 // hungry operations. Set when AllocatorReturnNullOrDieOnOOM() is called.
 bool IsAllocatorOutOfMemory();
+void SetAllocatorOutOfMemory();
 
 // Allocators call these callbacks on mmap/munmap.
 struct NoOpMapUnmapCallback {

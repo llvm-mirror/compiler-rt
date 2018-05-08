@@ -34,6 +34,7 @@
 //   COMMON_INTERCEPTOR_MEMSET_IMPL
 //   COMMON_INTERCEPTOR_MEMMOVE_IMPL
 //   COMMON_INTERCEPTOR_MEMCPY_IMPL
+//   COMMON_INTERCEPTOR_MMAP_IMPL
 //   COMMON_INTERCEPTOR_COPY_STRING
 //   COMMON_INTERCEPTOR_STRNDUP_IMPL
 //===----------------------------------------------------------------------===//
@@ -265,6 +266,12 @@ bool PlatformHasDifferentMemcpyAndMemmove();
     }                                                       \
     return REAL(memcpy)(dst, src, size);                    \
   }
+#endif
+
+#ifndef COMMON_INTERCEPTOR_MMAP_IMPL
+#define COMMON_INTERCEPTOR_MMAP_IMPL(ctx, mmap, addr, sz, prot, flags, fd, \
+                                     off)                                  \
+  { return REAL(mmap)(addr, sz, prot, flags, fd, off); }
 #endif
 
 #ifndef COMMON_INTERCEPTOR_COPY_STRING
@@ -3590,7 +3597,8 @@ INTERCEPTOR(char *, strerror, int errnum) {
 //  * GNU version returns message pointer, which points to either buf or some
 //    static storage.
 #if ((_POSIX_C_SOURCE >= 200112L || _XOPEN_SOURCE >= 600) && !_GNU_SOURCE) || \
-    SANITIZER_MAC || SANITIZER_ANDROID || SANITIZER_NETBSD || SANITIZER_FREEBSD
+    SANITIZER_MAC || SANITIZER_ANDROID || SANITIZER_NETBSD ||                 \
+    SANITIZER_FREEBSD || SANITIZER_OPENBSD
 // POSIX version. Spec is not clear on whether buf is NULL-terminated.
 // At least on OSX, buf contents are valid even when the call fails.
 INTERCEPTOR(int, strerror_r, int errnum, char *buf, SIZE_T buflen) {
@@ -4407,8 +4415,6 @@ INTERCEPTOR(int, random_r, void *buf, u32 *result) {
 #if SANITIZER_INTERCEPT_PTHREAD_ATTR_GET
 INTERCEPTOR_PTHREAD_ATTR_GET(detachstate, sizeof(int))
 INTERCEPTOR_PTHREAD_ATTR_GET(guardsize, sizeof(SIZE_T))
-INTERCEPTOR_PTHREAD_ATTR_GET(schedparam, struct_sched_param_sz)
-INTERCEPTOR_PTHREAD_ATTR_GET(schedpolicy, sizeof(int))
 INTERCEPTOR_PTHREAD_ATTR_GET(scope, sizeof(int))
 INTERCEPTOR_PTHREAD_ATTR_GET(stacksize, sizeof(SIZE_T))
 INTERCEPTOR(int, pthread_attr_getstack, void *attr, void **addr, SIZE_T *size) {
@@ -4439,13 +4445,22 @@ int real_pthread_attr_getstack(void *attr, void **addr, SIZE_T *size) {
 #define INIT_PTHREAD_ATTR_GET                             \
   COMMON_INTERCEPT_FUNCTION(pthread_attr_getdetachstate); \
   COMMON_INTERCEPT_FUNCTION(pthread_attr_getguardsize);   \
-  COMMON_INTERCEPT_FUNCTION(pthread_attr_getschedparam);  \
-  COMMON_INTERCEPT_FUNCTION(pthread_attr_getschedpolicy); \
   COMMON_INTERCEPT_FUNCTION(pthread_attr_getscope);       \
   COMMON_INTERCEPT_FUNCTION(pthread_attr_getstacksize);   \
   COMMON_INTERCEPT_FUNCTION(pthread_attr_getstack);
 #else
 #define INIT_PTHREAD_ATTR_GET
+#endif
+
+#if SANITIZER_INTERCEPT_PTHREAD_ATTR_GET_SCHED
+INTERCEPTOR_PTHREAD_ATTR_GET(schedparam, struct_sched_param_sz)
+INTERCEPTOR_PTHREAD_ATTR_GET(schedpolicy, sizeof(int))
+
+#define INIT_PTHREAD_ATTR_GET_SCHED                      \
+  COMMON_INTERCEPT_FUNCTION(pthread_attr_getschedparam); \
+  COMMON_INTERCEPT_FUNCTION(pthread_attr_getschedpolicy);
+#else
+#define INIT_PTHREAD_ATTR_GET_SCHED
 #endif
 
 #if SANITIZER_INTERCEPT_PTHREAD_ATTR_GETINHERITSCHED
@@ -6522,6 +6537,78 @@ INTERCEPTOR(wchar_t *, wcsncat, wchar_t *dst, const wchar_t *src, SIZE_T n) {
 #define INIT_WCSCAT
 #endif
 
+#if SANITIZER_INTERCEPT_STRXFRM
+static SIZE_T RealStrLen(const char *str) { return REAL(strlen)(str); }
+
+static SIZE_T RealStrLen(const wchar_t *str) { return REAL(wcslen)(str); }
+
+#define STRXFRM_INTERCEPTOR_IMPL(strxfrm, dest, src, len, ...)             \
+  {                                                                        \
+    void *ctx;                                                             \
+    COMMON_INTERCEPTOR_ENTER(ctx, strxfrm, dest, src, len, ##__VA_ARGS__); \
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, src,                                \
+                                  sizeof(*src) * (RealStrLen(src) + 1));   \
+    SIZE_T res = REAL(strxfrm)(dest, src, len, ##__VA_ARGS__);             \
+    if (res < len)                                                         \
+      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, dest, sizeof(*src) * (res + 1)); \
+    return res;                                                            \
+  }
+
+INTERCEPTOR(SIZE_T, strxfrm, char *dest, const char *src, SIZE_T len) {
+  STRXFRM_INTERCEPTOR_IMPL(strxfrm, dest, src, len);
+}
+
+INTERCEPTOR(SIZE_T, strxfrm_l, char *dest, const char *src, SIZE_T len,
+            void *locale) {
+  STRXFRM_INTERCEPTOR_IMPL(strxfrm_l, dest, src, len, locale);
+}
+
+#define INIT_STRXFRM                  \
+  COMMON_INTERCEPT_FUNCTION(strxfrm); \
+  COMMON_INTERCEPT_FUNCTION(strxfrm_l);
+#else
+#define INIT_STRXFRM
+#endif
+
+#if SANITIZER_INTERCEPT___STRXFRM_L
+INTERCEPTOR(SIZE_T, __strxfrm_l, char *dest, const char *src, SIZE_T len,
+            void *locale) {
+  STRXFRM_INTERCEPTOR_IMPL(__strxfrm_l, dest, src, len, locale);
+}
+
+#define INIT___STRXFRM_L COMMON_INTERCEPT_FUNCTION(__strxfrm_l);
+#else
+#define INIT___STRXFRM_L
+#endif
+
+#if SANITIZER_INTERCEPT_WCSXFRM
+INTERCEPTOR(SIZE_T, wcsxfrm, wchar_t *dest, const wchar_t *src, SIZE_T len) {
+  STRXFRM_INTERCEPTOR_IMPL(wcsxfrm, dest, src, len);
+}
+
+INTERCEPTOR(SIZE_T, wcsxfrm_l, wchar_t *dest, const wchar_t *src, SIZE_T len,
+            void *locale) {
+  STRXFRM_INTERCEPTOR_IMPL(wcsxfrm_l, dest, src, len, locale);
+}
+
+#define INIT_WCSXFRM                  \
+  COMMON_INTERCEPT_FUNCTION(wcsxfrm); \
+  COMMON_INTERCEPT_FUNCTION(wcsxfrm_l);
+#else
+#define INIT_WCSXFRM
+#endif
+
+#if SANITIZER_INTERCEPT___WCSXFRM_L
+INTERCEPTOR(SIZE_T, __wcsxfrm_l, wchar_t *dest, const wchar_t *src, SIZE_T len,
+            void *locale) {
+  STRXFRM_INTERCEPTOR_IMPL(__wcsxfrm_l, dest, src, len, locale);
+}
+
+#define INIT___WCSXFRM_L COMMON_INTERCEPT_FUNCTION(__wcsxfrm_l);
+#else
+#define INIT___WCSXFRM_L
+#endif
+
 #if SANITIZER_INTERCEPT_ACCT
 INTERCEPTOR(int, acct, const char *file) {
   void *ctx;
@@ -6643,6 +6730,12 @@ INTERCEPTOR(int, getgrouplist, const char *name, u32 basegid, u32 *groups,
   return res;
 }
 
+#define INIT_GETGROUPLIST COMMON_INTERCEPT_FUNCTION(getgrouplist);
+#else
+#define INIT_GETGROUPLIST
+#endif
+
+#if SANITIZER_INTERCEPT_GETGROUPMEMBERSHIP
 INTERCEPTOR(int, getgroupmembership, const char *name, u32 basegid, u32 *groups,
             int maxgrp, int *ngroups) {
   void *ctx;
@@ -6659,11 +6752,9 @@ INTERCEPTOR(int, getgroupmembership, const char *name, u32 basegid, u32 *groups,
   return res;
 }
 
-#define INIT_GETGROUPLIST \
-  COMMON_INTERCEPT_FUNCTION(getgrouplist); \
-  COMMON_INTERCEPT_FUNCTION(getgroupmembership);
+#define INIT_GETGROUPMEMBERSHIP COMMON_INTERCEPT_FUNCTION(getgroupmembership);
 #else
-#define INIT_GETGROUPLIST
+#define INIT_GETGROUPMEMBERSHIP
 #endif
 
 #if SANITIZER_INTERCEPT_READLINK
@@ -6765,8 +6856,8 @@ INTERCEPTOR(SIZE_T, strlcpy, char *dst, char *src, SIZE_T size) {
   COMMON_INTERCEPTOR_ENTER(ctx, strlcpy, dst, src, size);
   if (src) {
     // Keep strnlen as macro argument, as macro may ignore it.
-    COMMON_INTERCEPTOR_READ_STRING(ctx, src,
-      Min(REAL(strnlen)(src, size), size - 1) + 1);
+    COMMON_INTERCEPTOR_READ_STRING(
+        ctx, src, Min(internal_strnlen(src, size), size - 1) + 1);
   }
   res = REAL(strlcpy)(dst, src, size);
   COMMON_INTERCEPTOR_COPY_STRING(ctx, dst, src, REAL(strlen)(dst) + 1);
@@ -6779,7 +6870,7 @@ INTERCEPTOR(SIZE_T, strlcat, char *dst, char *src, SIZE_T size) {
   COMMON_INTERCEPTOR_ENTER(ctx, strlcat, dst, src, size);
   // src is checked in the strlcpy() interceptor
   if (dst) {
-    len = REAL(strnlen)(dst, size);
+    len = internal_strnlen(dst, size);
     COMMON_INTERCEPTOR_READ_STRING(ctx, dst, Min(len, size - 1) + 1);
   }
   // Reuse the rest of the code in the strlcpy() interceptor
@@ -6790,6 +6881,51 @@ INTERCEPTOR(SIZE_T, strlcat, char *dst, char *src, SIZE_T size) {
   COMMON_INTERCEPT_FUNCTION(strlcat);
 #else
 #define INIT_STRLCPY
+#endif
+
+#if SANITIZER_INTERCEPT_MMAP
+INTERCEPTOR(void *, mmap, void *addr, SIZE_T sz, int prot, int flags, int fd,
+            OFF_T off) {
+  void *ctx;
+  if (common_flags()->detect_write_exec)
+    ReportMmapWriteExec(prot);
+  if (COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED)
+    return (void *)internal_mmap(addr, sz, prot, flags, fd, off);
+  COMMON_INTERCEPTOR_ENTER(ctx, mmap, addr, sz, prot, flags, fd, off);
+  COMMON_INTERCEPTOR_MMAP_IMPL(ctx, mmap, addr, sz, prot, flags, fd, off);
+}
+
+INTERCEPTOR(int, mprotect, void *addr, SIZE_T sz, int prot) {
+  void *ctx;
+  if (common_flags()->detect_write_exec)
+    ReportMmapWriteExec(prot);
+  if (COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED)
+    return (int)internal_mprotect(addr, sz, prot);
+  COMMON_INTERCEPTOR_ENTER(ctx, mprotect, addr, sz, prot);
+  MprotectMallocZones(addr, prot);
+  return REAL(mprotect)(addr, sz, prot);
+}
+#define INIT_MMAP                                                              \
+  COMMON_INTERCEPT_FUNCTION(mmap);                                             \
+  COMMON_INTERCEPT_FUNCTION(mprotect);
+#else
+#define INIT_MMAP
+#endif
+
+#if SANITIZER_INTERCEPT_MMAP64
+INTERCEPTOR(void *, mmap64, void *addr, SIZE_T sz, int prot, int flags, int fd,
+            OFF64_T off) {
+  void *ctx;
+  if (common_flags()->detect_write_exec)
+    ReportMmapWriteExec(prot);
+  if (COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED)
+    return (void *)internal_mmap(addr, sz, prot, flags, fd, off);
+  COMMON_INTERCEPTOR_ENTER(ctx, mmap64, addr, sz, prot, flags, fd, off);
+  COMMON_INTERCEPTOR_MMAP_IMPL(ctx, mmap64, addr, sz, prot, flags, fd, off);
+}
+#define INIT_MMAP64 COMMON_INTERCEPT_FUNCTION(mmap64);
+#else
+#define INIT_MMAP64
 #endif
 
 #if SANITIZER_INTERCEPT_DEVNAME
@@ -7029,6 +7165,8 @@ static void InitializeCommonInterceptors() {
   static u64 metadata_mem[sizeof(MetadataHashMap) / sizeof(u64) + 1];
   interceptor_metadata_map = new((void *)&metadata_mem) MetadataHashMap();
 
+  INIT_MMAP;
+  INIT_MMAP64;
   INIT_TEXTDOMAIN;
   INIT_STRLEN;
   INIT_STRNLEN;
@@ -7046,6 +7184,8 @@ static void InitializeCommonInterceptors() {
   INIT_STRSPN;
   INIT_STRTOK;
   INIT_STRPBRK;
+  INIT_STRXFRM;
+  INIT___STRXFRM_L;
   INIT_MEMSET;
   INIT_MEMMOVE;
   INIT_MEMCPY;
@@ -7164,6 +7304,7 @@ static void InitializeCommonInterceptors() {
   INIT_SHMCTL;
   INIT_RANDOM_R;
   INIT_PTHREAD_ATTR_GET;
+  INIT_PTHREAD_ATTR_GET_SCHED;
   INIT_PTHREAD_ATTR_GETINHERITSCHED;
   INIT_PTHREAD_ATTR_GETAFFINITY_NP;
   INIT_PTHREAD_MUTEXATTR_GETPSHARED;
@@ -7238,6 +7379,8 @@ static void InitializeCommonInterceptors() {
   INIT_GETLOADAVG;
   INIT_WCSLEN;
   INIT_WCSCAT;
+  INIT_WCSXFRM;
+  INIT___WCSXFRM_L;
   INIT_ACCT;
   INIT_USER_FROM_UID;
   INIT_UID_FROM_USER;
@@ -7246,6 +7389,7 @@ static void InitializeCommonInterceptors() {
   INIT_ACCESS;
   INIT_FACCESSAT;
   INIT_GETGROUPLIST;
+  INIT_GETGROUPMEMBERSHIP;
   INIT_READLINK;
   INIT_READLINKAT;
   INIT_NAME_TO_HANDLE_AT;

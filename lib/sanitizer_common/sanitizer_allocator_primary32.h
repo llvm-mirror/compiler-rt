@@ -125,7 +125,7 @@ class SizeClassAllocator32 {
   }
 
   void *MapWithCallback(uptr size) {
-    void *res = MmapOrDie(size, "SizeClassAllocator32");
+    void *res = MmapOrDie(size, PrimaryAllocatorName);
     MapUnmapCallback().OnMap((uptr)res, size);
     return res;
   }
@@ -266,14 +266,12 @@ class SizeClassAllocator32 {
   static const uptr kRegionSize = 1 << kRegionSizeLog;
   static const uptr kNumPossibleRegions = kSpaceSize / kRegionSize;
 
-  struct SizeClassInfo {
+  struct ALIGNED(SANITIZER_CACHE_LINE_SIZE) SizeClassInfo {
     SpinMutex mutex;
     IntrusiveList<TransferBatch> free_list;
     u32 rand_state;
-    char padding[kCacheLineSize - 2 * sizeof(uptr) -
-                 sizeof(IntrusiveList<TransferBatch>)];
   };
-  COMPILER_CHECK(sizeof(SizeClassInfo) == kCacheLineSize);
+  COMPILER_CHECK(sizeof(SizeClassInfo) % kCacheLineSize == 0);
 
   uptr ComputeRegionId(uptr mem) {
     const uptr res = mem >> kRegionSizeLog;
@@ -288,7 +286,7 @@ class SizeClassAllocator32 {
   uptr AllocateRegion(AllocatorStats *stat, uptr class_id) {
     CHECK_LT(class_id, kNumClasses);
     uptr res = reinterpret_cast<uptr>(MmapAlignedOrDieOnFatalError(
-        kRegionSize, kRegionSize, "SizeClassAllocator32"));
+        kRegionSize, kRegionSize, PrimaryAllocatorName));
     if (UNLIKELY(!res))
       return 0;
     MapUnmapCallback().OnMap(res, kRegionSize);
@@ -299,7 +297,7 @@ class SizeClassAllocator32 {
   }
 
   SizeClassInfo *GetSizeClassInfo(uptr class_id) {
-    CHECK_LT(class_id, kNumClasses);
+    DCHECK_LT(class_id, kNumClasses);
     return &size_class_info_array[class_id];
   }
 
