@@ -594,11 +594,6 @@ struct ScudoAllocator {
       SoftRssLimitMb = LimitMb;
     CheckRssLimit = HardRssLimitMb || SoftRssLimitMb;
   }
-
-  void printStats() {
-    initThreadMaybe();
-    BackendAllocator.printStats();
-  }
 };
 
 static ScudoAllocator Instance(LINKER_INITIALIZED);
@@ -747,8 +742,4 @@ void __scudo_set_rss_limit(uptr LimitMb, s32 HardLimit) {
   if (!SCUDO_CAN_USE_PUBLIC_INTERFACE)
     return;
   Instance.setRssLimit(LimitMb, !!HardLimit);
-}
-
-void __scudo_print_stats() {
-  Instance.printStats();
 }

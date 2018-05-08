@@ -61,11 +61,6 @@ class ScudoCombinedAllocator {
     Stats.Get(StatType);
   }
 
-  void printStats() {
-    Primary.PrintStats();
-    Secondary.PrintStats();
-  }
-
  private:
   PrimaryAllocator Primary;
   SecondaryAllocator Secondary;
