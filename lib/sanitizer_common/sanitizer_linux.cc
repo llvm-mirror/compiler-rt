@@ -53,7 +53,9 @@
 #include <link.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/param.h>
 #if !SANITIZER_SOLARIS
 #include <sys/ptrace.h>
 #endif
@@ -66,7 +68,6 @@
 #include <ucontext.h>
 #endif
 #if SANITIZER_OPENBSD
-#include <signal.h>
 #include <sys/futex.h>
 #endif
 #include <unistd.h>
@@ -104,10 +105,6 @@ extern struct ps_strings *__ps_strings;
 #define environ _environ
 #endif
 
-#if !SANITIZER_ANDROID
-#include <sys/signal.h>
-#endif
-
 extern char **environ;
 
 #if SANITIZER_LINUX
@@ -120,6 +117,9 @@ struct kernel_timeval {
 // <linux/futex.h> is broken on some linux distributions.
 const int FUTEX_WAIT = 0;
 const int FUTEX_WAKE = 1;
+const int FUTEX_PRIVATE_FLAG = 128;
+const int FUTEX_WAIT_PRIVATE = FUTEX_WAIT | FUTEX_PRIVATE_FLAG;
+const int FUTEX_WAKE_PRIVATE = FUTEX_WAKE | FUTEX_PRIVATE_FLAG;
 #endif  // SANITIZER_LINUX
 
 // Are we using 32-bit or 64-bit Linux syscalls?
@@ -153,7 +153,11 @@ extern void internal_sigreturn();
 #if SANITIZER_OPENBSD
 # define SANITIZER_USE_GETENTROPY 1
 #else
-# define SANITIZER_USE_GETENTROPY 0
+# if SANITIZER_FREEBSD && __FreeBSD_version >= 1200000
+#   define SANITIZER_USE_GETENTROPY 1
+# else
+#   define SANITIZER_USE_GETENTROPY 0
+# endif
 #endif // SANITIZER_USE_GETENTROPY
 
 namespace __sanitizer {
@@ -174,7 +178,7 @@ namespace __sanitizer {
 uptr internal_mmap(void *addr, uptr length, int prot, int flags, int fd,
                    OFF_T offset) {
 #if SANITIZER_NETBSD
-  return internal_syscall_ptr(SYSCALL(mmap), addr, length, prot, flags, fd,
+  return internal_syscall64(SYSCALL(mmap), addr, length, prot, flags, fd,
                               (long)0, offset);
 #elif SANITIZER_FREEBSD || SANITIZER_LINUX_USES_64BIT_SYSCALLS
   return internal_syscall(SYSCALL(mmap), (uptr)addr, length, prot, flags, fd,
@@ -485,6 +489,23 @@ tid_t GetTid() {
 #endif
 }
 
+int TgKill(pid_t pid, tid_t tid, int sig) {
+#if SANITIZER_LINUX
+  return internal_syscall(SYSCALL(tgkill), pid, tid, sig);
+#elif SANITIZER_FREEBSD
+  return internal_syscall(SYSCALL(thr_kill2), pid, tid, sig);
+#elif SANITIZER_OPENBSD
+  (void)pid;
+  return internal_syscall(SYSCALL(thrkill), tid, sig, nullptr);
+#elif SANITIZER_NETBSD
+  (void)pid;
+  return _lwp_kill(tid, sig);
+#elif SANITIZER_SOLARIS
+  (void)pid;
+  return thr_kill(tid, sig);
+#endif
+}
+
 #if !SANITIZER_SOLARIS
 u64 NanoTime() {
 #if SANITIZER_FREEBSD || SANITIZER_NETBSD || SANITIZER_OPENBSD
@@ -668,7 +689,8 @@ void BlockingMutex::Lock() {
 #elif SANITIZER_NETBSD
     sched_yield(); /* No userspace futex-like synchronization */
 #else
-    internal_syscall(SYSCALL(futex), (uptr)m, FUTEX_WAIT, MtxSleeping, 0, 0, 0);
+    internal_syscall(SYSCALL(futex), (uptr)m, FUTEX_WAIT_PRIVATE, MtxSleeping,
+                     0, 0, 0);
 #endif
   }
 }
@@ -683,7 +705,7 @@ void BlockingMutex::Unlock() {
 #elif SANITIZER_NETBSD
                    /* No userspace futex-like synchronization */
 #else
-    internal_syscall(SYSCALL(futex), (uptr)m, FUTEX_WAKE, 1, 0, 0, 0);
+    internal_syscall(SYSCALL(futex), (uptr)m, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
 #endif
   }
 }
@@ -905,71 +927,90 @@ bool internal_sigismember(__sanitizer_sigset_t *set, int signum) {
 #endif // !SANITIZER_SOLARIS
 
 // ThreadLister implementation.
-ThreadLister::ThreadLister(int pid)
-  : pid_(pid),
-    descriptor_(-1),
-    buffer_(4096),
-    error_(true),
-    entry_((struct linux_dirent *)buffer_.data()),
-    bytes_read_(0) {
+ThreadLister::ThreadLister(pid_t pid) : pid_(pid), buffer_(4096) {
   char task_directory_path[80];
   internal_snprintf(task_directory_path, sizeof(task_directory_path),
                     "/proc/%d/task/", pid);
-  uptr openrv = internal_open(task_directory_path, O_RDONLY | O_DIRECTORY);
-  if (internal_iserror(openrv)) {
-    error_ = true;
+  descriptor_ = internal_open(task_directory_path, O_RDONLY | O_DIRECTORY);
+  if (internal_iserror(descriptor_)) {
     Report("Can't open /proc/%d/task for reading.\n", pid);
-  } else {
-    error_ = false;
-    descriptor_ = openrv;
   }
 }
 
-int ThreadLister::GetNextTID() {
-  int tid = -1;
-  do {
-    if (error_)
-      return -1;
-    if ((char *)entry_ >= &buffer_[bytes_read_] && !GetDirectoryEntries())
-      return -1;
-    if (entry_->d_ino != 0 && entry_->d_name[0] >= '0' &&
-        entry_->d_name[0] <= '9') {
-      // Found a valid tid.
-      tid = (int)internal_atoll(entry_->d_name);
+ThreadLister::Result ThreadLister::ListThreads(
+    InternalMmapVector<tid_t> *threads) {
+  if (internal_iserror(descriptor_))
+    return Error;
+  internal_lseek(descriptor_, 0, SEEK_SET);
+  threads->clear();
+
+  Result result = Ok;
+  for (bool first_read = true;; first_read = false) {
+    // Resize to max capacity if it was downsized by IsAlive.
+    buffer_.resize(buffer_.capacity());
+    CHECK_GE(buffer_.size(), 4096);
+    uptr read = internal_getdents(
+        descriptor_, (struct linux_dirent *)buffer_.data(), buffer_.size());
+    if (!read)
+      return result;
+    if (internal_iserror(read)) {
+      Report("Can't read directory entries from /proc/%d/task.\n", pid_);
+      return Error;
     }
-    entry_ = (struct linux_dirent *)(((char *)entry_) + entry_->d_reclen);
-  } while (tid < 0);
-  return tid;
+
+    for (uptr begin = (uptr)buffer_.data(), end = begin + read; begin < end;) {
+      struct linux_dirent *entry = (struct linux_dirent *)begin;
+      begin += entry->d_reclen;
+      if (entry->d_ino == 1) {
+        // Inode 1 is for bad blocks and also can be a reason for early return.
+        // Should be emitted if kernel tried to output terminating thread.
+        // See proc_task_readdir implementation in Linux.
+        result = Incomplete;
+      }
+      if (entry->d_ino && *entry->d_name >= '0' && *entry->d_name <= '9')
+        threads->push_back(internal_atoll(entry->d_name));
+    }
+
+    // Now we are going to detect short-read or early EOF. In such cases Linux
+    // can return inconsistent list with missing alive threads.
+    // Code will just remember that the list can be incomplete but it will
+    // continue reads to return as much as possible.
+    if (!first_read) {
+      // The first one was a short-read by definition.
+      result = Incomplete;
+    } else if (read > buffer_.size() - 1024) {
+      // Read was close to the buffer size. So double the size and assume the
+      // worst.
+      buffer_.resize(buffer_.size() * 2);
+      result = Incomplete;
+    } else if (!threads->empty() && !IsAlive(threads->back())) {
+      // Maybe Linux early returned from read on terminated thread (!pid_alive)
+      // and failed to restore read position.
+      // See next_tid and proc_task_instantiate in Linux.
+      result = Incomplete;
+    }
+  }
 }
 
-void ThreadLister::Reset() {
-  if (error_ || descriptor_ < 0)
-    return;
-  internal_lseek(descriptor_, 0, SEEK_SET);
+bool ThreadLister::IsAlive(int tid) {
+  // /proc/%d/task/%d/status uses same call to detect alive threads as
+  // proc_task_readdir. See task_state implementation in Linux.
+  char path[80];
+  internal_snprintf(path, sizeof(path), "/proc/%d/task/%d/status", pid_, tid);
+  if (!ReadFileToVector(path, &buffer_) || buffer_.empty())
+    return false;
+  buffer_.push_back(0);
+  static const char kPrefix[] = "\nPPid:";
+  const char *field = internal_strstr(buffer_.data(), kPrefix);
+  if (!field)
+    return false;
+  field += internal_strlen(kPrefix);
+  return (int)internal_atoll(field) != 0;
 }
 
 ThreadLister::~ThreadLister() {
-  if (descriptor_ >= 0)
+  if (!internal_iserror(descriptor_))
     internal_close(descriptor_);
-}
-
-bool ThreadLister::error() { return error_; }
-
-bool ThreadLister::GetDirectoryEntries() {
-  CHECK_GE(descriptor_, 0);
-  CHECK_NE(error_, true);
-  bytes_read_ = internal_getdents(descriptor_,
-                                  (struct linux_dirent *)buffer_.data(),
-                                  buffer_.size());
-  if (internal_iserror(bytes_read_)) {
-    Report("Can't read directory entries from /proc/%d/task.\n", pid_);
-    error_ = true;
-    return false;
-  } else if (bytes_read_ == 0) {
-    return false;
-  }
-  entry_ = (struct linux_dirent *)buffer_.data();
-  return true;
 }
 
 #if SANITIZER_WORDSIZE == 32
@@ -1224,7 +1265,7 @@ uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
                          "d"(parent_tidptr),
                          "r"(r8),
                          "r"(r10)
-                       : "rsp", "memory", "r11", "rcx");
+                       : "memory", "r11", "rcx");
   return res;
 }
 #elif defined(__mips__)
@@ -1736,6 +1777,55 @@ SignalContext::WriteFlag SignalContext::GetWriteFlag() const {
   uptr err = ucontext->uc_mcontext.gregs[REG_ERR];
 #endif // SANITIZER_FREEBSD
   return err & PF_WRITE ? WRITE : READ;
+#elif defined(__mips__)
+  uint32_t *exception_source;
+  uint32_t faulty_instruction;
+  uint32_t op_code;
+
+  exception_source = (uint32_t *)ucontext->uc_mcontext.pc;
+  faulty_instruction = (uint32_t)(*exception_source);
+
+  op_code = (faulty_instruction >> 26) & 0x3f;
+
+  // FIXME: Add support for FPU, microMIPS, DSP, MSA memory instructions.
+  switch (op_code) {
+    case 0x28:  // sb
+    case 0x29:  // sh
+    case 0x2b:  // sw
+    case 0x3f:  // sd
+#if __mips_isa_rev < 6
+    case 0x2c:  // sdl
+    case 0x2d:  // sdr
+    case 0x2a:  // swl
+    case 0x2e:  // swr
+#endif
+      return SignalContext::WRITE;
+
+    case 0x20:  // lb
+    case 0x24:  // lbu
+    case 0x21:  // lh
+    case 0x25:  // lhu
+    case 0x23:  // lw
+    case 0x27:  // lwu
+    case 0x37:  // ld
+#if __mips_isa_rev < 6
+    case 0x1a:  // ldl
+    case 0x1b:  // ldr
+    case 0x22:  // lwl
+    case 0x26:  // lwr
+#endif
+      return SignalContext::READ;
+#if __mips_isa_rev == 6
+    case 0x3b:  // pcrel
+      op_code = (faulty_instruction >> 19) & 0x3;
+      switch (op_code) {
+        case 0x1:  // lwpc
+        case 0x2:  // lwupc
+          return SignalContext::READ;
+      }
+#endif
+  }
+  return SignalContext::UNKNOWN;
 #elif defined(__arm__)
   static const uptr FSR_WRITE = 1U << 11;
   uptr fsr = ucontext->uc_mcontext.error_code;
@@ -1884,6 +1974,30 @@ void SignalContext::InitPcSpBp() { GetPcSpBp(context, &pc, &sp, &bp); }
 
 void MaybeReexec() {
   // No need to re-exec on Linux.
+}
+
+void CheckASLR() {
+#if SANITIZER_NETBSD
+  int mib[3];
+  int paxflags;
+  size_t len = sizeof(paxflags);
+
+  mib[0] = CTL_PROC;
+  mib[1] = internal_getpid();
+  mib[2] = PROC_PID_PAXFLAGS;
+
+  if (UNLIKELY(sysctl(mib, 3, &paxflags, &len, NULL, 0) == -1)) {
+    Printf("sysctl failed\n");
+    Die();
+  }
+
+  if (UNLIKELY(paxflags & CTL_PROC_PAXFLAGS_ASLR)) {
+    Printf("This sanitizer is not compatible with enabled ASLR\n");
+    Die();
+  }
+#else
+  // Do nothing
+#endif
 }
 
 void PrintModuleMap() { }

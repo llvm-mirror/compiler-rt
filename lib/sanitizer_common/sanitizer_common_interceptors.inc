@@ -1189,6 +1189,50 @@ INTERCEPTOR(SSIZE_T, pwritev64, int fd, __sanitizer_iovec *iov, int iovcnt,
 #define INIT_PWRITEV64
 #endif
 
+#if SANITIZER_INTERCEPT_FGETS
+INTERCEPTOR(char *, fgets, char *s, SIZE_T size, void *file) {
+  // libc file streams can call user-supplied functions, see fopencookie.
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, fgets, s, size, file);
+  // FIXME: under ASan the call below may write to freed memory and corrupt
+  // its metadata. See
+  // https://github.com/google/sanitizers/issues/321.
+  char *res = REAL(fgets)(s, size, file);
+  if (res)
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, s, REAL(strlen)(s) + 1);
+  return res;
+}
+#define INIT_FGETS COMMON_INTERCEPT_FUNCTION(fgets)
+#else
+#define INIT_FGETS
+#endif
+
+#if SANITIZER_INTERCEPT_FPUTS
+INTERCEPTOR_WITH_SUFFIX(int, fputs, char *s, void *file) {
+  // libc file streams can call user-supplied functions, see fopencookie.
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, fputs, s, file);
+  COMMON_INTERCEPTOR_READ_RANGE(ctx, s, REAL(strlen)(s) + 1);
+  return REAL(fputs)(s, file);
+}
+#define INIT_FPUTS COMMON_INTERCEPT_FUNCTION(fputs)
+#else
+#define INIT_FPUTS
+#endif
+
+#if SANITIZER_INTERCEPT_PUTS
+INTERCEPTOR(int, puts, char *s) {
+  // libc file streams can call user-supplied functions, see fopencookie.
+  void *ctx;
+  COMMON_INTERCEPTOR_ENTER(ctx, puts, s);
+  COMMON_INTERCEPTOR_READ_RANGE(ctx, s, REAL(strlen)(s) + 1);
+  return REAL(puts)(s);
+}
+#define INIT_PUTS COMMON_INTERCEPT_FUNCTION(puts)
+#else
+#define INIT_PUTS
+#endif
+
 #if SANITIZER_INTERCEPT_PRCTL
 INTERCEPTOR(int, prctl, int option, unsigned long arg2,
             unsigned long arg3,                        // NOLINT
@@ -4021,7 +4065,7 @@ INTERCEPTOR(void, _exit, int status) {
 #define INIT__EXIT
 #endif
 
-#if SANITIZER_INTERCEPT_PHTREAD_MUTEX
+#if SANITIZER_INTERCEPT_PTHREAD_MUTEX
 INTERCEPTOR(int, pthread_mutex_lock, void *m) {
   void *ctx;
   COMMON_INTERCEPTOR_ENTER(ctx, pthread_mutex_lock, m);
@@ -4054,13 +4098,42 @@ INTERCEPTOR(int, pthread_mutex_unlock, void *m) {
 #define INIT_PTHREAD_MUTEX_UNLOCK
 #endif
 
-#if SANITIZER_NETBSD
-INTERCEPTOR(int, __libc_mutex_lock, void *m) \
-  ALIAS(WRAPPER_NAME(pthread_mutex_lock));
-INTERCEPTOR(int, __libc_mutex_unlock, void *m) \
-  ALIAS(WRAPPER_NAME(pthread_mutex_unlock));
-INTERCEPTOR(int, __libc_thr_setcancelstate, int state, int *oldstate) \
-  ALIAS(WRAPPER_NAME(pthread_setcancelstate));
+#if SANITIZER_INTERCEPT___PTHREAD_MUTEX
+INTERCEPTOR(int, __pthread_mutex_lock, void *m) {
+  return WRAP(pthread_mutex_lock)(m);
+}
+
+INTERCEPTOR(int, __pthread_mutex_unlock, void *m) {
+  return WRAP(pthread_mutex_unlock)(m);
+}
+
+#define INIT___PTHREAD_MUTEX_LOCK \
+  COMMON_INTERCEPT_FUNCTION(__pthread_mutex_lock)
+#define INIT___PTHREAD_MUTEX_UNLOCK \
+  COMMON_INTERCEPT_FUNCTION(__pthread_mutex_unlock)
+#else
+#define INIT___PTHREAD_MUTEX_LOCK
+#define INIT___PTHREAD_MUTEX_UNLOCK
+#endif
+
+#if SANITIZER_INTERCEPT___LIBC_MUTEX
+INTERCEPTOR(int, __libc_mutex_lock, void *m)
+ALIAS(WRAPPER_NAME(pthread_mutex_lock));
+
+INTERCEPTOR(int, __libc_mutex_unlock, void *m)
+ALIAS(WRAPPER_NAME(pthread_mutex_unlock));
+
+INTERCEPTOR(int, __libc_thr_setcancelstate, int state, int *oldstate)
+ALIAS(WRAPPER_NAME(pthread_setcancelstate));
+
+#define INIT___LIBC_MUTEX_LOCK COMMON_INTERCEPT_FUNCTION(__libc_mutex_lock)
+#define INIT___LIBC_MUTEX_UNLOCK COMMON_INTERCEPT_FUNCTION(__libc_mutex_unlock)
+#define INIT___LIBC_THR_SETCANCELSTATE \
+  COMMON_INTERCEPT_FUNCTION(__libc_thr_setcancelstate)
+#else
+#define INIT___LIBC_MUTEX_LOCK
+#define INIT___LIBC_MUTEX_UNLOCK
+#define INIT___LIBC_THR_SETCANCELSTATE
 #endif
 
 #if SANITIZER_INTERCEPT_GETMNTENT || SANITIZER_INTERCEPT_GETMNTENT_R
@@ -4387,6 +4460,7 @@ INTERCEPTOR(int, random_r, void *buf, u32 *result) {
 // its metadata. See
 // https://github.com/google/sanitizers/issues/321.
 #if SANITIZER_INTERCEPT_PTHREAD_ATTR_GET ||              \
+    SANITIZER_INTERCEPT_PTHREAD_ATTR_GET_SCHED ||        \
     SANITIZER_INTERCEPT_PTHREAD_ATTR_GETINHERITSSCHED || \
     SANITIZER_INTERCEPT_PTHREAD_MUTEXATTR_GET ||         \
     SANITIZER_INTERCEPT_PTHREAD_RWLOCKATTR_GET ||        \
@@ -7207,6 +7281,9 @@ static void InitializeCommonInterceptors() {
   INIT_WRITEV;
   INIT_PWRITEV;
   INIT_PWRITEV64;
+  INIT_FGETS;
+  INIT_FPUTS;
+  INIT_PUTS;
   INIT_PRCTL;
   INIT_LOCALTIME_AND_FRIENDS;
   INIT_STRPTIME;
@@ -7291,6 +7368,11 @@ static void InitializeCommonInterceptors() {
   INIT__EXIT;
   INIT_PTHREAD_MUTEX_LOCK;
   INIT_PTHREAD_MUTEX_UNLOCK;
+  INIT___PTHREAD_MUTEX_LOCK;
+  INIT___PTHREAD_MUTEX_UNLOCK;
+  INIT___LIBC_MUTEX_LOCK;
+  INIT___LIBC_MUTEX_UNLOCK;
+  INIT___LIBC_THR_SETCANCELSTATE;
   INIT_GETMNTENT;
   INIT_GETMNTENT_R;
   INIT_STATFS;
@@ -7402,12 +7484,6 @@ static void InitializeCommonInterceptors() {
   INIT_TTYENT;
   INIT_PROTOENT;
   INIT_NETENT;
-
-#if SANITIZER_NETBSD
-  COMMON_INTERCEPT_FUNCTION(__libc_mutex_lock);
-  COMMON_INTERCEPT_FUNCTION(__libc_mutex_unlock);
-  COMMON_INTERCEPT_FUNCTION(__libc_thr_setcancelstate);
-#endif
 
   INIT___PRINTF_CHK;
 }

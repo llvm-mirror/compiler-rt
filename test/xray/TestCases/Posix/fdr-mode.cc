@@ -1,10 +1,21 @@
 // RUN: %clangxx_xray -g -std=c++11 %s -o %t
-// RUN: rm fdr-logging-test-* || true
-// RUN: rm fdr-unwrite-test-* || true
-// RUN: XRAY_OPTIONS="patch_premain=false xray_naive_log=false xray_logfile_base=fdr-logging-test- xray_fdr_log=true verbosity=1 xray_fdr_log_func_duration_threshold_us=0" %run %t 2>&1 | FileCheck %s
-// RUN: XRAY_OPTIONS="patch_premain=false xray_naive_log=false xray_logfile_base=fdr-unwrite-test- xray_fdr_log=true verbosity=1 xray_fdr_log_func_duration_threshold_us=5000" %run %t 2>&1 | FileCheck %s
-// RUN: %llvm_xray convert --symbolize --output-format=yaml -instr_map=%t "`ls fdr-logging-test-* | head -1`" | FileCheck %s --check-prefix=TRACE
-// RUN: %llvm_xray convert --symbolize --output-format=yaml -instr_map=%t "`ls fdr-unwrite-test-* | head -1`" | FileCheck %s --check-prefix=UNWRITE
+// RUN: rm -f fdr-logging-test-*
+// RUN: rm -f fdr-unwrite-test-*
+// RUN: XRAY_OPTIONS="patch_premain=false xray_logfile_base=fdr-logging-test- \
+// RUN:     xray_mode=xray-fdr verbosity=1" \
+// RUN: XRAY_FDR_OPTIONS="func_duration_threshold_us=0" \
+// RUN:     %run %t 2>&1 | FileCheck %s
+// RUN: XRAY_OPTIONS="patch_premain=false \
+// RUN:     xray_logfile_base=fdr-unwrite-test- xray_mode=xray-fdr \
+// RUN:     verbosity=1" \
+// RUN: XRAY_FDR_OPTIONS="func_duration_threshold_us=5000" \
+// RUN:     %run %t 2>&1 | FileCheck %s
+// RUN: %llvm_xray convert --symbolize --output-format=yaml -instr_map=%t \
+// RUN:     "`ls fdr-logging-test-* | head -1`" \
+// RUN:     | FileCheck %s --check-prefix=TRACE
+// RUN: %llvm_xray convert --symbolize --output-format=yaml -instr_map=%t \
+// RUN:     "`ls fdr-unwrite-test-* | head -1`" \
+// RUN:     | FileCheck %s --check-prefix=UNWRITE
 // RUN: rm fdr-logging-test-*
 // RUN: rm fdr-unwrite-test-*
 // FIXME: Make llvm-xray work on non-x86_64 as well.
@@ -20,9 +31,6 @@
 #include <thread>
 #include <time.h>
 
-constexpr auto kBufferSize = 16384;
-constexpr auto kBufferMax = 10;
-
 thread_local uint64_t var = 0;
 [[clang::xray_always_instrument]] void __attribute__((noinline)) fC() { ++var; }
 
@@ -35,11 +43,12 @@ void __attribute__((noinline)) fArg(int) { }
 
 int main(int argc, char *argv[]) {
   using namespace __xray;
-  FDRLoggingOptions Options;
   std::cout << "Logging before init." << std::endl;
   // CHECK: Logging before init.
-  auto status = __xray_log_init(kBufferSize, kBufferMax, &Options,
-                                sizeof(FDRLoggingOptions));
+  assert(__xray_log_select_mode("xray-fdr") ==
+         XRayLogRegisterStatus::XRAY_REGISTRATION_OK);
+  auto status =
+      __xray_log_init_mode("xray-fdr", "buffer_size=16384:buffer_max=10");
   assert(status == XRayLogInitStatus::XRAY_LOG_INITIALIZED);
   std::cout << "Init status " << status << std::endl;
   // CHECK: Init status {{.*}}
@@ -72,32 +81,32 @@ int main(int argc, char *argv[]) {
 }
 
 // Check that we're able to see two threads, each entering and exiting fA().
-// TRACE-DAG: - { type: 0, func-id: [[FIDA:[0-9]+]], function: {{.*fA.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
-// TRACE:     - { type: 0, func-id: [[FIDA]], function: {{.*fA.*}}, cpu: {{.*}}, thread: [[THREAD1]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
-// TRACE-DAG: - { type: 0, func-id: [[FIDA]], function: {{.*fA.*}}, cpu: {{.*}}, thread: [[THREAD2:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
-// TRACE:     - { type: 0, func-id: [[FIDA]], function: {{.*fA.*}}, cpu: {{.*}}, thread: [[THREAD2]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
+// TRACE-DAG: - { type: 0, func-id: [[FIDA:[0-9]+]], function: {{.*fA.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], process: [[PROCESS:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
+// TRACE:     - { type: 0, func-id: [[FIDA]], function: {{.*fA.*}}, cpu: {{.*}}, thread: [[THREAD1]], process: [[PROCESS]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
+// TRACE-DAG: - { type: 0, func-id: [[FIDA]], function: {{.*fA.*}}, cpu: {{.*}}, thread: [[THREAD2:[0-9]+]], process: [[PROCESS]], kind: function-enter, tsc: {{[0-9]+}} }
+// TRACE:     - { type: 0, func-id: [[FIDA]], function: {{.*fA.*}}, cpu: {{.*}}, thread: [[THREAD2]], process: [[PROCESS]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
 //
 // Do the same as above for fC()
-// TRACE-DAG: - { type: 0, func-id: [[FIDC:[0-9]+]], function: {{.*fC.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
-// TRACE:     - { type: 0, func-id: [[FIDC]], function: {{.*fC.*}}, cpu: {{.*}}, thread: [[THREAD1]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
-// TRACE-DAG: - { type: 0, func-id: [[FIDC]], function: {{.*fC.*}}, cpu: {{.*}}, thread: [[THREAD2:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
-// TRACE:     - { type: 0, func-id: [[FIDC]], function: {{.*fC.*}}, cpu: {{.*}}, thread: [[THREAD2]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
+// TRACE-DAG: - { type: 0, func-id: [[FIDC:[0-9]+]], function: {{.*fC.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], process: [[PROCESS]], kind: function-enter, tsc: {{[0-9]+}} }
+// TRACE:     - { type: 0, func-id: [[FIDC]], function: {{.*fC.*}}, cpu: {{.*}}, thread: [[THREAD1]], process: [[PROCESS]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
+// TRACE-DAG: - { type: 0, func-id: [[FIDC]], function: {{.*fC.*}}, cpu: {{.*}}, thread: [[THREAD2:[0-9]+]], process: [[PROCESS]], kind: function-enter, tsc: {{[0-9]+}} }
+// TRACE:     - { type: 0, func-id: [[FIDC]], function: {{.*fC.*}}, cpu: {{.*}}, thread: [[THREAD2]], process: [[PROCESS]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
 
 // Do the same as above for fB()
-// TRACE-DAG: - { type: 0, func-id: [[FIDB:[0-9]+]], function: {{.*fB.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
-// TRACE:     - { type: 0, func-id: [[FIDB]], function: {{.*fB.*}}, cpu: {{.*}}, thread: [[THREAD1]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
-// TRACE-DAG: - { type: 0, func-id: [[FIDB]], function: {{.*fB.*}}, cpu: {{.*}}, thread: [[THREAD2:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
-// TRACE:     - { type: 0, func-id: [[FIDB]], function: {{.*fB.*}}, cpu: {{.*}}, thread: [[THREAD2]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
+// TRACE-DAG: - { type: 0, func-id: [[FIDB:[0-9]+]], function: {{.*fB.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], process: [[PROCESS]], kind: function-enter, tsc: {{[0-9]+}} }
+// TRACE:     - { type: 0, func-id: [[FIDB]], function: {{.*fB.*}}, cpu: {{.*}}, thread: [[THREAD1]], process: [[PROCESS]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
+// TRACE-DAG: - { type: 0, func-id: [[FIDB]], function: {{.*fB.*}}, cpu: {{.*}}, thread: [[THREAD2:[0-9]+]], process: [[PROCESS]], kind: function-enter, tsc: {{[0-9]+}} }
+// TRACE:     - { type: 0, func-id: [[FIDB]], function: {{.*fB.*}}, cpu: {{.*}}, thread: [[THREAD2]], process: [[PROCESS]], kind: function-{{exit|tail-exit}}, tsc: {{[0-9]+}} }
 
-// TRACE-DAG: - { type: 0, func-id: [[FIDARG:[0-9]+]], function: 'fArg(int)', args: [ 1 ], cpu: {{.*}}, thread: [[THREAD2]], kind: function-enter-arg, tsc: {{[0-9]+}} }
-// TRACE-DAG: - { type: 0, func-id: [[FIDARG]], function: 'fArg(int)', cpu: {{.*}}, thread: [[THREAD2]], kind: function-exit, tsc: {{[0-9]+}} }
+// TRACE-DAG: - { type: 0, func-id: [[FIDARG:[0-9]+]], function: 'fArg(int)', args: [ 1 ], cpu: {{.*}}, thread: [[THREAD2]], process: [[PROCESS]], kind: function-enter-arg, tsc: {{[0-9]+}} }
+// TRACE-DAG: - { type: 0, func-id: [[FIDARG]], function: 'fArg(int)', cpu: {{.*}}, thread: [[THREAD2]], process: [[PROCESS]], kind: function-exit, tsc: {{[0-9]+}} }
 
 // Assert that when unwriting is enabled with a high threshold time, all the function records are erased. A CPU switch could erroneously fail this test, but
 // is unlikely given the test program.
 // Even with a high threshold, arg1 logging is never unwritten.
 // UNWRITE: header:
 // UNWRITE: records:
-// UNWRITE-NEXT: - { type: 0, func-id: [[FIDARG:[0-9]+]], function: 'fArg(int)', args: [ 1 ], cpu: {{.*}}, thread: [[THREAD2:[0-9]+]], kind: function-enter-arg, tsc: {{[0-9]+}} }
-// UNWRITE-NEXT: - { type: 0, func-id: [[FIDARG]], function: 'fArg(int)', cpu: {{.*}}, thread: [[THREAD2]], kind: function-exit, tsc: {{[0-9]+}} }
+// UNWRITE-NEXT: - { type: 0, func-id: [[FIDARG:[0-9]+]], function: 'fArg(int)', args: [ 1 ], cpu: {{.*}}, thread: [[THREAD2:[0-9]+]], process: [[PROCESS:[0-9]+]], kind: function-enter-arg, tsc: {{[0-9]+}} }
+// UNWRITE-NEXT: - { type: 0, func-id: [[FIDARG]], function: 'fArg(int)', cpu: {{.*}}, thread: [[THREAD2]], process: [[PROCESS]], kind: function-exit, tsc: {{[0-9]+}} }
 // UNWRITE-NOT: function-enter
 // UNWRITE-NOT: function-{{exit|tail-exit}}

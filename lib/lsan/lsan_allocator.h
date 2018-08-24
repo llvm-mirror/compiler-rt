@@ -92,12 +92,14 @@ AllocatorCache *GetAllocatorCache();
 
 int lsan_posix_memalign(void **memptr, uptr alignment, uptr size,
                         const StackTrace &stack);
+void *lsan_aligned_alloc(uptr alignment, uptr size, const StackTrace &stack);
 void *lsan_memalign(uptr alignment, uptr size, const StackTrace &stack);
 void *lsan_malloc(uptr size, const StackTrace &stack);
 void lsan_free(void *p);
 void *lsan_realloc(void *p, uptr size, const StackTrace &stack);
 void *lsan_calloc(uptr nmemb, uptr size, const StackTrace &stack);
 void *lsan_valloc(uptr size, const StackTrace &stack);
+void *lsan_pvalloc(uptr size, const StackTrace &stack);
 uptr lsan_mz_size(const void *p);
 
 }  // namespace __lsan

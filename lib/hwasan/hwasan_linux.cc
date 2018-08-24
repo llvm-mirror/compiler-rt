@@ -20,6 +20,7 @@
 #include "hwasan_dynamic_shadow.h"
 #include "hwasan_interface_internal.h"
 #include "hwasan_mapping.h"
+#include "hwasan_report.h"
 #include "hwasan_thread.h"
 
 #include <elf.h>
@@ -43,16 +44,13 @@ static void ReserveShadowMemoryRange(uptr beg, uptr end, const char *name) {
   CHECK_EQ(((end + 1) % GetMmapGranularity()), 0);
   uptr size = end - beg + 1;
   DecreaseTotalMmap(size);  // Don't count the shadow against mmap_limit_mb.
-  void *res = MmapFixedNoReserve(beg, size, name);
-  if (res != (void *)beg) {
+  if (!MmapFixedNoReserve(beg, size, name)) {
     Report(
         "ReserveShadowMemoryRange failed while trying to map 0x%zx bytes. "
         "Perhaps you're using ulimit -v\n",
         size);
     Abort();
   }
-  if (common_flags()->no_huge_pages_for_shadow) NoHugePagesInRegion(beg, size);
-  if (common_flags()->use_madv_dontdump) DontDumpShadowMemory(beg, size);
 }
 
 static void ProtectGap(uptr addr, uptr size) {
@@ -219,6 +217,19 @@ bool InitShadow() {
   return true;
 }
 
+static void MadviseShadowRegion(uptr beg, uptr end) {
+  uptr size = end - beg + 1;
+  if (common_flags()->no_huge_pages_for_shadow)
+    NoHugePagesInRegion(beg, size);
+  if (common_flags()->use_madv_dontdump)
+    DontDumpShadowMemory(beg, size);
+}
+
+void MadviseShadow() {
+  MadviseShadowRegion(kLowShadowStart, kLowShadowEnd);
+  MadviseShadowRegion(kHighShadowStart, kHighShadowEnd);
+}
+
 bool MemIsApp(uptr p) {
   CHECK(GetTagFromPointer(p) == 0);
   return p >= kHighMemStart || (p >= kLowMemStart && p <= kLowMemEnd);
@@ -336,7 +347,7 @@ static bool HwasanOnSIGTRAP(int signo, siginfo_t *info, ucontext_t *uc) {
   if (!ai.is_store && !ai.is_load)
     return false;
 
-  InternalScopedBuffer<BufferedStackTrace> stack_buffer(1);
+  InternalMmapVector<BufferedStackTrace> stack_buffer(1);
   BufferedStackTrace *stack = stack_buffer.data();
   stack->Reset();
   SignalContext sig{info, uc};

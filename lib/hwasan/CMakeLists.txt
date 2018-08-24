@@ -15,6 +15,18 @@ set(HWASAN_RTL_SOURCES
 set(HWASAN_RTL_CXX_SOURCES
   hwasan_new_delete.cc)
 
+set(HWASAN_RTL_HEADERS
+  hwasan.h
+  hwasan_allocator.h
+  hwasan_dynamic_shadow.h
+  hwasan_flags.h
+  hwasan_flags.inc
+  hwasan_interface_internal.h
+  hwasan_mapping.h
+  hwasan_poisoning.h
+  hwasan_report.h
+  hwasan_thread.h)
+
 
 set(HWASAN_RTL_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 append_rtti_flag(OFF HWASAN_RTL_CFLAGS)
@@ -23,20 +35,6 @@ append_list_if(COMPILER_RT_HAS_FPIC_FLAG -fPIC HWASAN_RTL_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FFREESTANDING_FLAG -ffreestanding HWASAN_RTL_CFLAGS)
 
 set(HWASAN_DYNAMIC_LINK_FLAGS ${SANITIZER_COMMON_LINK_FLAGS})
-
-if(ANDROID)
-# On Android, -z global does not do what it is documented to do.
-# On Android, -z global moves the library ahead in the lookup order,
-# placing it right after the LD_PRELOADs. This is used to compensate for the fact
-# that Android linker does not look at the dependencies of the main executable
-# that aren't dependencies of the current DSO when resolving symbols from said DSO.
-# As a net result, this allows running ASan executables without LD_PRELOAD-ing the
-# ASan runtime library.
-# The above is applicable to L MR1 or newer.
-  if (COMPILER_RT_HAS_Z_GLOBAL)
-    list(APPEND HWASAN_DYNAMIC_LINK_FLAGS -Wl,-z,global)
-  endif()
-endif()
 
 set(HWASAN_DYNAMIC_CFLAGS ${HWASAN_RTL_CFLAGS})
 append_list_if(COMPILER_RT_HAS_FTLS_MODEL_INITIAL_EXEC
@@ -49,20 +47,24 @@ append_list_if(COMPILER_RT_HAS_LIBDL dl HWASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBRT rt HWASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBM m HWASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBPTHREAD pthread HWASAN_DYNAMIC_LIBS)
-append_list_if(COMPILER_RT_HAS_LIBLOG log HWASAN_DYNAMIC_LIBS)
 
 # Static runtime library.
 add_compiler_rt_component(hwasan)
 
 add_compiler_rt_object_libraries(RTHwasan
   ARCHS ${HWASAN_SUPPORTED_ARCH}
-  SOURCES ${HWASAN_RTL_SOURCES} CFLAGS ${HWASAN_RTL_CFLAGS})
+  SOURCES ${HWASAN_RTL_SOURCES}
+  ADDITIONAL_HEADERS ${HWASAN_RTL_HEADERS}
+  CFLAGS ${HWASAN_RTL_CFLAGS})
 add_compiler_rt_object_libraries(RTHwasan_cxx
   ARCHS ${HWASAN_SUPPORTED_ARCH}
-  SOURCES ${HWASAN_RTL_CXX_SOURCES} CFLAGS ${HWASAN_RTL_CFLAGS})
+  SOURCES ${HWASAN_RTL_CXX_SOURCES}
+  ADDITIONAL_HEADERS ${HWASAN_RTL_HEADERS}
+  CFLAGS ${HWASAN_RTL_CFLAGS})
 add_compiler_rt_object_libraries(RTHwasan_dynamic
   ARCHS ${HWASAN_SUPPORTED_ARCH}
-  SOURCES ${HWASAN_RTL_SOURCES} ${TSAN_RTL_CXX_SOURCES}
+  SOURCES ${HWASAN_RTL_SOURCES} ${HWASAN_RTL_CXX_SOURCES}
+  ADDITIONAL_HEADERS ${HWASAN_RTL_HEADERS}
   CFLAGS ${HWASAN_DYNAMIC_CFLAGS})
 
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/dummy.cc "")
@@ -131,7 +133,7 @@ foreach(arch ${HWASAN_SUPPORTED_ARCH})
     DEFS ${ASAN_DYNAMIC_DEFINITIONS}
     PARENT_TARGET hwasan)
 
-  if(UNIX)
+  if(SANITIZER_USE_SYMBOLS)
     add_sanitizer_rt_symbols(clang_rt.hwasan
       ARCHS ${arch}
       EXTRA hwasan.syms.extra)

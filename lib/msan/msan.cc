@@ -15,6 +15,7 @@
 #include "msan.h"
 #include "msan_chained_origin_depot.h"
 #include "msan_origin.h"
+#include "msan_report.h"
 #include "msan_thread.h"
 #include "msan_poisoning.h"
 #include "sanitizer_common/sanitizer_atomic.h"
@@ -394,9 +395,9 @@ void __msan_init() {
   SanitizerToolName = "MemorySanitizer";
 
   AvoidCVE_2016_2143();
-  InitTlsSize();
 
   CacheBinaryName();
+  CheckASLR();
   InitializeFlags();
 
   // Install tool-specific callbacks in sanitizer_common.
@@ -405,6 +406,7 @@ void __msan_init() {
   __sanitizer_set_report_path(common_flags()->log_path);
 
   InitializeInterceptors();
+  InitTlsSize();
   InstallDeadlySignalHandlers(MsanOnDeadlySignal);
   InstallAtExitHandler(); // Needs __cxa_atexit interceptor.
 

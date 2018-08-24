@@ -66,14 +66,10 @@ namespace LargeChunk {
   }
 }  // namespace LargeChunk
 
-class ScudoLargeMmapAllocator {
+class LargeMmapAllocator {
  public:
   void Init() {
-    NumberOfAllocs = 0;
-    NumberOfFrees = 0;
-    AllocatedBytes = 0;
-    FreedBytes = 0;
-    LargestSize = 0;
+    internal_memset(this, 0, sizeof(*this));
   }
 
   void *Allocate(AllocatorStats *Stats, uptr Size, uptr Alignment) {
@@ -91,7 +87,7 @@ class ScudoLargeMmapAllocator {
     ReservedAddressRange AddressRange;
     uptr ReservedBeg = AddressRange.Init(ReservedSize, SecondaryAllocatorName);
     if (UNLIKELY(ReservedBeg == ~static_cast<uptr>(0)))
-      return ReturnNullOrDieOnFailure::OnOOM();
+      return nullptr;
     // A page-aligned pointer is assumed after that, so check it now.
     DCHECK(IsAligned(ReservedBeg, PageSize));
     uptr ReservedEnd = ReservedBeg + ReservedSize;
@@ -186,7 +182,7 @@ class ScudoLargeMmapAllocator {
   static constexpr uptr HeadersSize =
       LargeChunk::getHeaderSize() + Chunk::getHeaderSize();
 
-  SpinMutex StatsMutex;
+  StaticSpinMutex StatsMutex;
   u32 NumberOfAllocs;
   u32 NumberOfFrees;
   uptr AllocatedBytes;

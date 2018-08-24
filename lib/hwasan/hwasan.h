@@ -1,4 +1,4 @@
-//===-- hwasan.h --------------------------------------------------*- C++ -*-===//
+//===-- hwasan.h ------------------------------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -61,6 +61,7 @@ extern int hwasan_report_count;
 
 bool ProtectRange(uptr beg, uptr end);
 bool InitShadow();
+void MadviseShadow();
 char *GetProcSelfMaps();
 void InitializeInterceptors();
 
@@ -96,15 +97,6 @@ void PrintWarning(uptr pc, uptr bp);
 
 void GetStackTrace(BufferedStackTrace *stack, uptr max_s, uptr pc, uptr bp,
                    void *context, bool request_fast_unwind);
-
-void ReportInvalidAccess(StackTrace *stack, u32 origin);
-void ReportTagMismatch(StackTrace *stack, uptr addr, uptr access_size,
-                       bool is_store);
-void ReportStats();
-void ReportAtExitStatistics();
-void DescribeMemoryRange(const void *x, uptr size);
-void ReportInvalidAccessInsideAddressRange(const char *what, const void *start, uptr size,
-                                 uptr offset);
 
 // Returns a "chained" origin id, pointing to the given stack trace followed by
 // the previous origin id.

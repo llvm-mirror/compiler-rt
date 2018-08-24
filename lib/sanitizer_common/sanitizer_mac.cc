@@ -102,9 +102,15 @@ extern "C" void *__mmap(void *addr, size_t len, int prot, int flags, int fildes,
 extern "C" int __munmap(void *, size_t) SANITIZER_WEAK_ATTRIBUTE;
 
 // ---------------------- sanitizer_libc.h
+
+// From <mach/vm_statistics.h>, but not on older OSs.
+#ifndef VM_MEMORY_SANITIZER
+#define VM_MEMORY_SANITIZER 99
+#endif
+
 uptr internal_mmap(void *addr, size_t length, int prot, int flags,
                    int fd, u64 offset) {
-  if (fd == -1) fd = VM_MAKE_TAG(VM_MEMORY_ANALYSIS_TOOL);
+  if (fd == -1) fd = VM_MAKE_TAG(VM_MEMORY_SANITIZER);
   if (&__mmap) return (uptr)__mmap(addr, length, prot, flags, fd, offset);
   return (uptr)mmap(addr, length, prot, flags, fd, offset);
 }
@@ -338,6 +344,10 @@ uptr ReadLongProcessName(/*out*/char *buf, uptr buf_len) {
 
 void ReExec() {
   UNIMPLEMENTED();
+}
+
+void CheckASLR() {
+  // Do nothing
 }
 
 uptr GetPageSize() {
@@ -880,10 +890,10 @@ struct __sanitizer_task_vm_info {
     (sizeof(__sanitizer_task_vm_info) / sizeof(natural_t)))
 
 uptr GetTaskInfoMaxAddress() {
-  __sanitizer_task_vm_info vm_info = {};
+  __sanitizer_task_vm_info vm_info = {} /* zero initialize */;
   mach_msg_type_number_t count = __SANITIZER_TASK_VM_INFO_COUNT;
   int err = task_info(mach_task_self(), TASK_VM_INFO, (int *)&vm_info, &count);
-  if (err == 0) {
+  if (err == 0 && vm_info.max_address != 0) {
     return vm_info.max_address - 1;
   } else {
     // xnu cannot provide vm address limit
@@ -1032,9 +1042,10 @@ void FormatUUID(char *out, uptr size, const u8 *uuid) {
 void PrintModuleMap() {
   Printf("Process module map:\n");
   MemoryMappingLayout memory_mapping(false);
-  InternalMmapVector<LoadedModule> modules(/*initial_capacity*/ 128);
+  InternalMmapVector<LoadedModule> modules;
+  modules.reserve(128);
   memory_mapping.DumpListOfModules(&modules);
-  InternalSort(&modules, modules.size(), CompareBaseAddress);
+  Sort(modules.data(), modules.size(), CompareBaseAddress);
   for (uptr i = 0; i < modules.size(); ++i) {
     char uuid_str[128];
     FormatUUID(uuid_str, sizeof(uuid_str), modules[i].uuid());

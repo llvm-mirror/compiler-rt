@@ -87,7 +87,7 @@ TEST(FDRLoggingTest, Simple) {
 
   XRayFileHeader H;
   memcpy(&H, Contents, sizeof(XRayFileHeader));
-  ASSERT_EQ(H.Version, 2);
+  ASSERT_EQ(H.Version, 3);
   ASSERT_EQ(H.Type, FileTypes::FDR_LOG);
 
   // We require one buffer at least to have the "extents" metadata record,
@@ -132,7 +132,7 @@ TEST(FDRLoggingTest, Multiple) {
 
   XRayFileHeader H;
   memcpy(&H, Contents, sizeof(XRayFileHeader));
-  ASSERT_EQ(H.Version, 2);
+  ASSERT_EQ(H.Version, 3);
   ASSERT_EQ(H.Type, FileTypes::FDR_LOG);
 
   MetadataRecord MDR0, MDR1;
@@ -160,7 +160,7 @@ TEST(FDRLoggingTest, MultiThreadedCycling) {
     std::thread t{[I, &Threads] {
       fdrLoggingHandleArg0(I + 1, XRayEntryType::ENTRY);
       fdrLoggingHandleArg0(I + 1, XRayEntryType::EXIT);
-      Threads[I] = __sanitizer::GetTid();
+      Threads[I] = GetTid();
     }};
     t.join();
   }
@@ -183,7 +183,7 @@ TEST(FDRLoggingTest, MultiThreadedCycling) {
 
   XRayFileHeader H;
   memcpy(&H, Contents, sizeof(XRayFileHeader));
-  ASSERT_EQ(H.Version, 2);
+  ASSERT_EQ(H.Version, 3);
   ASSERT_EQ(H.Type, FileTypes::FDR_LOG);
 
   MetadataRecord MDR0, MDR1;

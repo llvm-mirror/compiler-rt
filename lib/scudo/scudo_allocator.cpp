@@ -16,6 +16,7 @@
 
 #include "scudo_allocator.h"
 #include "scudo_crc32.h"
+#include "scudo_errors.h"
 #include "scudo_flags.h"
 #include "scudo_interface_internal.h"
 #include "scudo_tsd.h"
@@ -61,7 +62,7 @@ INLINE u32 computeCRC32(u32 Crc, uptr Value, uptr *Array, uptr ArraySize) {
 #endif  // defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
 }
 
-static ScudoBackendAllocator &getBackendAllocator();
+static BackendT &getBackend();
 
 namespace Chunk {
   static INLINE AtomicPackedHeader *getAtomicHeader(void *Ptr) {
@@ -91,9 +92,9 @@ namespace Chunk {
   static INLINE uptr getUsableSize(const void *Ptr, UnpackedHeader *Header) {
     const uptr ClassId = Header->ClassId;
     if (ClassId)
-      return PrimaryAllocator::ClassIdToSize(ClassId) - getHeaderSize() -
+      return PrimaryT::ClassIdToSize(ClassId) - getHeaderSize() -
           (Header->Offset << MinAlignmentLog);
-    return SecondaryAllocator::GetActuallyAllocatedSize(
+    return SecondaryT::GetActuallyAllocatedSize(
         getBackendPtr(Ptr, Header)) - getHeaderSize();
   }
 
@@ -102,7 +103,7 @@ namespace Chunk {
     const uptr SizeOrUnusedBytes = Header->SizeOrUnusedBytes;
     if (Header->ClassId)
       return SizeOrUnusedBytes;
-    return SecondaryAllocator::GetActuallyAllocatedSize(
+    return SecondaryT::GetActuallyAllocatedSize(
         getBackendPtr(Ptr, Header)) - getHeaderSize() - SizeOrUnusedBytes;
   }
 
@@ -174,7 +175,7 @@ namespace Chunk {
 }  // namespace Chunk
 
 struct QuarantineCallback {
-  explicit QuarantineCallback(AllocatorCache *Cache)
+  explicit QuarantineCallback(AllocatorCacheT *Cache)
     : Cache_(Cache) {}
 
   // Chunk recycling function, returns a quarantined chunk to the backend,
@@ -187,46 +188,43 @@ struct QuarantineCallback {
     Chunk::eraseHeader(Ptr);
     void *BackendPtr = Chunk::getBackendPtr(Ptr, &Header);
     if (Header.ClassId)
-      getBackendAllocator().deallocatePrimary(Cache_, BackendPtr,
-                                              Header.ClassId);
+      getBackend().deallocatePrimary(Cache_, BackendPtr, Header.ClassId);
     else
-      getBackendAllocator().deallocateSecondary(BackendPtr);
+      getBackend().deallocateSecondary(BackendPtr);
   }
 
   // Internal quarantine allocation and deallocation functions. We first check
   // that the batches are indeed serviced by the Primary.
   // TODO(kostyak): figure out the best way to protect the batches.
   void *Allocate(uptr Size) {
-    return getBackendAllocator().allocatePrimary(Cache_, BatchClassId);
+    const uptr BatchClassId = SizeClassMap::ClassID(sizeof(QuarantineBatch));
+    return getBackend().allocatePrimary(Cache_, BatchClassId);
   }
 
   void Deallocate(void *Ptr) {
-    getBackendAllocator().deallocatePrimary(Cache_, Ptr, BatchClassId);
+    const uptr BatchClassId = SizeClassMap::ClassID(sizeof(QuarantineBatch));
+    getBackend().deallocatePrimary(Cache_, Ptr, BatchClassId);
   }
 
-  AllocatorCache *Cache_;
+  AllocatorCacheT *Cache_;
   COMPILER_CHECK(sizeof(QuarantineBatch) < SizeClassMap::kMaxSize);
-  const uptr BatchClassId = SizeClassMap::ClassID(sizeof(QuarantineBatch));
 };
 
-typedef Quarantine<QuarantineCallback, void> ScudoQuarantine;
-typedef ScudoQuarantine::Cache ScudoQuarantineCache;
-COMPILER_CHECK(sizeof(ScudoQuarantineCache) <=
+typedef Quarantine<QuarantineCallback, void> QuarantineT;
+typedef QuarantineT::Cache QuarantineCacheT;
+COMPILER_CHECK(sizeof(QuarantineCacheT) <=
                sizeof(ScudoTSD::QuarantineCachePlaceHolder));
 
-ScudoQuarantineCache *getQuarantineCache(ScudoTSD *TSD) {
-  return reinterpret_cast<ScudoQuarantineCache *>(
-      TSD->QuarantineCachePlaceHolder);
+QuarantineCacheT *getQuarantineCache(ScudoTSD *TSD) {
+  return reinterpret_cast<QuarantineCacheT *>(TSD->QuarantineCachePlaceHolder);
 }
 
-struct ScudoAllocator {
+struct Allocator {
   static const uptr MaxAllowedMallocSize =
       FIRST_32_SECOND_64(2UL << 30, 1ULL << 40);
 
-  typedef ReturnNullOrDieOnFailure FailureHandler;
-
-  ScudoBackendAllocator BackendAllocator;
-  ScudoQuarantine AllocatorQuarantine;
+  BackendT Backend;
+  QuarantineT Quarantine;
 
   u32 QuarantineChunksUpToSize;
 
@@ -240,41 +238,10 @@ struct ScudoAllocator {
   atomic_uint8_t RssLimitExceeded;
   atomic_uint64_t RssLastCheckedAtNS;
 
-  explicit ScudoAllocator(LinkerInitialized)
-    : AllocatorQuarantine(LINKER_INITIALIZED) {}
+  explicit Allocator(LinkerInitialized)
+    : Quarantine(LINKER_INITIALIZED) {}
 
-  NOINLINE void performSanityChecks() {
-    // Verify that the header offset field can hold the maximum offset. In the
-    // case of the Secondary allocator, it takes care of alignment and the
-    // offset will always be 0. In the case of the Primary, the worst case
-    // scenario happens in the last size class, when the backend allocation
-    // would already be aligned on the requested alignment, which would happen
-    // to be the maximum alignment that would fit in that size class. As a
-    // result, the maximum offset will be at most the maximum alignment for the
-    // last size class minus the header size, in multiples of MinAlignment.
-    UnpackedHeader Header = {};
-    const uptr MaxPrimaryAlignment =
-        1 << MostSignificantSetBitIndex(SizeClassMap::kMaxSize - MinAlignment);
-    const uptr MaxOffset =
-        (MaxPrimaryAlignment - Chunk::getHeaderSize()) >> MinAlignmentLog;
-    Header.Offset = MaxOffset;
-    if (Header.Offset != MaxOffset)
-      dieWithMessage("maximum possible offset doesn't fit in header\n");
-    // Verify that we can fit the maximum size or amount of unused bytes in the
-    // header. Given that the Secondary fits the allocation to a page, the worst
-    // case scenario happens in the Primary. It will depend on the second to
-    // last and last class sizes, as well as the dynamic base for the Primary.
-    // The following is an over-approximation that works for our needs.
-    const uptr MaxSizeOrUnusedBytes = SizeClassMap::kMaxSize - 1;
-    Header.SizeOrUnusedBytes = MaxSizeOrUnusedBytes;
-    if (Header.SizeOrUnusedBytes != MaxSizeOrUnusedBytes)
-      dieWithMessage("maximum possible unused bytes doesn't fit in header\n");
-
-    const uptr LargestClassId = SizeClassMap::kLargestClassID;
-    Header.ClassId = LargestClassId;
-    if (Header.ClassId != LargestClassId)
-      dieWithMessage("largest class ID doesn't fit in header\n");
-  }
+  NOINLINE void performSanityChecks();
 
   void init() {
     SanitizerToolName = "Scudo";
@@ -291,13 +258,14 @@ struct ScudoAllocator {
       atomic_store_relaxed(&HashAlgorithm, CRC32Hardware);
 
     SetAllocatorMayReturnNull(common_flags()->allocator_may_return_null);
-    BackendAllocator.init(common_flags()->allocator_release_to_os_interval_ms);
+    Backend.init(common_flags()->allocator_release_to_os_interval_ms);
     HardRssLimitMb = common_flags()->hard_rss_limit_mb;
     SoftRssLimitMb = common_flags()->soft_rss_limit_mb;
-    AllocatorQuarantine.Init(
+    Quarantine.Init(
         static_cast<uptr>(getFlags()->QuarantineSizeKb) << 10,
         static_cast<uptr>(getFlags()->ThreadLocalQuarantineSizeKb) << 10);
-    QuarantineChunksUpToSize = getFlags()->QuarantineChunksUpToSize;
+    QuarantineChunksUpToSize = (Quarantine.GetCacheSize() == 0) ? 0 :
+        getFlags()->QuarantineChunksUpToSize;
     DeallocationTypeMismatch = getFlags()->DeallocationTypeMismatch;
     DeleteSizeMismatch = getFlags()->DeleteSizeMismatch;
     ZeroContents = getFlags()->ZeroContents;
@@ -323,60 +291,36 @@ struct ScudoAllocator {
     return Chunk::isValid(Ptr);
   }
 
-  // Opportunistic RSS limit check. This will update the RSS limit status, if
-  // it can, every 100ms, otherwise it will just return the current one.
-  bool isRssLimitExceeded() {
-    u64 LastCheck = atomic_load_relaxed(&RssLastCheckedAtNS);
-    const u64 CurrentCheck = MonotonicNanoTime();
-    if (LIKELY(CurrentCheck < LastCheck + (100ULL * 1000000ULL)))
-      return atomic_load_relaxed(&RssLimitExceeded);
-    if (!atomic_compare_exchange_weak(&RssLastCheckedAtNS, &LastCheck,
-                                      CurrentCheck, memory_order_relaxed))
-      return atomic_load_relaxed(&RssLimitExceeded);
-    // TODO(kostyak): We currently use sanitizer_common's GetRSS which reads the
-    //                RSS from /proc/self/statm by default. We might want to
-    //                call getrusage directly, even if it's less accurate.
-    const uptr CurrentRssMb = GetRSS() >> 20;
-    if (HardRssLimitMb && UNLIKELY(HardRssLimitMb < CurrentRssMb))
-      dieWithMessage("hard RSS limit exhausted (%zdMb vs %zdMb)\n",
-                     HardRssLimitMb, CurrentRssMb);
-    if (SoftRssLimitMb) {
-      if (atomic_load_relaxed(&RssLimitExceeded)) {
-        if (CurrentRssMb <= SoftRssLimitMb)
-          atomic_store_relaxed(&RssLimitExceeded, false);
-      } else {
-        if (CurrentRssMb > SoftRssLimitMb) {
-          atomic_store_relaxed(&RssLimitExceeded, true);
-          Printf("Scudo INFO: soft RSS limit exhausted (%zdMb vs %zdMb)\n",
-                 SoftRssLimitMb, CurrentRssMb);
-        }
-      }
-    }
-    return atomic_load_relaxed(&RssLimitExceeded);
-  }
+  NOINLINE bool isRssLimitExceeded();
 
   // Allocates a chunk.
   void *allocate(uptr Size, uptr Alignment, AllocType Type,
                  bool ForceZeroContents = false) {
     initThreadMaybe();
-    if (UNLIKELY(Alignment > MaxAlignment))
-      return FailureHandler::OnBadRequest();
+    if (UNLIKELY(Alignment > MaxAlignment)) {
+      if (AllocatorMayReturnNull())
+        return nullptr;
+      reportAllocationAlignmentTooBig(Alignment, MaxAlignment);
+    }
     if (UNLIKELY(Alignment < MinAlignment))
       Alignment = MinAlignment;
-    if (UNLIKELY(Size >= MaxAllowedMallocSize))
-      return FailureHandler::OnBadRequest();
-    if (UNLIKELY(Size == 0))
-      Size = 1;
 
-    const uptr NeededSize = RoundUpTo(Size, MinAlignment) +
+    const uptr NeededSize = RoundUpTo(Size ? Size : 1, MinAlignment) +
         Chunk::getHeaderSize();
     const uptr AlignedSize = (Alignment > MinAlignment) ?
         NeededSize + (Alignment - Chunk::getHeaderSize()) : NeededSize;
-    if (UNLIKELY(AlignedSize >= MaxAllowedMallocSize))
-      return FailureHandler::OnBadRequest();
+    if (UNLIKELY(Size >= MaxAllowedMallocSize) ||
+        UNLIKELY(AlignedSize >= MaxAllowedMallocSize)) {
+      if (AllocatorMayReturnNull())
+        return nullptr;
+      reportAllocationSizeTooBig(Size, AlignedSize, MaxAllowedMallocSize);
+    }
 
-    if (CheckRssLimit && UNLIKELY(isRssLimitExceeded()))
-      return FailureHandler::OnOOM();
+    if (CheckRssLimit && UNLIKELY(isRssLimitExceeded())) {
+      if (AllocatorMayReturnNull())
+        return nullptr;
+      reportRssLimitExceeded();
+    }
 
     // Primary and Secondary backed allocations have a different treatment. We
     // deal with alignment requirements of Primary serviced allocations here,
@@ -384,23 +328,29 @@ struct ScudoAllocator {
     void *BackendPtr;
     uptr BackendSize;
     u8 ClassId;
-    if (PrimaryAllocator::CanAllocate(AlignedSize, MinAlignment)) {
+    if (PrimaryT::CanAllocate(AlignedSize, MinAlignment)) {
       BackendSize = AlignedSize;
       ClassId = SizeClassMap::ClassID(BackendSize);
-      ScudoTSD *TSD = getTSDAndLock();
-      BackendPtr = BackendAllocator.allocatePrimary(&TSD->Cache, ClassId);
-      TSD->unlock();
+      bool UnlockRequired;
+      ScudoTSD *TSD = getTSDAndLock(&UnlockRequired);
+      BackendPtr = Backend.allocatePrimary(&TSD->Cache, ClassId);
+      if (UnlockRequired)
+        TSD->unlock();
     } else {
       BackendSize = NeededSize;
       ClassId = 0;
-      BackendPtr = BackendAllocator.allocateSecondary(BackendSize, Alignment);
+      BackendPtr = Backend.allocateSecondary(BackendSize, Alignment);
     }
-    if (UNLIKELY(!BackendPtr))
-      return FailureHandler::OnOOM();
+    if (UNLIKELY(!BackendPtr)) {
+      SetAllocatorOutOfMemory();
+      if (AllocatorMayReturnNull())
+        return nullptr;
+      reportOutOfMemory(Size);
+    }
 
     // If requested, we will zero out the entire contents of the returned chunk.
     if ((ForceZeroContents || ZeroContents) && ClassId)
-      memset(BackendPtr, 0, PrimaryAllocator::ClassIdToSize(ClassId));
+      memset(BackendPtr, 0, PrimaryT::ClassIdToSize(ClassId));
 
     UnpackedHeader Header = {};
     uptr UserPtr = reinterpret_cast<uptr>(BackendPtr) + Chunk::getHeaderSize();
@@ -440,18 +390,21 @@ struct ScudoAllocator {
   // quarantine chunk size threshold.
   void quarantineOrDeallocateChunk(void *Ptr, UnpackedHeader *Header,
                                    uptr Size) {
-    const bool BypassQuarantine = (AllocatorQuarantine.GetCacheSize() == 0) ||
-        (Size > QuarantineChunksUpToSize);
+    const bool BypassQuarantine = !Size || (Size > QuarantineChunksUpToSize);
     if (BypassQuarantine) {
-      Chunk::eraseHeader(Ptr);
+      UnpackedHeader NewHeader = *Header;
+      NewHeader.State = ChunkAvailable;
+      Chunk::compareExchangeHeader(Ptr, &NewHeader, Header);
       void *BackendPtr = Chunk::getBackendPtr(Ptr, Header);
       if (Header->ClassId) {
-        ScudoTSD *TSD = getTSDAndLock();
-        getBackendAllocator().deallocatePrimary(&TSD->Cache, BackendPtr,
-                                                Header->ClassId);
-        TSD->unlock();
+        bool UnlockRequired;
+        ScudoTSD *TSD = getTSDAndLock(&UnlockRequired);
+        getBackend().deallocatePrimary(&TSD->Cache, BackendPtr,
+                                       Header->ClassId);
+        if (UnlockRequired)
+          TSD->unlock();
       } else {
-        getBackendAllocator().deallocateSecondary(BackendPtr);
+        getBackend().deallocateSecondary(BackendPtr);
       }
     } else {
       // If a small memory amount was allocated with a larger alignment, we want
@@ -463,17 +416,19 @@ struct ScudoAllocator {
       UnpackedHeader NewHeader = *Header;
       NewHeader.State = ChunkQuarantine;
       Chunk::compareExchangeHeader(Ptr, &NewHeader, Header);
-      ScudoTSD *TSD = getTSDAndLock();
-      AllocatorQuarantine.Put(getQuarantineCache(TSD),
-                              QuarantineCallback(&TSD->Cache), Ptr,
-                              EstimatedSize);
-      TSD->unlock();
+      bool UnlockRequired;
+      ScudoTSD *TSD = getTSDAndLock(&UnlockRequired);
+      Quarantine.Put(getQuarantineCache(TSD), QuarantineCallback(&TSD->Cache),
+                     Ptr, EstimatedSize);
+      if (UnlockRequired)
+        TSD->unlock();
     }
   }
 
   // Deallocates a Chunk, which means either adding it to the quarantine or
   // directly returning it to the backend if criteria are met.
-  void deallocate(void *Ptr, uptr DeleteSize, AllocType Type) {
+  void deallocate(void *Ptr, uptr DeleteSize, uptr DeleteAlignment,
+                  AllocType Type) {
     // For a deallocation, we only ensure minimal initialization, meaning thread
     // local data will be left uninitialized for now (when using ELF TLS). The
     // fallback cache will be used instead. This is a workaround for a situation
@@ -506,6 +461,7 @@ struct ScudoAllocator {
         dieWithMessage("invalid sized delete when deallocating address %p\n",
                        Ptr);
     }
+    (void)DeleteAlignment;  // TODO(kostyak): verify that the alignment matches.
     quarantineOrDeallocateChunk(Ptr, &Header, Size);
   }
 
@@ -564,27 +520,29 @@ struct ScudoAllocator {
 
   void *calloc(uptr NMemB, uptr Size) {
     initThreadMaybe();
-    if (UNLIKELY(CheckForCallocOverflow(NMemB, Size)))
-      return FailureHandler::OnBadRequest();
+    if (UNLIKELY(CheckForCallocOverflow(NMemB, Size))) {
+      if (AllocatorMayReturnNull())
+        return nullptr;
+      reportCallocOverflow(NMemB, Size);
+    }
     return allocate(NMemB * Size, MinAlignment, FromMalloc, true);
   }
 
   void commitBack(ScudoTSD *TSD) {
-    AllocatorQuarantine.Drain(getQuarantineCache(TSD),
-                              QuarantineCallback(&TSD->Cache));
-    BackendAllocator.destroyCache(&TSD->Cache);
+    Quarantine.Drain(getQuarantineCache(TSD), QuarantineCallback(&TSD->Cache));
+    Backend.destroyCache(&TSD->Cache);
   }
 
   uptr getStats(AllocatorStat StatType) {
     initThreadMaybe();
     uptr stats[AllocatorStatCount];
-    BackendAllocator.getStats(stats);
+    Backend.getStats(stats);
     return stats[StatType];
   }
 
-  void *handleBadRequest() {
+  bool canReturnNull() {
     initThreadMaybe();
-    return FailureHandler::OnBadRequest();
+    return AllocatorMayReturnNull();
   }
 
   void setRssLimit(uptr LimitMb, bool HardLimit) {
@@ -594,21 +552,90 @@ struct ScudoAllocator {
       SoftRssLimitMb = LimitMb;
     CheckRssLimit = HardRssLimitMb || SoftRssLimitMb;
   }
+
+  void printStats() {
+    initThreadMaybe();
+    Backend.printStats();
+  }
 };
 
-static ScudoAllocator Instance(LINKER_INITIALIZED);
+NOINLINE void Allocator::performSanityChecks() {
+  // Verify that the header offset field can hold the maximum offset. In the
+  // case of the Secondary allocator, it takes care of alignment and the
+  // offset will always be 0. In the case of the Primary, the worst case
+  // scenario happens in the last size class, when the backend allocation
+  // would already be aligned on the requested alignment, which would happen
+  // to be the maximum alignment that would fit in that size class. As a
+  // result, the maximum offset will be at most the maximum alignment for the
+  // last size class minus the header size, in multiples of MinAlignment.
+  UnpackedHeader Header = {};
+  const uptr MaxPrimaryAlignment =
+      1 << MostSignificantSetBitIndex(SizeClassMap::kMaxSize - MinAlignment);
+  const uptr MaxOffset =
+      (MaxPrimaryAlignment - Chunk::getHeaderSize()) >> MinAlignmentLog;
+  Header.Offset = MaxOffset;
+  if (Header.Offset != MaxOffset)
+    dieWithMessage("maximum possible offset doesn't fit in header\n");
+  // Verify that we can fit the maximum size or amount of unused bytes in the
+  // header. Given that the Secondary fits the allocation to a page, the worst
+  // case scenario happens in the Primary. It will depend on the second to
+  // last and last class sizes, as well as the dynamic base for the Primary.
+  // The following is an over-approximation that works for our needs.
+  const uptr MaxSizeOrUnusedBytes = SizeClassMap::kMaxSize - 1;
+  Header.SizeOrUnusedBytes = MaxSizeOrUnusedBytes;
+  if (Header.SizeOrUnusedBytes != MaxSizeOrUnusedBytes)
+    dieWithMessage("maximum possible unused bytes doesn't fit in header\n");
 
-static ScudoBackendAllocator &getBackendAllocator() {
-  return Instance.BackendAllocator;
+  const uptr LargestClassId = SizeClassMap::kLargestClassID;
+  Header.ClassId = LargestClassId;
+  if (Header.ClassId != LargestClassId)
+    dieWithMessage("largest class ID doesn't fit in header\n");
+}
+
+// Opportunistic RSS limit check. This will update the RSS limit status, if
+// it can, every 100ms, otherwise it will just return the current one.
+NOINLINE bool Allocator::isRssLimitExceeded() {
+  u64 LastCheck = atomic_load_relaxed(&RssLastCheckedAtNS);
+  const u64 CurrentCheck = MonotonicNanoTime();
+  if (LIKELY(CurrentCheck < LastCheck + (100ULL * 1000000ULL)))
+    return atomic_load_relaxed(&RssLimitExceeded);
+  if (!atomic_compare_exchange_weak(&RssLastCheckedAtNS, &LastCheck,
+                                    CurrentCheck, memory_order_relaxed))
+    return atomic_load_relaxed(&RssLimitExceeded);
+  // TODO(kostyak): We currently use sanitizer_common's GetRSS which reads the
+  //                RSS from /proc/self/statm by default. We might want to
+  //                call getrusage directly, even if it's less accurate.
+  const uptr CurrentRssMb = GetRSS() >> 20;
+  if (HardRssLimitMb && UNLIKELY(HardRssLimitMb < CurrentRssMb))
+    dieWithMessage("hard RSS limit exhausted (%zdMb vs %zdMb)\n",
+                   HardRssLimitMb, CurrentRssMb);
+  if (SoftRssLimitMb) {
+    if (atomic_load_relaxed(&RssLimitExceeded)) {
+      if (CurrentRssMb <= SoftRssLimitMb)
+        atomic_store_relaxed(&RssLimitExceeded, false);
+    } else {
+      if (CurrentRssMb > SoftRssLimitMb) {
+        atomic_store_relaxed(&RssLimitExceeded, true);
+        Printf("Scudo INFO: soft RSS limit exhausted (%zdMb vs %zdMb)\n",
+               SoftRssLimitMb, CurrentRssMb);
+      }
+    }
+  }
+  return atomic_load_relaxed(&RssLimitExceeded);
+}
+
+static Allocator Instance(LINKER_INITIALIZED);
+
+static BackendT &getBackend() {
+  return Instance.Backend;
 }
 
 void initScudo() {
   Instance.init();
 }
 
-void ScudoTSD::init(bool Shared) {
-  UnlockRequired = Shared;
-  getBackendAllocator().initCache(&Cache);
+void ScudoTSD::init() {
+  getBackend().initCache(&Cache);
   memset(QuarantineCachePlaceHolder, 0, sizeof(QuarantineCachePlaceHolder));
 }
 
@@ -616,23 +643,25 @@ void ScudoTSD::commitBack() {
   Instance.commitBack(this);
 }
 
-void *scudoMalloc(uptr Size, AllocType Type) {
-  return SetErrnoOnNull(Instance.allocate(Size, MinAlignment, Type));
+void *scudoAllocate(uptr Size, uptr Alignment, AllocType Type) {
+  if (Alignment && UNLIKELY(!IsPowerOfTwo(Alignment))) {
+    errno = EINVAL;
+    if (Instance.canReturnNull())
+      return nullptr;
+    reportAllocationAlignmentNotPowerOfTwo(Alignment);
+  }
+  return SetErrnoOnNull(Instance.allocate(Size, Alignment, Type));
 }
 
-void scudoFree(void *Ptr, AllocType Type) {
-  Instance.deallocate(Ptr, 0, Type);
-}
-
-void scudoSizedFree(void *Ptr, uptr Size, AllocType Type) {
-  Instance.deallocate(Ptr, Size, Type);
+void scudoDeallocate(void *Ptr, uptr Size, uptr Alignment, AllocType Type) {
+  Instance.deallocate(Ptr, Size, Alignment, Type);
 }
 
 void *scudoRealloc(void *Ptr, uptr Size) {
   if (!Ptr)
     return SetErrnoOnNull(Instance.allocate(Size, MinAlignment, FromMalloc));
   if (Size == 0) {
-    Instance.deallocate(Ptr, 0, FromMalloc);
+    Instance.deallocate(Ptr, 0, 0, FromMalloc);
     return nullptr;
   }
   return SetErrnoOnNull(Instance.reallocate(Ptr, Size));
@@ -648,27 +677,22 @@ void *scudoValloc(uptr Size) {
 }
 
 void *scudoPvalloc(uptr Size) {
-  uptr PageSize = GetPageSizeCached();
+  const uptr PageSize = GetPageSizeCached();
   if (UNLIKELY(CheckForPvallocOverflow(Size, PageSize))) {
     errno = ENOMEM;
-    return Instance.handleBadRequest();
+    if (Instance.canReturnNull())
+      return nullptr;
+    reportPvallocOverflow(Size);
   }
   // pvalloc(0) should allocate one page.
   Size = Size ? RoundUpTo(Size, PageSize) : PageSize;
   return SetErrnoOnNull(Instance.allocate(Size, PageSize, FromMemalign));
 }
 
-void *scudoMemalign(uptr Alignment, uptr Size) {
-  if (UNLIKELY(!IsPowerOfTwo(Alignment))) {
-    errno = EINVAL;
-    return Instance.handleBadRequest();
-  }
-  return SetErrnoOnNull(Instance.allocate(Size, Alignment, FromMemalign));
-}
-
 int scudoPosixMemalign(void **MemPtr, uptr Alignment, uptr Size) {
   if (UNLIKELY(!CheckPosixMemalignAlignment(Alignment))) {
-    Instance.handleBadRequest();
+    if (!Instance.canReturnNull())
+      reportInvalidPosixMemalignAlignment(Alignment);
     return EINVAL;
   }
   void *Ptr = Instance.allocate(Size, Alignment, FromMemalign);
@@ -681,7 +705,9 @@ int scudoPosixMemalign(void **MemPtr, uptr Alignment, uptr Size) {
 void *scudoAlignedAlloc(uptr Alignment, uptr Size) {
   if (UNLIKELY(!CheckAlignedAllocAlignmentAndSize(Alignment, Size))) {
     errno = EINVAL;
-    return Instance.handleBadRequest();
+    if (Instance.canReturnNull())
+      return nullptr;
+    reportInvalidAlignedAllocAlignment(Size, Alignment);
   }
   return SetErrnoOnNull(Instance.allocate(Size, Alignment, FromMalloc));
 }
@@ -742,4 +768,8 @@ void __scudo_set_rss_limit(uptr LimitMb, s32 HardLimit) {
   if (!SCUDO_CAN_USE_PUBLIC_INTERFACE)
     return;
   Instance.setRssLimit(LimitMb, !!HardLimit);
+}
+
+void __scudo_print_stats() {
+  Instance.printStats();
 }

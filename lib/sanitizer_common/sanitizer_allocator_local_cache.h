@@ -260,10 +260,12 @@ struct SizeClassAllocator32LocalCache {
         class_id, allocator, (TransferBatch *)c->batch[first_idx_to_drain]);
     // Failure to allocate a batch while releasing memory is non recoverable.
     // TODO(alekseys): Figure out how to do it without allocating a new batch.
-    if (UNLIKELY(!b))
-      DieOnFailure::OnOOM();
-    b->SetFromArray(allocator->GetRegionBeginBySizeClass(class_id),
-                    &c->batch[first_idx_to_drain], count);
+    if (UNLIKELY(!b)) {
+      Report("FATAL: Internal error: %s's allocator failed to allocate a "
+             "transfer batch.\n", SanitizerToolName);
+      Die();
+    }
+    b->SetFromArray(&c->batch[first_idx_to_drain], count);
     c->count -= count;
     allocator->DeallocateBatch(&stats_, class_id, b);
   }

@@ -3,11 +3,17 @@ include_directories(..)
 add_custom_target(XRayUnitTests)
 set_target_properties(XRayUnitTests PROPERTIES FOLDER "XRay unittests")
 
-# Create an XRAY_IMPL_FILES variable which will include all the implementation
-# files that are in the lib directory. Unfortunately, when new files are added
-# to the implementation, CMake must be run so that this variable is
-# re-generated.
-file(GLOB XRAY_IMPL_FILES "../*.cc" "../*.h")
+# Sanity check XRAY_ALL_SOURCE_FILES_ABS_PATHS
+list(LENGTH XRAY_ALL_SOURCE_FILES_ABS_PATHS XASFAP_LENGTH)
+if (${XASFAP_LENGTH} EQUAL 0)
+  message(FATAL_ERROR "XRAY_ALL_SOURCE_FILES_ABS_PATHS cannot be empty")
+endif()
+unset(XASFAP_LENGTH)
+foreach (src_file ${XRAY_ALL_SOURCE_FILES_ABS_PATHS})
+  if (NOT EXISTS "${src_file}")
+    message(FATAL_ERROR "Source file \"${src_file}\" does not exist")
+  endif()
+endforeach()
 
 set(XRAY_UNITTEST_CFLAGS
   ${XRAY_CFLAGS}
@@ -34,7 +40,11 @@ function(get_xray_lib_for_arch arch lib)
 endfunction()
 
 set(XRAY_TEST_ARCH ${XRAY_SUPPORTED_ARCH})
-set(XRAY_UNITTEST_LINK_FLAGS ${CMAKE_THREAD_LIBS_INIT})
+set(XRAY_UNITTEST_LINK_FLAGS
+  ${CMAKE_THREAD_LIBS_INIT}
+	-l${SANITIZER_CXX_ABI_LIBRARY}
+  -fxray-instrument
+  )
 if (NOT APPLE)
   append_list_if(COMPILER_RT_HAS_LIBM -lm XRAY_UNITTEST_LINK_FLAGS)
   append_list_if(COMPILER_RT_HAS_LIBRT -lrt XRAY_UNITTEST_LINK_FLAGS)
@@ -56,11 +66,11 @@ macro(add_xray_unittest testname)
         # tests to be re-built. This is by design, but may be cumbersome during
         # the build/test cycle.
         COMPILE_DEPS ${TEST_SOURCES} ${COMPILER_RT_GTEST_SOURCE}
-        ${XRAY_HEADERS} ${XRAY_IMPL_FILES}
+        ${XRAY_HEADERS} ${XRAY_ALL_SOURCE_FILES_ABS_PATHS}
         RUNTIME "${XRAY_RUNTIME_LIBS}"
-        DEPS gtest xray
+        DEPS gtest xray llvm-xray
         CFLAGS ${XRAY_UNITTEST_CFLAGS}
-        LINK_FLAGS ${TARGET_LINK_FLAGS} ${XRAY_UNITTEST_LINK_FLAGS} -lstdc++)
+        LINK_FLAGS ${TARGET_LINK_FLAGS} ${XRAY_UNITTEST_LINK_FLAGS})
       set_target_properties(XRayUnitTests
         PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     endforeach()
@@ -72,6 +82,7 @@ if(COMPILER_RT_CAN_EXECUTE_TESTS)
     add_xray_lib("RTXRay.test.osx"
       $<TARGET_OBJECTS:RTXray.osx>
       $<TARGET_OBJECTS:RTXrayFDR.osx>
+      $<TARGET_OBJECTS:RTXrayPROFILING.osx>
       $<TARGET_OBJECTS:RTSanitizerCommon.osx>
       $<TARGET_OBJECTS:RTSanitizerCommonLibc.osx>)
   else()
@@ -79,6 +90,7 @@ if(COMPILER_RT_CAN_EXECUTE_TESTS)
     add_xray_lib("RTXRay.test.${arch}"
       $<TARGET_OBJECTS:RTXray.${arch}>
       $<TARGET_OBJECTS:RTXrayFDR.${arch}>
+      $<TARGET_OBJECTS:RTXrayPROFILING.${arch}>
       $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
       $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>)
   endforeach()

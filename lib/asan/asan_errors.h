@@ -190,6 +190,21 @@ struct ErrorInvalidAllocationAlignment : ErrorBase {
   void Print();
 };
 
+struct ErrorInvalidAlignedAllocAlignment : ErrorBase {
+  const BufferedStackTrace *stack;
+  uptr size;
+  uptr alignment;
+
+  ErrorInvalidAlignedAllocAlignment() = default;  // (*)
+  ErrorInvalidAlignedAllocAlignment(u32 tid, BufferedStackTrace *stack_,
+                                    uptr size_, uptr alignment_)
+      : ErrorBase(tid, 10, "invalid-aligned-alloc-alignment"),
+        stack(stack_),
+        size(size_),
+        alignment(alignment_) {}
+  void Print();
+};
+
 struct ErrorInvalidPosixMemalignAlignment : ErrorBase {
   const BufferedStackTrace *stack;
   uptr alignment;
@@ -360,6 +375,7 @@ struct ErrorGeneric : ErrorBase {
   macro(CallocOverflow)                         \
   macro(PvallocOverflow)                        \
   macro(InvalidAllocationAlignment)             \
+  macro(InvalidAlignedAllocAlignment)           \
   macro(InvalidPosixMemalignAlignment)          \
   macro(AllocationSizeTooBig)                   \
   macro(RssLimitExceeded)                       \
@@ -398,6 +414,7 @@ struct ErrorDescription {
   };
 
   ErrorDescription() { internal_memset(this, 0, sizeof(*this)); }
+  explicit ErrorDescription(LinkerInitialized) {}
   ASAN_FOR_EACH_ERROR_KIND(ASAN_ERROR_DESCRIPTION_CONSTRUCTOR)
 
   bool IsValid() { return kind != kErrorKindInvalid; }

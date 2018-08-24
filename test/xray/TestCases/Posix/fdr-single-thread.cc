@@ -1,5 +1,5 @@
 // RUN: %clangxx_xray -g -std=c++11 %s -o %t
-// RUN: rm fdr-logging-1thr-* || true
+// RUN: rm -f fdr-logging-1thr-*
 // RUN: XRAY_OPTIONS=XRAY_OPTIONS="verbosity=1 patch_premain=true \
 // RUN:   xray_naive_log=false xray_fdr_log=true \
 // RUN:   xray_fdr_log_func_duration_threshold_us=0 \
@@ -34,5 +34,5 @@ int main(int argc, char *argv[]) {
 }
 
 // CHECK: records:
-// CHECK-NEXT: - { type: 0, func-id: [[FID1:[0-9]+]], function: {{.*fn.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
-// CHECK-NEXT: - { type: 0, func-id: [[FID1:[0-9]+]], function: {{.*fn.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], kind: function-exit, tsc: {{[0-9]+}} }
+// CHECK-NEXT: - { type: 0, func-id: [[FID1:[0-9]+]], function: {{.*fn.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], process: [[PROCESS:[0-9]+]], kind: function-enter, tsc: {{[0-9]+}} }
+// CHECK-NEXT: - { type: 0, func-id: [[FID1:[0-9]+]], function: {{.*fn.*}}, cpu: {{.*}}, thread: [[THREAD1:[0-9]+]], process: [[PROCESS:[0-9]+]], kind: function-exit, tsc: {{[0-9]+}} }

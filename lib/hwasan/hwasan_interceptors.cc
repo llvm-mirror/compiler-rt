@@ -20,6 +20,7 @@
 #include "hwasan_mapping.h"
 #include "hwasan_thread.h"
 #include "hwasan_poisoning.h"
+#include "hwasan_report.h"
 #include "sanitizer_common/sanitizer_platform_limits_posix.h"
 #include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_allocator_interface.h"
@@ -127,6 +128,25 @@ static void *AllocateFromLocalPool(uptr size_in_bytes) {
   CHECK_UNPOISONED((x),                                         \
     common_flags()->strict_string_checks ? (len) + 1 : (n) )
 
+#define SANITIZER_ALIAS(RET, FN, ARGS...)                                \
+  extern "C" SANITIZER_INTERFACE_ATTRIBUTE RET __sanitizer_##FN(ARGS) \
+      ALIAS(WRAPPER_NAME(FN));
+
+SANITIZER_ALIAS(int, posix_memalign, void **memptr, SIZE_T alignment, SIZE_T size);
+SANITIZER_ALIAS(void *, memalign, SIZE_T alignment, SIZE_T size);
+SANITIZER_ALIAS(void *, aligned_alloc, SIZE_T alignment, SIZE_T size);
+SANITIZER_ALIAS(void *, __libc_memalign, SIZE_T alignment, SIZE_T size);
+SANITIZER_ALIAS(void *, valloc, SIZE_T size);
+SANITIZER_ALIAS(void *, pvalloc, SIZE_T size);
+SANITIZER_ALIAS(void, free, void *ptr);
+SANITIZER_ALIAS(void, cfree, void *ptr);
+SANITIZER_ALIAS(uptr, malloc_usable_size, const void *ptr);
+SANITIZER_ALIAS(void, mallinfo, __sanitizer_struct_mallinfo *sret);
+SANITIZER_ALIAS(int, mallopt, int cmd, int value);
+SANITIZER_ALIAS(void, malloc_stats, void);
+SANITIZER_ALIAS(void *, calloc, SIZE_T nmemb, SIZE_T size);
+SANITIZER_ALIAS(void *, realloc, void *ptr, SIZE_T size);
+SANITIZER_ALIAS(void *, malloc, SIZE_T size);
 
 INTERCEPTOR(int, posix_memalign, void **memptr, SIZE_T alignment, SIZE_T size) {
   GET_MALLOC_STACK_TRACE;
@@ -199,11 +219,11 @@ INTERCEPTOR(uptr, malloc_usable_size, void *ptr) {
 // temporary! The following is equivalent on all supported platforms but
 // aarch64 (which uses a different register for sret value).  We have a test
 // to confirm that.
-INTERCEPTOR(void, mallinfo, __sanitizer_mallinfo *sret) {
+INTERCEPTOR(void, mallinfo, __sanitizer_struct_mallinfo *sret) {
 #ifdef __aarch64__
   uptr r8;
   asm volatile("mov %0,x8" : "=r" (r8));
-  sret = reinterpret_cast<__sanitizer_mallinfo*>(r8);
+  sret = reinterpret_cast<__sanitizer_struct_mallinfo*>(r8);
 #endif
   REAL(memset)(sret, 0, sizeof(*sret));
 }
@@ -406,14 +426,27 @@ int OnExit() {
     *begin = *end = 0;                                                         \
   }
 
-#define COMMON_INTERCEPTOR_MEMSET_IMPL(ctx, dst, v, size) \
-  {                                                       \
-    COMMON_INTERCEPTOR_ENTER(ctx, memset, dst, v, size);  \
-    if (common_flags()->intercept_intrin &&               \
-        MEM_IS_APP(GetAddressFromPointer(dst)))           \
-      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, dst, size);     \
-    return REAL(memset)(dst, v, size);                    \
+// AArch64 has TBI and can (and must!) pass the pointer to system memset as-is.
+// Other platforms need to remove the tag.
+#if defined(__aarch64__)
+#define COMMON_INTERCEPTOR_MEMSET_IMPL(ctx, dst, v, size)     \
+  {                                                           \
+    COMMON_INTERCEPTOR_ENTER(ctx, memset, dst, v, size);      \
+    if (common_flags()->intercept_intrin &&                   \
+        MEM_IS_APP(GetAddressFromPointer(dst)))               \
+      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, dst, size);         \
+    return REAL(memset)(dst, v, size); \
   }
+#else
+#define COMMON_INTERCEPTOR_MEMSET_IMPL(ctx, dst, v, size)     \
+  {                                                           \
+    COMMON_INTERCEPTOR_ENTER(ctx, memset, dst, v, size);      \
+    if (common_flags()->intercept_intrin &&                   \
+        MEM_IS_APP(GetAddressFromPointer(dst)))               \
+      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, dst, size);         \
+    return REAL(memset)(GetAddressFromPointer(dst), v, size); \
+  }
+#endif
 
 #define COMMON_INTERCEPTOR_MMAP_IMPL(ctx, mmap, addr, length, prot, flags, fd, \
                                      offset)                                   \

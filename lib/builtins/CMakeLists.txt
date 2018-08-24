@@ -173,8 +173,8 @@ set(GENERIC_TF_SOURCES
   trunctfsf2.c)
 
 option(COMPILER_RT_EXCLUDE_ATOMIC_BUILTIN
-  "Skip the atomic builtin (this may be needed if system headers are unavailable)"
-  Off)
+  "Skip the atomic builtin (these should normally be provided by a shared library)"
+  On)
 
 if(NOT FUCHSIA AND NOT COMPILER_RT_BAREMETAL_BUILD)
   set(GENERIC_SOURCES
@@ -406,6 +406,7 @@ if(MINGW)
       arm/aeabi_ldivmod.S
       arm/aeabi_uidivmod.S
       arm/aeabi_uldivmod.S
+      arm/chkstk.S
       divmoddi4.c
       divmodsi4.c
       divdi3.c
@@ -458,6 +459,41 @@ set(arm64_SOURCES ${aarch64_SOURCES})
 set(armv6m_SOURCES ${thumb1_SOURCES})
 set(armv7m_SOURCES ${arm_SOURCES})
 set(armv7em_SOURCES ${arm_SOURCES})
+
+# hexagon arch
+set(hexagon_SOURCES ${GENERIC_SOURCES} ${GENERIC_TF_SOURCES})
+set(hexagon_SOURCES
+  hexagon/common_entry_exit_abi1.S
+  hexagon/common_entry_exit_abi2.S
+  hexagon/common_entry_exit_legacy.S
+  hexagon/dfaddsub.S
+  hexagon/dfdiv.S
+  hexagon/dffma.S
+  hexagon/dfminmax.S
+  hexagon/dfmul.S
+  hexagon/dfsqrt.S
+  hexagon/divdi3.S
+  hexagon/divsi3.S
+  hexagon/fabs_opt.S
+  hexagon/fastmath2_dlib_asm.S
+  hexagon/fastmath2_ldlib_asm.S
+  hexagon/fastmath_dlib_asm.S
+  hexagon/fma_opt.S
+  hexagon/fmax_opt.S
+  hexagon/fmin_opt.S
+  hexagon/memcpy_forward_vp4cp4n2.S
+  hexagon/memcpy_likely_aligned.S
+  hexagon/moddi3.S
+  hexagon/modsi3.S
+  hexagon/sfdiv_opt.S
+  hexagon/sfsqrt_opt.S
+  hexagon/udivdi3.S
+  hexagon/udivmoddi4.S
+  hexagon/udivmodsi4.S
+  hexagon/udivsi3.S
+  hexagon/umoddi3.S
+  hexagon/umodsi3.S)
+
 
 set(mips_SOURCES ${GENERIC_SOURCES})
 set(mipsel_SOURCES ${mips_SOURCES})
@@ -529,6 +565,15 @@ else ()
         set(_arch "arm|armv6m")
       elseif("${arch}" MATCHES "^(armhf|armv7|armv7s|armv7k|armv7m|armv7em)$")
         set(_arch "arm")
+      endif()
+
+      # For ARM archs, exclude any VFP builtins if VFP is not supported
+      if (${arch} MATCHES "^(arm|armhf|armv7|armv7s|armv7k|armv7m|armv7em)$")
+        string(REPLACE ";" " " _TARGET_${arch}_CFLAGS "${TARGET_${arch}_CFLAGS}")
+        check_compile_definition(__VFP_FP__ "${CMAKE_C_FLAGS} ${_TARGET_${arch}_CFLAGS}" COMPILER_RT_HAS_${arch}_VFP)
+        if(NOT COMPILER_RT_HAS_${arch}_VFP)
+          list(REMOVE_ITEM ${arch}_SOURCES ${arm_Thumb1_VFPv2_SOURCES} ${arm_Thumb1_SjLj_EH_SOURCES})
+        endif()
       endif()
 
       # Filter out generic versions of routines that are re-implemented in

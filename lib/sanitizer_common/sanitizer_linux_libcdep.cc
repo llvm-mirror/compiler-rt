@@ -157,29 +157,98 @@ bool SetEnv(const char *name, const char *value) {
 }
 #endif
 
+__attribute__((unused)) static bool GetLibcVersion(int *major, int *minor,
+                                                   int *patch) {
+#ifdef _CS_GNU_LIBC_VERSION
+  char buf[64];
+  uptr len = confstr(_CS_GNU_LIBC_VERSION, buf, sizeof(buf));
+  if (len >= sizeof(buf))
+    return false;
+  buf[len] = 0;
+  static const char kGLibC[] = "glibc ";
+  if (internal_strncmp(buf, kGLibC, sizeof(kGLibC) - 1) != 0)
+    return false;
+  const char *p = buf + sizeof(kGLibC) - 1;
+  *major = internal_simple_strtoll(p, &p, 10);
+  *minor = (*p == '.') ? internal_simple_strtoll(p + 1, &p, 10) : 0;
+  *patch = (*p == '.') ? internal_simple_strtoll(p + 1, &p, 10) : 0;
+  return true;
+#else
+  return false;
+#endif
+}
+
 #if !SANITIZER_FREEBSD && !SANITIZER_ANDROID && !SANITIZER_GO &&               \
     !SANITIZER_NETBSD && !SANITIZER_OPENBSD && !SANITIZER_SOLARIS
 static uptr g_tls_size;
 
 #ifdef __i386__
+# ifndef __GLIBC_PREREQ
+#  define CHECK_GET_TLS_STATIC_INFO_VERSION 1
+# else
+#  define CHECK_GET_TLS_STATIC_INFO_VERSION (!__GLIBC_PREREQ(2, 27))
+# endif
+#else
+# define CHECK_GET_TLS_STATIC_INFO_VERSION 0
+#endif
+
+#if CHECK_GET_TLS_STATIC_INFO_VERSION
 # define DL_INTERNAL_FUNCTION __attribute__((regparm(3), stdcall))
 #else
 # define DL_INTERNAL_FUNCTION
 #endif
 
+namespace {
+struct GetTlsStaticInfoCall {
+  typedef void (*get_tls_func)(size_t*, size_t*);
+};
+struct GetTlsStaticInfoRegparmCall {
+  typedef void (*get_tls_func)(size_t*, size_t*) DL_INTERNAL_FUNCTION;
+};
+
+template <typename T>
+void CallGetTls(void* ptr, size_t* size, size_t* align) {
+  typename T::get_tls_func get_tls;
+  CHECK_EQ(sizeof(get_tls), sizeof(ptr));
+  internal_memcpy(&get_tls, &ptr, sizeof(ptr));
+  CHECK_NE(get_tls, 0);
+  get_tls(size, align);
+}
+
+bool CmpLibcVersion(int major, int minor, int patch) {
+  int ma;
+  int mi;
+  int pa;
+  if (!GetLibcVersion(&ma, &mi, &pa))
+    return false;
+  if (ma > major)
+    return true;
+  if (ma < major)
+    return false;
+  if (mi > minor)
+    return true;
+  if (mi < minor)
+    return false;
+  return pa >= patch;
+}
+
+}  // namespace
+
 void InitTlsSize() {
   // all current supported platforms have 16 bytes stack alignment
   const size_t kStackAlign = 16;
-  typedef void (*get_tls_func)(size_t*, size_t*) DL_INTERNAL_FUNCTION;
-  get_tls_func get_tls;
   void *get_tls_static_info_ptr = dlsym(RTLD_NEXT, "_dl_get_tls_static_info");
-  CHECK_EQ(sizeof(get_tls), sizeof(get_tls_static_info_ptr));
-  internal_memcpy(&get_tls, &get_tls_static_info_ptr,
-                  sizeof(get_tls_static_info_ptr));
-  CHECK_NE(get_tls, 0);
   size_t tls_size = 0;
   size_t tls_align = 0;
-  get_tls(&tls_size, &tls_align);
+  // On i?86, _dl_get_tls_static_info used to be internal_function, i.e.
+  // __attribute__((regparm(3), stdcall)) before glibc 2.27 and is normal
+  // function in 2.27 and later.
+  if (CHECK_GET_TLS_STATIC_INFO_VERSION && !CmpLibcVersion(2, 27, 0))
+    CallGetTls<GetTlsStaticInfoRegparmCall>(get_tls_static_info_ptr,
+                                            &tls_size, &tls_align);
+  else
+    CallGetTls<GetTlsStaticInfoCall>(get_tls_static_info_ptr,
+                                     &tls_size, &tls_align);
   if (tls_align < kStackAlign)
     tls_align = kStackAlign;
   g_tls_size = RoundUpTo(tls_size, tls_align);
@@ -201,43 +270,33 @@ uptr ThreadDescriptorSize() {
   if (val)
     return val;
 #if defined(__x86_64__) || defined(__i386__) || defined(__arm__)
-#ifdef _CS_GNU_LIBC_VERSION
-  char buf[64];
-  uptr len = confstr(_CS_GNU_LIBC_VERSION, buf, sizeof(buf));
-  if (len < sizeof(buf) && internal_strncmp(buf, "glibc 2.", 8) == 0) {
-    char *end;
-    int minor = internal_simple_strtoll(buf + 8, &end, 10);
-    if (end != buf + 8 && (*end == '\0' || *end == '.' || *end == '-')) {
-      int patch = 0;
-      if (*end == '.')
-        // strtoll will return 0 if no valid conversion could be performed
-        patch = internal_simple_strtoll(end + 1, nullptr, 10);
-
-      /* sizeof(struct pthread) values from various glibc versions.  */
-      if (SANITIZER_X32)
-        val = 1728;  // Assume only one particular version for x32.
-      // For ARM sizeof(struct pthread) changed in Glibc 2.23.
-      else if (SANITIZER_ARM)
-        val = minor <= 22 ? 1120 : 1216;
-      else if (minor <= 3)
-        val = FIRST_32_SECOND_64(1104, 1696);
-      else if (minor == 4)
-        val = FIRST_32_SECOND_64(1120, 1728);
-      else if (minor == 5)
-        val = FIRST_32_SECOND_64(1136, 1728);
-      else if (minor <= 9)
-        val = FIRST_32_SECOND_64(1136, 1712);
-      else if (minor == 10)
-        val = FIRST_32_SECOND_64(1168, 1776);
-      else if (minor == 11 || (minor == 12 && patch == 1))
-        val = FIRST_32_SECOND_64(1168, 2288);
-      else if (minor <= 13)
-        val = FIRST_32_SECOND_64(1168, 2304);
-      else
-        val = FIRST_32_SECOND_64(1216, 2304);
-    }
+  int major;
+  int minor;
+  int patch;
+  if (GetLibcVersion(&major, &minor, &patch) && major == 2) {
+    /* sizeof(struct pthread) values from various glibc versions.  */
+    if (SANITIZER_X32)
+      val = 1728; // Assume only one particular version for x32.
+    // For ARM sizeof(struct pthread) changed in Glibc 2.23.
+    else if (SANITIZER_ARM)
+      val = minor <= 22 ? 1120 : 1216;
+    else if (minor <= 3)
+      val = FIRST_32_SECOND_64(1104, 1696);
+    else if (minor == 4)
+      val = FIRST_32_SECOND_64(1120, 1728);
+    else if (minor == 5)
+      val = FIRST_32_SECOND_64(1136, 1728);
+    else if (minor <= 9)
+      val = FIRST_32_SECOND_64(1136, 1712);
+    else if (minor == 10)
+      val = FIRST_32_SECOND_64(1168, 1776);
+    else if (minor == 11 || (minor == 12 && patch == 1))
+      val = FIRST_32_SECOND_64(1168, 2288);
+    else if (minor <= 14)
+      val = FIRST_32_SECOND_64(1168, 2304);
+    else
+      val = FIRST_32_SECOND_64(1216, 2304);
   }
-#endif
 #elif defined(__mips__)
   // TODO(sagarthakur): add more values as per different glibc versions.
   val = FIRST_32_SECOND_64(1152, 1776);
@@ -491,7 +550,7 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
     return 0;
   LoadedModule cur_module;
   cur_module.set(module_name.data(), info->dlpi_addr);
-  for (int i = 0; i < info->dlpi_phnum; i++) {
+  for (int i = 0; i < (int)info->dlpi_phnum; i++) {
     const Elf_Phdr *phdr = &info->dlpi_phdr[i];
     if (phdr->p_type == PT_LOAD) {
       uptr cur_beg = info->dlpi_addr + phdr->p_vaddr;
@@ -607,7 +666,7 @@ u32 GetNumberOfCPUs() {
   uptr fd = internal_open("/sys/devices/system/cpu", O_RDONLY | O_DIRECTORY);
   if (internal_iserror(fd))
     return 0;
-  InternalScopedBuffer<u8> buffer(4096);
+  InternalMmapVector<u8> buffer(4096);
   uptr bytes_read = buffer.size();
   uptr n_cpus = 0;
   u8 *d_type;

@@ -73,6 +73,7 @@ uptr GetMaxVirtualAddress();
 uptr GetMaxUserVirtualAddress();
 // Threads
 tid_t GetTid();
+int TgKill(pid_t pid, tid_t tid, int sig);
 uptr GetThreadSelf();
 void GetThreadStackTopAndBottom(bool at_initialization, uptr *stack_top,
                                 uptr *stack_bottom);
@@ -88,8 +89,8 @@ void UnmapOrDie(void *addr, uptr size);
 // Behaves just like MmapOrDie, but tolerates out of memory condition, in that
 // case returns nullptr.
 void *MmapOrDieOnFatalError(uptr size, const char *mem_type);
-void *MmapFixedNoReserve(uptr fixed_addr, uptr size,
-                         const char *name = nullptr);
+bool MmapFixedNoReserve(uptr fixed_addr, uptr size, const char *name = nullptr)
+     WARN_UNUSED_RESULT;
 void *MmapNoReserveOrDie(uptr size, const char *mem_type);
 void *MmapFixedOrDie(uptr fixed_addr, uptr size);
 // Behaves just like MmapFixedOrDie, but tolerates out of memory condition, in
@@ -120,8 +121,8 @@ void ReleaseMemoryPagesToOS(uptr beg, uptr end);
 void IncreaseTotalMmap(uptr size);
 void DecreaseTotalMmap(uptr size);
 uptr GetRSS();
-void NoHugePagesInRegion(uptr addr, uptr length);
-void DontDumpShadowMemory(uptr addr, uptr length);
+bool NoHugePagesInRegion(uptr addr, uptr length);
+bool DontDumpShadowMemory(uptr addr, uptr length);
 // Check if the built VMA size matches the runtime one.
 void CheckVMASize();
 void RunMallocHooks(const void *ptr, uptr size);
@@ -150,49 +151,6 @@ typedef void (*fill_profile_f)(uptr start, uptr rss, bool file,
 // |cb| is a tool-specific callback that fills the |stats| array containing
 // |stats_size| elements.
 void GetMemoryProfile(fill_profile_f cb, uptr *stats, uptr stats_size);
-
-// InternalScopedBuffer can be used instead of large stack arrays to
-// keep frame size low.
-// FIXME: use InternalAlloc instead of MmapOrDie once
-// InternalAlloc is made libc-free.
-template <typename T>
-class InternalScopedBuffer {
- public:
-  explicit InternalScopedBuffer(uptr cnt) {
-    cnt_ = cnt;
-    ptr_ = (T *)MmapOrDie(cnt * sizeof(T), "InternalScopedBuffer");
-  }
-  ~InternalScopedBuffer() { UnmapOrDie(ptr_, cnt_ * sizeof(T)); }
-  T &operator[](uptr i) { return ptr_[i]; }
-  T *data() { return ptr_; }
-  uptr size() { return cnt_ * sizeof(T); }
-
- private:
-  T *ptr_;
-  uptr cnt_;
-  // Disallow copies and moves.
-  InternalScopedBuffer(const InternalScopedBuffer &) = delete;
-  InternalScopedBuffer &operator=(const InternalScopedBuffer &) = delete;
-  InternalScopedBuffer(InternalScopedBuffer &&) = delete;
-  InternalScopedBuffer &operator=(InternalScopedBuffer &&) = delete;
-};
-
-class InternalScopedString : public InternalScopedBuffer<char> {
- public:
-  explicit InternalScopedString(uptr max_length)
-      : InternalScopedBuffer<char>(max_length), length_(0) {
-    (*this)[0] = '\0';
-  }
-  uptr length() { return length_; }
-  void clear() {
-    (*this)[0] = '\0';
-    length_ = 0;
-  }
-  void append(const char *format, ...);
-
- private:
-  uptr length_;
-};
 
 // Simple low-level (mmap-based) allocator for internal use. Doesn't have
 // constructor, so all instances of LowLevelAllocator should be
@@ -241,15 +199,6 @@ class ScopedErrorReportLock {
 extern uptr stoptheworld_tracer_pid;
 extern uptr stoptheworld_tracer_ppid;
 
-// Opens the file 'file_name" and reads up to 'max_len' bytes.
-// The resulting buffer is mmaped and stored in '*buff'.
-// The size of the mmaped region is stored in '*buff_size'.
-// The total number of read bytes is stored in '*read_len'.
-// Returns true if file was successfully opened and read.
-bool ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
-                      uptr *read_len, uptr max_len = 1 << 26,
-                      error_t *errno_p = nullptr);
-
 bool IsAccessibleMemoryRange(uptr beg, uptr size);
 
 // Error report formatting.
@@ -273,6 +222,7 @@ bool SetEnv(const char *name, const char *value);
 
 u32 GetUid();
 void ReExec();
+void CheckASLR();
 char **GetArgv();
 void PrintCmdline();
 bool StackSizeIsUnlimited();
@@ -295,8 +245,6 @@ void SleepForMillis(int millis);
 u64 NanoTime();
 u64 MonotonicNanoTime();
 int Atexit(void (*function)(void));
-void SortArray(uptr *array, uptr size);
-void SortArray(u32 *array, uptr size);
 bool TemplateMatch(const char *templ, const char *str);
 
 // Exit
@@ -482,13 +430,12 @@ template<typename T>
 class InternalMmapVectorNoCtor {
  public:
   void Initialize(uptr initial_capacity) {
-    capacity_ = Max(initial_capacity, (uptr)1);
+    capacity_bytes_ = 0;
     size_ = 0;
-    data_ = (T *)MmapOrDie(capacity_ * sizeof(T), "InternalMmapVectorNoCtor");
+    data_ = 0;
+    reserve(initial_capacity);
   }
-  void Destroy() {
-    UnmapOrDie(data_, capacity_ * sizeof(T));
-  }
+  void Destroy() { UnmapOrDie(data_, capacity_bytes_); }
   T &operator[](uptr i) {
     CHECK_LT(i, size_);
     return data_[i];
@@ -498,10 +445,10 @@ class InternalMmapVectorNoCtor {
     return data_[i];
   }
   void push_back(const T &element) {
-    CHECK_LE(size_, capacity_);
-    if (size_ == capacity_) {
+    CHECK_LE(size_, capacity());
+    if (size_ == capacity()) {
       uptr new_capacity = RoundUpToPowerOfTwo(size_ + 1);
-      Resize(new_capacity);
+      Realloc(new_capacity);
     }
     internal_memcpy(&data_[size_++], &element, sizeof(T));
   }
@@ -522,12 +469,15 @@ class InternalMmapVectorNoCtor {
   T *data() {
     return data_;
   }
-  uptr capacity() const {
-    return capacity_;
+  uptr capacity() const { return capacity_bytes_ / sizeof(T); }
+  void reserve(uptr new_size) {
+    // Never downsize internal buffer.
+    if (new_size > capacity())
+      Realloc(new_size);
   }
   void resize(uptr new_size) {
-    Resize(new_size);
     if (new_size > size_) {
+      reserve(new_size);
       internal_memset(&data_[size_], 0, sizeof(T) * (new_size - size_));
     }
     size_ = new_size;
@@ -549,39 +499,84 @@ class InternalMmapVectorNoCtor {
     return data() + size();
   }
 
+  void swap(InternalMmapVectorNoCtor &other) {
+    Swap(data_, other.data_);
+    Swap(capacity_bytes_, other.capacity_bytes_);
+    Swap(size_, other.size_);
+  }
+
  private:
-  void Resize(uptr new_capacity) {
+  void Realloc(uptr new_capacity) {
     CHECK_GT(new_capacity, 0);
     CHECK_LE(size_, new_capacity);
-    T *new_data = (T *)MmapOrDie(new_capacity * sizeof(T),
-                                 "InternalMmapVector");
+    uptr new_capacity_bytes =
+        RoundUpTo(new_capacity * sizeof(T), GetPageSizeCached());
+    T *new_data = (T *)MmapOrDie(new_capacity_bytes, "InternalMmapVector");
     internal_memcpy(new_data, data_, size_ * sizeof(T));
-    T *old_data = data_;
+    UnmapOrDie(data_, capacity_bytes_);
     data_ = new_data;
-    UnmapOrDie(old_data, capacity_ * sizeof(T));
-    capacity_ = new_capacity;
+    capacity_bytes_ = new_capacity_bytes;
   }
 
   T *data_;
-  uptr capacity_;
+  uptr capacity_bytes_;
   uptr size_;
 };
+
+template <typename T>
+bool operator==(const InternalMmapVectorNoCtor<T> &lhs,
+                const InternalMmapVectorNoCtor<T> &rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  return internal_memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(T)) == 0;
+}
+
+template <typename T>
+bool operator!=(const InternalMmapVectorNoCtor<T> &lhs,
+                const InternalMmapVectorNoCtor<T> &rhs) {
+  return !(lhs == rhs);
+}
 
 template<typename T>
 class InternalMmapVector : public InternalMmapVectorNoCtor<T> {
  public:
-  explicit InternalMmapVector(uptr initial_capacity) {
-    InternalMmapVectorNoCtor<T>::Initialize(initial_capacity);
+  InternalMmapVector() { InternalMmapVectorNoCtor<T>::Initialize(1); }
+  explicit InternalMmapVector(uptr cnt) {
+    InternalMmapVectorNoCtor<T>::Initialize(cnt);
+    this->resize(cnt);
   }
   ~InternalMmapVector() { InternalMmapVectorNoCtor<T>::Destroy(); }
-  // Disallow evil constructors.
-  InternalMmapVector(const InternalMmapVector&);
-  void operator=(const InternalMmapVector&);
+  // Disallow copies and moves.
+  InternalMmapVector(const InternalMmapVector &) = delete;
+  InternalMmapVector &operator=(const InternalMmapVector &) = delete;
+  InternalMmapVector(InternalMmapVector &&) = delete;
+  InternalMmapVector &operator=(InternalMmapVector &&) = delete;
+};
+
+class InternalScopedString : public InternalMmapVector<char> {
+ public:
+  explicit InternalScopedString(uptr max_length)
+      : InternalMmapVector<char>(max_length), length_(0) {
+    (*this)[0] = '\0';
+  }
+  uptr length() { return length_; }
+  void clear() {
+    (*this)[0] = '\0';
+    length_ = 0;
+  }
+  void append(const char *format, ...);
+
+ private:
+  uptr length_;
+};
+
+template <class T>
+struct CompareLess {
+  bool operator()(const T &a, const T &b) const { return a < b; }
 };
 
 // HeapSort for arrays and InternalMmapVector.
-template<class Container, class Compare>
-void InternalSort(Container *v, uptr size, Compare comp) {
+template <class T, class Compare = CompareLess<T>>
+void Sort(T *v, uptr size, Compare comp = {}) {
   if (size < 2)
     return;
   // Stage 1: insert elements to the heap.
@@ -589,8 +584,8 @@ void InternalSort(Container *v, uptr size, Compare comp) {
     uptr j, p;
     for (j = i; j > 0; j = p) {
       p = (j - 1) / 2;
-      if (comp((*v)[p], (*v)[j]))
-        Swap((*v)[j], (*v)[p]);
+      if (comp(v[p], v[j]))
+        Swap(v[j], v[p]);
       else
         break;
     }
@@ -598,18 +593,18 @@ void InternalSort(Container *v, uptr size, Compare comp) {
   // Stage 2: swap largest element with the last one,
   // and sink the new top.
   for (uptr i = size - 1; i > 0; i--) {
-    Swap((*v)[0], (*v)[i]);
+    Swap(v[0], v[i]);
     uptr j, max_ind;
     for (j = 0; j < i; j = max_ind) {
       uptr left = 2 * j + 1;
       uptr right = 2 * j + 2;
       max_ind = j;
-      if (left < i && comp((*v)[max_ind], (*v)[left]))
+      if (left < i && comp(v[max_ind], v[left]))
         max_ind = left;
-      if (right < i && comp((*v)[max_ind], (*v)[right]))
+      if (right < i && comp(v[max_ind], v[right]))
         max_ind = right;
       if (max_ind != j)
-        Swap((*v)[j], (*v)[max_ind]);
+        Swap(v[j], v[max_ind]);
       else
         break;
     }
@@ -642,6 +637,25 @@ enum ModuleArch {
   kModuleArchARMV7K,
   kModuleArchARM64
 };
+
+// Opens the file 'file_name" and reads up to 'max_len' bytes.
+// The resulting buffer is mmaped and stored in '*buff'.
+// Returns true if file was successfully opened and read.
+bool ReadFileToVector(const char *file_name,
+                      InternalMmapVectorNoCtor<char> *buff,
+                      uptr max_len = 1 << 26, error_t *errno_p = nullptr);
+
+// Opens the file 'file_name" and reads up to 'max_len' bytes.
+// This function is less I/O efficient than ReadFileToVector as it may reread
+// file multiple times to avoid mmap during read attempts. It's used to read
+// procmap, so short reads with mmap in between can produce inconsistent result.
+// The resulting buffer is mmaped and stored in '*buff'.
+// The size of the mmaped region is stored in '*buff_size'.
+// The total number of read bytes is stored in '*read_len'.
+// Returns true if file was successfully opened and read.
+bool ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
+                      uptr *read_len, uptr max_len = 1 << 26,
+                      error_t *errno_p = nullptr);
 
 // When adding a new architecture, don't forget to also update
 // script/asan_symbolize.py and sanitizer_symbolizer_libcdep.cc.

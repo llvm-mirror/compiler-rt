@@ -84,7 +84,7 @@ static void PrintZoneForPointer(uptr ptr, uptr zone_ptr,
 bool ParseFrameDescription(const char *frame_descr,
                            InternalMmapVector<StackVarDescr> *vars) {
   CHECK(frame_descr);
-  char *p;
+  const char *p;
   // This string is created by the compiler and has the following form:
   // "n alloc_1 alloc_2 ... alloc_n"
   // where alloc_i looks like "offset size len ObjectName"
@@ -134,6 +134,10 @@ class ScopedInErrorReport {
   }
 
   ~ScopedInErrorReport() {
+    if (halt_on_error_ && !__sanitizer_acquire_crash_state()) {
+      asanThreadRegistry().Unlock();
+      return;
+    }
     ASAN_ON_ERROR();
     if (current_error_.IsValid()) current_error_.Print();
 
@@ -152,7 +156,7 @@ class ScopedInErrorReport {
 
     // Copy the message buffer so that we could start logging without holding a
     // lock that gets aquired during printing.
-    InternalScopedBuffer<char> buffer_copy(kErrorMessageBufferSize);
+    InternalMmapVector<char> buffer_copy(kErrorMessageBufferSize);
     {
       BlockingMutexLock l(&error_message_buf_mutex);
       internal_memcpy(buffer_copy.data(),
@@ -202,7 +206,7 @@ class ScopedInErrorReport {
   bool halt_on_error_;
 };
 
-ErrorDescription ScopedInErrorReport::current_error_;
+ErrorDescription ScopedInErrorReport::current_error_(LINKER_INITIALIZED);
 
 void ReportDeadlySignal(const SignalContext &sig) {
   ScopedInErrorReport in_report(/*fatal*/ true);
@@ -271,6 +275,14 @@ void ReportInvalidAllocationAlignment(uptr alignment,
   ScopedInErrorReport in_report(/*fatal*/ true);
   ErrorInvalidAllocationAlignment error(GetCurrentTidOrInvalid(), stack,
                                         alignment);
+  in_report.ReportError(error);
+}
+
+void ReportInvalidAlignedAllocAlignment(uptr size, uptr alignment,
+                                        BufferedStackTrace *stack) {
+  ScopedInErrorReport in_report(/*fatal*/ true);
+  ErrorInvalidAlignedAllocAlignment error(GetCurrentTidOrInvalid(), stack,
+                                          size, alignment);
   in_report.ReportError(error);
 }
 

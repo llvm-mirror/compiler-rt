@@ -57,7 +57,7 @@ static bool readValueFromFile(const char *Filename,
   close(Fd);
   if (!Success)
     return false;
-  char *End = nullptr;
+  const char *End = nullptr;
   long long Tmp = internal_simple_strtoll(Line, &End, 10);
   bool Result = false;
   if (Line[0] != '\0' && (*End == '\n' || *End == '\0')) {
@@ -219,8 +219,8 @@ bool patchFunctionTailExit(const bool Enable, const uint32_t FuncId,
       reinterpret_cast<int64_t>(__xray_FunctionTailExit) -
       (static_cast<int64_t>(Sled.Address) + 11);
   if (TrampolineOffset < MinOffset || TrampolineOffset > MaxOffset) {
-    Report("XRay Exit trampoline (%p) too far from sled (%p)\n",
-           __xray_FunctionExit, reinterpret_cast<void *>(Sled.Address));
+    Report("XRay Tail Exit trampoline (%p) too far from sled (%p)\n",
+           __xray_FunctionTailExit, reinterpret_cast<void *>(Sled.Address));
     return false;
   }
   if (Enable) {

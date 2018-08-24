@@ -29,6 +29,9 @@
 
 namespace __sanitizer {
 
+// TODO(phosek): remove this and replace it with ZX_TIME_INFINITE
+#define ZX_TIME_INFINITE_OLD INT64_MAX
+
 void NORETURN internal__exit(int exitcode) { _zx_process_exit(exitcode); }
 
 uptr internal_sched_yield() {
@@ -87,6 +90,7 @@ void GetThreadStackTopAndBottom(bool, uptr *stack_top, uptr *stack_bottom) {
 }
 
 void MaybeReexec() {}
+void CheckASLR() {}
 void PlatformPrepareForSandboxing(__sanitizer_sandbox_arguments *args) {}
 void DisableCoreDumperIfNecessary() {}
 void InstallDeadlySignalHandlers(SignalHandlerType handler) {}
@@ -119,7 +123,7 @@ void BlockingMutex::Lock() {
     return;
   while (atomic_exchange(m, MtxSleeping, memory_order_acquire) != MtxUnlocked) {
     zx_status_t status = _zx_futex_wait(reinterpret_cast<zx_futex_t *>(m),
-                                        MtxSleeping, ZX_TIME_INFINITE);
+                                        MtxSleeping, ZX_TIME_INFINITE_OLD);
     if (status != ZX_ERR_BAD_STATE)  // Normal race.
       CHECK_EQ(status, ZX_OK);
   }
@@ -170,8 +174,9 @@ static void *DoAnonymousMmapOrDie(uptr size, const char *mem_type,
 
   // TODO(mcgrathr): Maybe allocate a VMAR for all sanitizer heap and use that?
   uintptr_t addr;
-  status = _zx_vmar_map(_zx_vmar_root_self(), 0, vmo, 0, size,
-                        ZX_VM_FLAG_PERM_READ | ZX_VM_FLAG_PERM_WRITE, &addr);
+  status =
+      _zx_vmar_map_old(_zx_vmar_root_self(), 0, vmo, 0, size,
+                       ZX_VM_FLAG_PERM_READ | ZX_VM_FLAG_PERM_WRITE, &addr);
   _zx_handle_close(vmo);
 
   if (status != ZX_OK) {
@@ -205,10 +210,10 @@ uptr ReservedAddressRange::Init(uptr init_size, const char *name,
   uintptr_t base;
   zx_handle_t vmar;
   zx_status_t status =
-      _zx_vmar_allocate(_zx_vmar_root_self(), 0, init_size,
-                        ZX_VM_FLAG_CAN_MAP_READ | ZX_VM_FLAG_CAN_MAP_WRITE |
-                            ZX_VM_FLAG_CAN_MAP_SPECIFIC,
-                        &vmar, &base);
+      _zx_vmar_allocate_old(_zx_vmar_root_self(), 0, init_size,
+                            ZX_VM_FLAG_CAN_MAP_READ | ZX_VM_FLAG_CAN_MAP_WRITE |
+                                ZX_VM_FLAG_CAN_MAP_SPECIFIC,
+                            &vmar, &base);
   if (status != ZX_OK)
     ReportMmapFailureAndDie(init_size, name, "zx_vmar_allocate", status);
   base_ = reinterpret_cast<void *>(base);
@@ -234,7 +239,7 @@ static uptr DoMmapFixedOrDie(zx_handle_t vmar, uptr fixed_addr, uptr map_size,
   DCHECK_GE(base + size_, map_size + offset);
   uintptr_t addr;
 
-  status = _zx_vmar_map(
+  status = _zx_vmar_map_old(
       vmar, offset, vmo, 0, map_size,
       ZX_VM_FLAG_PERM_READ | ZX_VM_FLAG_PERM_WRITE | ZX_VM_FLAG_SPECIFIC,
       &addr);
@@ -315,8 +320,9 @@ void *MmapAlignedOrDieOnFatalError(uptr size, uptr alignment,
   // beginning of the VMO, and unmap the excess before and after.
   size_t map_size = size + alignment;
   uintptr_t addr;
-  status = _zx_vmar_map(_zx_vmar_root_self(), 0, vmo, 0, map_size,
-                        ZX_VM_FLAG_PERM_READ | ZX_VM_FLAG_PERM_WRITE, &addr);
+  status =
+      _zx_vmar_map_old(_zx_vmar_root_self(), 0, vmo, 0, map_size,
+                       ZX_VM_FLAG_PERM_READ | ZX_VM_FLAG_PERM_WRITE, &addr);
   if (status == ZX_OK) {
     uintptr_t map_addr = addr;
     uintptr_t map_end = map_addr + map_size;
@@ -328,11 +334,11 @@ void *MmapAlignedOrDieOnFatalError(uptr size, uptr alignment,
                                    sizeof(info), NULL, NULL);
       if (status == ZX_OK) {
         uintptr_t new_addr;
-        status =
-            _zx_vmar_map(_zx_vmar_root_self(), addr - info.base, vmo, 0, size,
-                         ZX_VM_FLAG_PERM_READ | ZX_VM_FLAG_PERM_WRITE |
-                             ZX_VM_FLAG_SPECIFIC_OVERWRITE,
-                         &new_addr);
+        status = _zx_vmar_map_old(_zx_vmar_root_self(), addr - info.base, vmo,
+                                  0, size,
+                                  ZX_VM_FLAG_PERM_READ | ZX_VM_FLAG_PERM_WRITE |
+                                      ZX_VM_FLAG_SPECIFIC_OVERWRITE,
+                                  &new_addr);
         if (status == ZX_OK) CHECK_EQ(new_addr, addr);
       }
     }
@@ -392,8 +398,8 @@ bool ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
       if (vmo_size < max_len) max_len = vmo_size;
       size_t map_size = RoundUpTo(max_len, PAGE_SIZE);
       uintptr_t addr;
-      status = _zx_vmar_map(_zx_vmar_root_self(), 0, vmo, 0, map_size,
-                            ZX_VM_FLAG_PERM_READ, &addr);
+      status = _zx_vmar_map_old(_zx_vmar_root_self(), 0, vmo, 0, map_size,
+                                ZX_VM_FLAG_PERM_READ, &addr);
       if (status == ZX_OK) {
         *buff = reinterpret_cast<char *>(addr);
         *buff_size = map_size;
@@ -407,7 +413,31 @@ bool ReadFileToBuffer(const char *file_name, char **buff, uptr *buff_size,
 }
 
 void RawWrite(const char *buffer) {
-  __sanitizer_log_write(buffer, internal_strlen(buffer));
+  constexpr size_t size = 128;
+  static _Thread_local char line[size];
+  static _Thread_local size_t lastLineEnd = 0;
+  static _Thread_local size_t cur = 0;
+
+  while (*buffer) {
+    if (cur >= size) {
+      if (lastLineEnd == 0)
+        lastLineEnd = size;
+      __sanitizer_log_write(line, lastLineEnd);
+      internal_memmove(line, line + lastLineEnd, cur - lastLineEnd);
+      cur = cur - lastLineEnd;
+      lastLineEnd = 0;
+    }
+    if (*buffer == '\n')
+      lastLineEnd = cur + 1;
+    line[cur++] = *buffer++;
+  }
+  // Flush all complete lines before returning.
+  if (lastLineEnd != 0) {
+    __sanitizer_log_write(line, lastLineEnd);
+    internal_memmove(line, line + lastLineEnd, cur - lastLineEnd);
+    cur = cur - lastLineEnd;
+    lastLineEnd = 0;
+  }
 }
 
 void CatastrophicErrorWrite(const char *buffer, uptr length) {
@@ -431,8 +461,10 @@ const char *GetEnv(const char *name) {
 }
 
 uptr ReadBinaryName(/*out*/ char *buf, uptr buf_len) {
-  const char *argv0 = StoredArgv[0];
-  if (!argv0) argv0 = "<UNKNOWN>";
+  const char *argv0 = "<UNKNOWN>";
+  if (StoredArgv && StoredArgv[0]) {
+    argv0 = StoredArgv[0];
+  }
   internal_strncpy(buf, argv0, buf_len);
   return internal_strlen(buf);
 }
@@ -445,9 +477,7 @@ uptr MainThreadStackBase, MainThreadStackSize;
 
 bool GetRandom(void *buffer, uptr length, bool blocking) {
   CHECK_LE(length, ZX_CPRNG_DRAW_MAX_LEN);
-  size_t size;
-  CHECK_EQ(_zx_cprng_draw(buffer, length, &size), ZX_OK);
-  CHECK_EQ(size, length);
+  _zx_cprng_draw(buffer, length);
   return true;
 }
 

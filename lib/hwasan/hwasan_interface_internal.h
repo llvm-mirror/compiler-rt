@@ -20,6 +20,9 @@
 extern "C" {
 
 SANITIZER_INTERFACE_ATTRIBUTE
+void __hwasan_shadow_init();
+
+SANITIZER_INTERFACE_ATTRIBUTE
 void __hwasan_init();
 
 using __sanitizer::uptr;
@@ -91,6 +94,9 @@ SANITIZER_INTERFACE_ATTRIBUTE
 void __hwasan_tag_memory(uptr p, u8 tag, uptr sz);
 
 SANITIZER_INTERFACE_ATTRIBUTE
+uptr __hwasan_tag_pointer(uptr p, u8 tag);
+
+SANITIZER_INTERFACE_ATTRIBUTE
 u8 __hwasan_generate_tag();
 
 // Returns the offset of the first tag mismatch or -1 if the whole range is
@@ -103,6 +109,9 @@ SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __hwasan_print_shadow(const void *x, uptr size);
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void __hwasan_handle_longjmp(const void *sp_dst);
 
 SANITIZER_INTERFACE_ATTRIBUTE
 u16 __sanitizer_unaligned_load16(const uu16 *p);

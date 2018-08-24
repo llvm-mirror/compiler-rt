@@ -12,6 +12,9 @@
 // ASan-private header for error reporting functions.
 //===----------------------------------------------------------------------===//
 
+#ifndef ASAN_REPORT_H
+#define ASAN_REPORT_H
+
 #include "asan_allocator.h"
 #include "asan_internal.h"
 #include "asan_thread.h"
@@ -62,6 +65,8 @@ void ReportCallocOverflow(uptr count, uptr size, BufferedStackTrace *stack);
 void ReportPvallocOverflow(uptr size, BufferedStackTrace *stack);
 void ReportInvalidAllocationAlignment(uptr alignment,
                                       BufferedStackTrace *stack);
+void ReportInvalidAlignedAllocAlignment(uptr size, uptr alignment,
+                                        BufferedStackTrace *stack);
 void ReportInvalidPosixMemalignAlignment(uptr alignment,
                                          BufferedStackTrace *stack);
 void ReportAllocationSizeTooBig(uptr user_size, uptr total_size, uptr max_size,
@@ -90,3 +95,4 @@ void ReportMacCfReallocUnknown(uptr addr, uptr zone_ptr,
                                BufferedStackTrace *stack);
 
 }  // namespace __asan
+#endif  // ASAN_REPORT_H

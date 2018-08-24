@@ -34,25 +34,13 @@ extern const char *SecondaryAllocatorName;
 bool AllocatorMayReturnNull();
 void SetAllocatorMayReturnNull(bool may_return_null);
 
-// Allocator failure handling policies:
-// Implements AllocatorMayReturnNull policy, returns null when the flag is set,
-// dies otherwise.
-struct ReturnNullOrDieOnFailure {
-  static void *OnBadRequest();
-  static void *OnOOM();
-};
-// Always dies on the failure.
-struct DieOnFailure {
-  static void NORETURN *OnBadRequest();
-  static void NORETURN *OnOOM();
-};
-
-void PrintHintAllocatorCannotReturnNull(const char *options_name);
-
 // Returns true if allocator detected OOM condition. Can be used to avoid memory
-// hungry operations. Set when AllocatorReturnNullOrDieOnOOM() is called.
+// hungry operations.
 bool IsAllocatorOutOfMemory();
+// Should be called by a particular allocator when OOM is detected.
 void SetAllocatorOutOfMemory();
+
+void PrintHintAllocatorCannotReturnNull();
 
 // Allocators call these callbacks on mmap/munmap.
 struct NoOpMapUnmapCallback {
@@ -72,8 +60,10 @@ INLINE u32 RandN(u32 *state, u32 n) { return Rand(state) % n; }  // [0, n)
 template<typename T>
 INLINE void RandomShuffle(T *a, u32 n, u32 *rand_state) {
   if (n <= 1) return;
+  u32 state = *rand_state;
   for (u32 i = n - 1; i > 0; i--)
-    Swap(a[i], a[RandN(rand_state, i + 1)]);
+    Swap(a[i], a[RandN(&state, i + 1)]);
+  *rand_state = state;
 }
 
 #include "sanitizer_allocator_size_class_map.h"

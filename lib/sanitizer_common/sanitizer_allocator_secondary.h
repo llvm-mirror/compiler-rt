@@ -202,7 +202,7 @@ class LargeMmapAllocator {
 
   void EnsureSortedChunks() {
     if (chunks_sorted_) return;
-    SortArray(reinterpret_cast<uptr*>(chunks_), n_chunks_);
+    Sort(reinterpret_cast<uptr *>(chunks_), n_chunks_);
     for (uptr i = 0; i < n_chunks_; i++)
       chunks_[i]->chunk_idx = i;
     chunks_sorted_ = true;
@@ -314,6 +314,6 @@ class LargeMmapAllocator {
   struct Stats {
     uptr n_allocs, n_frees, currently_allocated, max_allocated, by_size_log[64];
   } stats;
-  SpinMutex mutex_;
+  StaticSpinMutex mutex_;
 };
 

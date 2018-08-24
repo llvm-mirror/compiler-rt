@@ -28,6 +28,14 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
   abort();
 }
 
+TEST(Fuzzer, Basename) {
+  EXPECT_EQ(Basename("foo/bar"), "bar");
+  EXPECT_EQ(Basename("bar"), "bar");
+  EXPECT_EQ(Basename("/bar"), "bar");
+  EXPECT_EQ(Basename("foo/x"), "x");
+  EXPECT_EQ(Basename("foo/"), "");
+}
+
 TEST(Fuzzer, CrossOver) {
   std::unique_ptr<ExternalFunctions> t(new ExternalFunctions());
   fuzzer::EF = t.get();
@@ -574,12 +582,14 @@ TEST(FuzzerUtil, Base64) {
 }
 
 TEST(Corpus, Distribution) {
+  DataFlowTrace DFT;
   Random Rand(0);
   std::unique_ptr<InputCorpus> C(new InputCorpus(""));
   size_t N = 10;
   size_t TriesPerUnit = 1<<16;
   for (size_t i = 0; i < N; i++)
-    C->AddToCorpus(Unit{ static_cast<uint8_t>(i) }, 1, false, {});
+    C->AddToCorpus(Unit{static_cast<uint8_t>(i)}, 1, false, false, {}, DFT,
+                   nullptr);
 
   Vector<size_t> Hist(N);
   for (size_t i = 0; i < N * TriesPerUnit; i++) {
