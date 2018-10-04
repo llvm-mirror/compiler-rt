@@ -30,9 +30,11 @@
 #include "sanitizer_common/sanitizer_common.h"
 #include "xray/xray_interface.h"
 #include "xray/xray_records.h"
+#include "xray_allocator.h"
 #include "xray_buffer_queue.h"
 #include "xray_defs.h"
 #include "xray_fdr_flags.h"
+#include "xray_fdr_log_writer.h"
 #include "xray_flags.h"
 #include "xray_recursion_guard.h"
 #include "xray_tsc.h"
@@ -40,14 +42,16 @@
 
 namespace __xray {
 
-atomic_sint32_t LoggingStatus = {XRayLogInitStatus::XRAY_LOG_UNINITIALIZED};
+static atomic_sint32_t LoggingStatus = {
+    XRayLogInitStatus::XRAY_LOG_UNINITIALIZED};
 
+namespace {
 // Group together thread-local-data in a struct, then hide it behind a function
 // call so that it can be initialized on first use instead of as a global. We
 // force the alignment to 64-bytes for x86 cache line alignment, as this
 // structure is used in the hot path of implementation.
 struct alignas(64) ThreadLocalData {
-  BufferQueue::Buffer Buffer;
+  BufferQueue::Buffer Buffer{};
   char *RecordPtr = nullptr;
   // The number of FunctionEntry records immediately preceding RecordPtr.
   uint8_t NumConsecutiveFnEnters = 0;
@@ -70,6 +74,7 @@ struct alignas(64) ThreadLocalData {
   // FDRLogging, and that we're going to clean it up when the thread exits.
   BufferQueue *BQ = nullptr;
 };
+} // namespace
 
 static_assert(std::is_trivially_destructible<ThreadLocalData>::value,
               "ThreadLocalData must be trivially destructible");
@@ -81,14 +86,11 @@ static constexpr auto FunctionRecSize = sizeof(FunctionRecord);
 static pthread_key_t Key;
 
 // Global BufferQueue.
+static std::aligned_storage<sizeof(BufferQueue)>::type BufferQueueStorage;
 static BufferQueue *BQ = nullptr;
 
 static atomic_sint32_t LogFlushStatus = {
     XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING};
-
-static FDRLoggingOptions FDROptions;
-
-static SpinMutex FDROptionsMutex;
 
 // This function will initialize the thread-local data structure used by the FDR
 // logging implementation and return a reference to it. The implementation
@@ -140,60 +142,35 @@ static ThreadLocalData &getThreadLocalData() {
 
 static void writeNewBufferPreamble(tid_t Tid, timespec TS,
                                    pid_t Pid) XRAY_NEVER_INSTRUMENT {
-  static constexpr int InitRecordsCount = 3;
+  static_assert(sizeof(time_t) <= 8, "time_t needs to be at most 8 bytes");
   auto &TLD = getThreadLocalData();
-  MetadataRecord Metadata[InitRecordsCount];
-  {
-    // Write out a MetadataRecord to signify that this is the start of a new
-    // buffer, associated with a particular thread, with a new CPU.  For the
-    // data, we have 15 bytes to squeeze as much information as we can.  At this
-    // point we only write down the following bytes:
-    //   - Thread ID (tid_t, cast to 4 bytes type due to Darwin being 8 bytes)
-    auto &NewBuffer = Metadata[0];
-    NewBuffer.Type = uint8_t(RecordType::Metadata);
-    NewBuffer.RecordKind = uint8_t(MetadataRecord::RecordKinds::NewBuffer);
-    int32_t tid = static_cast<int32_t>(Tid);
-    internal_memcpy(&NewBuffer.Data, &tid, sizeof(tid));
-  }
+  MetadataRecord Metadata[] = {
+      // Write out a MetadataRecord to signify that this is the start of a new
+      // buffer, associated with a particular thread, with a new CPU. For the
+      // data, we have 15 bytes to squeeze as much information as we can. At
+      // this point we only write down the following bytes:
+      //   - Thread ID (tid_t, cast to 4 bytes type due to Darwin being 8 bytes)
+      createMetadataRecord<MetadataRecord::RecordKinds::NewBuffer>(
+          static_cast<int32_t>(Tid)),
 
-  // Also write the WalltimeMarker record.
-  {
-    static_assert(sizeof(time_t) <= 8, "time_t needs to be at most 8 bytes");
-    auto &WalltimeMarker = Metadata[1];
-    WalltimeMarker.Type = uint8_t(RecordType::Metadata);
-    WalltimeMarker.RecordKind =
-        uint8_t(MetadataRecord::RecordKinds::WalltimeMarker);
+      // Also write the WalltimeMarker record. We only really need microsecond
+      // precision here, and enforce across platforms that we need 64-bit
+      // seconds and 32-bit microseconds encoded in the Metadata record.
+      createMetadataRecord<MetadataRecord::RecordKinds::WalltimeMarker>(
+          static_cast<int64_t>(TS.tv_sec),
+          static_cast<int32_t>(TS.tv_nsec / 1000)),
 
-    // We only really need microsecond precision here, and enforce across
-    // platforms that we need 64-bit seconds and 32-bit microseconds encoded in
-    // the Metadata record.
-    int32_t Micros = TS.tv_nsec / 1000;
-    int64_t Seconds = TS.tv_sec;
-    internal_memcpy(WalltimeMarker.Data, &Seconds, sizeof(Seconds));
-    internal_memcpy(WalltimeMarker.Data + sizeof(Seconds), &Micros,
-                    sizeof(Micros));
-  }
-
-  // Also write the Pid record.
-  {
-    // Write out a MetadataRecord that contains the current pid
-    auto &PidMetadata = Metadata[2];
-    PidMetadata.Type = uint8_t(RecordType::Metadata);
-    PidMetadata.RecordKind = uint8_t(MetadataRecord::RecordKinds::Pid);
-    int32_t pid = static_cast<int32_t>(Pid);
-    internal_memcpy(&PidMetadata.Data, &pid, sizeof(pid));
-  }
+      // Also write the Pid record.
+      createMetadataRecord<MetadataRecord::RecordKinds::Pid>(
+          static_cast<int32_t>(Pid)),
+  };
 
   TLD.NumConsecutiveFnEnters = 0;
   TLD.NumTailCalls = 0;
   if (TLD.BQ == nullptr || TLD.BQ->finalizing())
     return;
-  internal_memcpy(TLD.RecordPtr, Metadata, sizeof(Metadata));
-  TLD.RecordPtr += sizeof(Metadata);
-  // Since we write out the extents as the first metadata record of the
-  // buffer, we need to write out the extents including the extents record.
-  atomic_store(&TLD.Buffer.Extents->Size, sizeof(Metadata),
-               memory_order_release);
+  FDRLogWriter Writer(TLD.Buffer);
+  TLD.RecordPtr += Writer.writeMetadataRecords(Metadata);
 }
 
 static void setupNewBuffer(int (*wall_clock_reader)(
@@ -201,6 +178,7 @@ static void setupNewBuffer(int (*wall_clock_reader)(
   auto &TLD = getThreadLocalData();
   auto &B = TLD.Buffer;
   TLD.RecordPtr = static_cast<char *>(B.Data);
+  atomic_store(&B.Extents, 0, memory_order_release);
   tid_t Tid = GetTid();
   timespec TS{0, 0};
   pid_t Pid = internal_getpid();
@@ -213,91 +191,90 @@ static void setupNewBuffer(int (*wall_clock_reader)(
 
 static void incrementExtents(size_t Add) {
   auto &TLD = getThreadLocalData();
-  atomic_fetch_add(&TLD.Buffer.Extents->Size, Add, memory_order_acq_rel);
+  atomic_fetch_add(&TLD.Buffer.Extents, Add, memory_order_acq_rel);
 }
 
 static void decrementExtents(size_t Subtract) {
   auto &TLD = getThreadLocalData();
-  atomic_fetch_sub(&TLD.Buffer.Extents->Size, Subtract, memory_order_acq_rel);
+  atomic_fetch_sub(&TLD.Buffer.Extents, Subtract, memory_order_acq_rel);
 }
 
 static void writeNewCPUIdMetadata(uint16_t CPU,
                                   uint64_t TSC) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
-  MetadataRecord NewCPUId;
-  NewCPUId.Type = uint8_t(RecordType::Metadata);
-  NewCPUId.RecordKind = uint8_t(MetadataRecord::RecordKinds::NewCPUId);
+  FDRLogWriter W(TLD.Buffer, TLD.RecordPtr);
 
   // The data for the New CPU will contain the following bytes:
   //   - CPU ID (uint16_t, 2 bytes)
   //   - Full TSC (uint64_t, 8 bytes)
   // Total = 10 bytes.
-  internal_memcpy(&NewCPUId.Data, &CPU, sizeof(CPU));
-  internal_memcpy(&NewCPUId.Data[sizeof(CPU)], &TSC, sizeof(TSC));
-  internal_memcpy(TLD.RecordPtr, &NewCPUId, sizeof(MetadataRecord));
-  TLD.RecordPtr += sizeof(MetadataRecord);
+  W.writeMetadata<MetadataRecord::RecordKinds::NewCPUId>(CPU, TSC);
+  TLD.RecordPtr = W.getNextRecord();
   TLD.NumConsecutiveFnEnters = 0;
   TLD.NumTailCalls = 0;
-  incrementExtents(sizeof(MetadataRecord));
 }
 
 static void writeTSCWrapMetadata(uint64_t TSC) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
-  MetadataRecord TSCWrap;
-  TSCWrap.Type = uint8_t(RecordType::Metadata);
-  TSCWrap.RecordKind = uint8_t(MetadataRecord::RecordKinds::TSCWrap);
+  FDRLogWriter W(TLD.Buffer, TLD.RecordPtr);
 
   // The data for the TSCWrap record contains the following bytes:
   //   - Full TSC (uint64_t, 8 bytes)
   // Total = 8 bytes.
-  internal_memcpy(&TSCWrap.Data, &TSC, sizeof(TSC));
-  internal_memcpy(TLD.RecordPtr, &TSCWrap, sizeof(MetadataRecord));
-  TLD.RecordPtr += sizeof(MetadataRecord);
+  W.writeMetadata<MetadataRecord::RecordKinds::TSCWrap>(TSC);
+  TLD.RecordPtr = W.getNextRecord();
   TLD.NumConsecutiveFnEnters = 0;
   TLD.NumTailCalls = 0;
-  incrementExtents(sizeof(MetadataRecord));
 }
 
 // Call Argument metadata records store the arguments to a function in the
 // order of their appearance; holes are not supported by the buffer format.
 static void writeCallArgumentMetadata(uint64_t A) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
-  MetadataRecord CallArg;
-  CallArg.Type = uint8_t(RecordType::Metadata);
-  CallArg.RecordKind = uint8_t(MetadataRecord::RecordKinds::CallArgument);
-
-  internal_memcpy(CallArg.Data, &A, sizeof(A));
-  internal_memcpy(TLD.RecordPtr, &CallArg, sizeof(MetadataRecord));
-  TLD.RecordPtr += sizeof(MetadataRecord);
-  incrementExtents(sizeof(MetadataRecord));
+  FDRLogWriter W(TLD.Buffer, TLD.RecordPtr);
+  W.writeMetadata<MetadataRecord::RecordKinds::CallArgument>(A);
+  TLD.RecordPtr = W.getNextRecord();
 }
 
-static void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
+static void writeFunctionRecord(int32_t FuncId, uint32_t TSCDelta,
                                 XRayEntryType EntryType) XRAY_NEVER_INSTRUMENT {
-  FunctionRecord FuncRecord;
-  FuncRecord.Type = uint8_t(RecordType::Function);
-  // Only take 28 bits of the function id.
-  FuncRecord.FuncId = FuncId & ~(0x0F << 28);
-  FuncRecord.TSCDelta = TSCDelta;
+  constexpr int32_t MaxFuncId = (1 << 29) - 1;
+  if (UNLIKELY(FuncId > MaxFuncId)) {
+    if (Verbosity())
+      Report("Warning: Function ID '%d' > max function id: '%d'", FuncId,
+             MaxFuncId);
+    return;
+  }
 
   auto &TLD = getThreadLocalData();
+  FDRLogWriter W(TLD.Buffer, TLD.RecordPtr);
+
+  // Only take 28 bits of the function id.
+  //
+  // We need to be careful about the sign bit and the bitwise operations being
+  // performed here. In effect, we want to truncate the value of the function id
+  // to the first 28 bits. To do this properly, this means we need to mask the
+  // function id with (2 ^ 28) - 1 == 0x0fffffff.
+  //
+  auto TruncatedId = FuncId & MaxFuncId;
+  auto Kind = FDRLogWriter::FunctionRecordKind::Enter;
+
   switch (EntryType) {
   case XRayEntryType::ENTRY:
     ++TLD.NumConsecutiveFnEnters;
-    FuncRecord.RecordKind = uint8_t(FunctionRecord::RecordKinds::FunctionEnter);
     break;
   case XRayEntryType::LOG_ARGS_ENTRY:
     // We should not rewind functions with logged args.
     TLD.NumConsecutiveFnEnters = 0;
     TLD.NumTailCalls = 0;
-    FuncRecord.RecordKind = uint8_t(FunctionRecord::RecordKinds::FunctionEnter);
+    Kind = FDRLogWriter::FunctionRecordKind::EnterArg;
     break;
   case XRayEntryType::EXIT:
     // If we've decided to log the function exit, we will never erase the log
     // before it.
     TLD.NumConsecutiveFnEnters = 0;
     TLD.NumTailCalls = 0;
-    FuncRecord.RecordKind = uint8_t(FunctionRecord::RecordKinds::FunctionExit);
+    Kind = FDRLogWriter::FunctionRecordKind::Exit;
     break;
   case XRayEntryType::TAIL:
     // If we just entered the function we're tail exiting from or erased every
@@ -312,8 +289,7 @@ static void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
       TLD.NumTailCalls = 0;
       TLD.NumConsecutiveFnEnters = 0;
     }
-    FuncRecord.RecordKind =
-        uint8_t(FunctionRecord::RecordKinds::FunctionTailExit);
+    Kind = FDRLogWriter::FunctionRecordKind::TailExit;
     break;
   case XRayEntryType::CUSTOM_EVENT: {
     // This is a bug in patching, so we'll report it once and move on.
@@ -334,9 +310,8 @@ static void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
   }
   }
 
-  internal_memcpy(TLD.RecordPtr, &FuncRecord, sizeof(FunctionRecord));
-  TLD.RecordPtr += sizeof(FunctionRecord);
-  incrementExtents(sizeof(FunctionRecord));
+  W.writeFunction(Kind, TruncatedId, TSCDelta);
+  TLD.RecordPtr = W.getNextRecord();
 }
 
 static atomic_uint64_t TicksPerSec{0};
@@ -345,7 +320,8 @@ static atomic_uint64_t ThresholdTicks{0};
 // Re-point the thread local pointer into this thread's Buffer before the recent
 // "Function Entry" record and any "Tail Call Exit" records after that.
 static void rewindRecentCall(uint64_t TSC, uint64_t &LastTSC,
-                             uint64_t &LastFunctionEntryTSC, int32_t FuncId) {
+                             uint64_t &LastFunctionEntryTSC,
+                             int32_t FuncId) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
   TLD.RecordPtr -= FunctionRecSize;
   decrementExtents(FunctionRecSize);
@@ -410,6 +386,9 @@ static void rewindRecentCall(uint64_t TSC, uint64_t &LastTSC,
 static bool releaseThreadLocalBuffer(BufferQueue &BQArg) {
   auto &TLD = getThreadLocalData();
   auto EC = BQArg.releaseBuffer(TLD.Buffer);
+  if (TLD.Buffer.Data == nullptr)
+    return true;
+
   if (EC != BufferQueue::ErrorCode::Ok) {
     Report("Failed to release buffer at %p; error=%s\n", TLD.Buffer.Data,
            BufferQueue::getErrorString(EC));
@@ -521,6 +500,7 @@ static uint32_t writeCurrentCPUTSC(ThreadLocalData &TLD, uint64_t TSC,
     writeNewCPUIdMetadata(CPU, TSC);
     return 0;
   }
+
   // If the delta is greater than the range for a uint32_t, then we write out
   // the TSC wrap metadata entry with the full TSC, and the TSC for the
   // function record be 0.
@@ -570,7 +550,7 @@ static void processFunctionHook(int32_t FuncId, XRayEntryType Entry,
 
   auto &TLD = getThreadLocalData();
 
-  if (TLD.BQ == nullptr)
+  if (TLD.BQ == nullptr && BQ != nullptr)
     TLD.BQ = BQ;
 
   if (!isLogInitializedAndReady(TLD.BQ, TSC, CPU, wall_clock_reader))
@@ -596,14 +576,16 @@ static void processFunctionHook(int32_t FuncId, XRayEntryType Entry,
   //       1. When the delta between the TSC we get and the previous TSC for the
   //          same CPU is outside of the uint32_t range, we end up having to
   //          write a MetadataRecord to indicate a "tsc wrap" before the actual
-  //          FunctionRecord.
+  //          FunctionRecord. This means we have: 1 MetadataRecord + 1 Function
+  //          Record.
   //       2. When we learn that we've moved CPUs, we need to write a
   //          MetadataRecord to indicate a "cpu change", and thus write out the
   //          current TSC for that CPU before writing out the actual
-  //          FunctionRecord.
-  //       3. When we learn about a new CPU ID, we need to write down a "new cpu
-  //          id" MetadataRecord before writing out the actual FunctionRecord.
-  //       4. The second MetadataRecord is the optional function call argument.
+  //          FunctionRecord. This means we have: 1 MetadataRecord + 1 Function
+  //          Record.
+  //       3. Given the previous two cases, in addition we can add at most one
+  //          function argument record. This means we have: 2 MetadataRecord + 1
+  //          Function Record.
   //
   // So the math we need to do is to determine whether writing 40 bytes past the
   // current pointer exceeds the buffer's maximum size. If we don't have enough
@@ -615,19 +597,20 @@ static void processFunctionHook(int32_t FuncId, XRayEntryType Entry,
     return;
   }
 
-  // By this point, we are now ready to write up to 40 bytes (explained above).
-  DCHECK((TLD.RecordPtr + MaxSize) - static_cast<char *>(TLD.Buffer.Data) >=
-             static_cast<ptrdiff_t>(MetadataRecSize) &&
-         "Misconfigured BufferQueue provided; Buffer size not large enough.");
-
   auto RecordTSCDelta = writeCurrentCPUTSC(TLD, TSC, CPU);
   TLD.LastTSC = TSC;
   TLD.CurrentCPU = CPU;
   switch (Entry) {
   case XRayEntryType::ENTRY:
-  case XRayEntryType::LOG_ARGS_ENTRY:
     // Update the thread local state for the next invocation.
     TLD.LastFunctionEntryTSC = TSC;
+    break;
+  case XRayEntryType::LOG_ARGS_ENTRY:
+    // Update the thread local state for the next invocation, but also prevent
+    // rewinding when we have arguments logged.
+    TLD.LastFunctionEntryTSC = TSC;
+    TLD.NumConsecutiveFnEnters = 0;
+    TLD.NumTailCalls = 0;
     break;
   case XRayEntryType::TAIL:
   case XRayEntryType::EXIT:
@@ -741,7 +724,8 @@ XRayBuffer fdrIterator(const XRayBuffer B) {
 
   static BufferQueue::const_iterator It{};
   static BufferQueue::const_iterator End{};
-  static void *CurrentBuffer{nullptr};
+  static uint8_t *CurrentBuffer{nullptr};
+  static size_t SerializedBufferSize = 0;
   if (B.Data == static_cast<void *>(&Header) && B.Size == sizeof(Header)) {
     // From this point on, we provide raw access to the raw buffer we're getting
     // from the BufferQueue. We're relying on the iterators from the current
@@ -751,7 +735,7 @@ XRayBuffer fdrIterator(const XRayBuffer B) {
   }
 
   if (CurrentBuffer != nullptr) {
-    InternalFree(CurrentBuffer);
+    deallocateBuffer(CurrentBuffer, SerializedBufferSize);
     CurrentBuffer = nullptr;
   }
 
@@ -762,9 +746,9 @@ XRayBuffer fdrIterator(const XRayBuffer B) {
   // out to disk. The difference here would be that we still write "empty"
   // buffers, or at least go through the iterators faithfully to let the
   // handlers see the empty buffers in the queue.
-  auto BufferSize = atomic_load(&It->Extents->Size, memory_order_acquire);
-  auto SerializedBufferSize = BufferSize + sizeof(MetadataRecord);
-  CurrentBuffer = InternalAlloc(SerializedBufferSize);
+  auto BufferSize = atomic_load(&It->Extents, memory_order_acquire);
+  SerializedBufferSize = BufferSize + sizeof(MetadataRecord);
+  CurrentBuffer = allocateBuffer(SerializedBufferSize);
   if (CurrentBuffer == nullptr)
     return {nullptr, 0};
 
@@ -832,7 +816,6 @@ XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
       if (TLD.RecordPtr != nullptr && TLD.BQ != nullptr)
         releaseThreadLocalBuffer(*TLD.BQ);
       BQ->~BufferQueue();
-      InternalFree(BQ);
       BQ = nullptr;
     }
   });
@@ -855,15 +838,7 @@ XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
   //      (fixed-sized) and let the tools reading the buffers deal with the data
   //      afterwards.
   //
-  int Fd = -1;
-  {
-    // FIXME: Remove this section of the code, when we remove the struct-based
-    // configuration API.
-    SpinMutexLock Guard(&FDROptionsMutex);
-    Fd = FDROptions.Fd;
-  }
-  if (Fd == -1)
-    Fd = getLogFD();
+  int Fd = getLogFD();
   if (Fd == -1) {
     auto Result = XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING;
     atomic_store(&LogFlushStatus, Result, memory_order_release);
@@ -875,6 +850,13 @@ XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
   retryingWriteAll(Fd, reinterpret_cast<char *>(&Header),
                    reinterpret_cast<char *>(&Header) + sizeof(Header));
 
+  // Release the current thread's buffer before we attempt to write out all the
+  // buffers. This ensures that in case we had only a single thread going, that
+  // we are able to capture the data nonetheless.
+  auto &TLD = getThreadLocalData();
+  if (TLD.RecordPtr != nullptr && TLD.BQ != nullptr)
+    releaseThreadLocalBuffer(*TLD.BQ);
+
   BQ->apply([&](const BufferQueue::Buffer &B) {
     // Starting at version 2 of the FDR logging implementation, we only write
     // the records identified by the extents of the buffer. We use the Extents
@@ -882,7 +864,7 @@ XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
     // still use a Metadata record, but fill in the extents instead for the
     // data.
     MetadataRecord ExtentsRecord;
-    auto BufferExtents = atomic_load(&B.Extents->Size, memory_order_acquire);
+    auto BufferExtents = atomic_load(&B.Extents, memory_order_acquire);
     DCHECK(BufferExtents <= B.Size);
     ExtentsRecord.Type = uint8_t(RecordType::Metadata);
     ExtentsRecord.RecordKind =
@@ -914,7 +896,12 @@ XRayLogInitStatus fdrLoggingFinalize() XRAY_NEVER_INSTRUMENT {
 
   // Do special things to make the log finalize itself, and not allow any more
   // operations to be performed until re-initialized.
-  BQ->finalize();
+  if (BQ == nullptr) {
+    if (Verbosity())
+      Report("Attempting to finalize an uninitialized global buffer!\n");
+  } else {
+    BQ->finalize();
+  }
 
   atomic_store(&LoggingStatus, XRayLogInitStatus::XRAY_LOG_FINALIZED,
                memory_order_release);
@@ -986,10 +973,16 @@ void fdrLoggingHandleCustomEvent(void *Event,
   //   - The metadata record we're going to write. (16 bytes)
   //   - The additional data we're going to write. Currently, that's the size
   //   of the event we're going to dump into the log as free-form bytes.
-  if (!prepareBuffer(TSC, CPU, clock_gettime, MetadataRecSize + EventSize)) {
+  if (!prepareBuffer(TSC, CPU, clock_gettime,
+                     MetadataRecSize + ReducedEventSize)) {
     TLD.BQ = nullptr;
     return;
   }
+
+  // We need to reset the counts for the number of functions we're able to
+  // rewind.
+  TLD.NumConsecutiveFnEnters = 0;
+  TLD.NumTailCalls = 0;
 
   // Write the custom event metadata record, which consists of the following
   // information:
@@ -1001,11 +994,12 @@ void fdrLoggingHandleCustomEvent(void *Event,
       uint8_t(MetadataRecord::RecordKinds::CustomEventMarker);
   constexpr auto TSCSize = sizeof(TC.TSC);
   internal_memcpy(&CustomEvent.Data, &ReducedEventSize, sizeof(int32_t));
-  internal_memcpy(&CustomEvent.Data[sizeof(int32_t)], &TSC, TSCSize);
+  internal_memcpy(&CustomEvent.Data + sizeof(int32_t), &TSC, TSCSize);
   internal_memcpy(TLD.RecordPtr, &CustomEvent, sizeof(CustomEvent));
   TLD.RecordPtr += sizeof(CustomEvent);
   internal_memcpy(TLD.RecordPtr, Event, ReducedEventSize);
-  incrementExtents(MetadataRecSize + EventSize);
+  TLD.RecordPtr += ReducedEventSize;
+  incrementExtents(MetadataRecSize + ReducedEventSize);
   endBufferIfFull();
 }
 
@@ -1031,7 +1025,8 @@ void fdrLoggingHandleTypedEvent(
   //   - The metadata record we're going to write. (16 bytes)
   //   - The additional data we're going to write. Currently, that's the size
   //   of the event we're going to dump into the log as free-form bytes.
-  if (!prepareBuffer(TSC, CPU, clock_gettime, MetadataRecSize + EventSize)) {
+  if (!prepareBuffer(TSC, CPU, clock_gettime,
+                     MetadataRecSize + ReducedEventSize)) {
     TLD.BQ = nullptr;
     return;
   }
@@ -1056,12 +1051,13 @@ void fdrLoggingHandleTypedEvent(
 
   TLD.RecordPtr += sizeof(TypedEvent);
   internal_memcpy(TLD.RecordPtr, Event, ReducedEventSize);
+  TLD.RecordPtr += ReducedEventSize;
   incrementExtents(MetadataRecSize + EventSize);
   endBufferIfFull();
 }
 
-XRayLogInitStatus fdrLoggingInit(size_t BufferSize, size_t BufferMax,
-                                 void *Options,
+XRayLogInitStatus fdrLoggingInit(UNUSED size_t BufferSize,
+                                 UNUSED size_t BufferMax, void *Options,
                                  size_t OptionsSize) XRAY_NEVER_INSTRUMENT {
   if (Options == nullptr)
     return XRayLogInitStatus::XRAY_LOG_UNINITIALIZED;
@@ -1075,76 +1071,51 @@ XRayLogInitStatus fdrLoggingInit(size_t BufferSize, size_t BufferMax,
     return static_cast<XRayLogInitStatus>(CurrentStatus);
   }
 
-  // Because of __xray_log_init_mode(...) which guarantees that this will be
-  // called with BufferSize == 0 and BufferMax == 0 we parse the configuration
-  // provided in the Options pointer as a string instead.
-  if (BufferSize == 0 && BufferMax == 0) {
-    if (Verbosity())
-      Report("Initializing FDR mode with options: %s\n",
-             static_cast<const char *>(Options));
+  if (Verbosity())
+    Report("Initializing FDR mode with options: %s\n",
+           static_cast<const char *>(Options));
 
-    // TODO: Factor out the flags specific to the FDR mode implementation. For
-    // now, use the global/single definition of the flags, since the FDR mode
-    // flags are already defined there.
-    FlagParser FDRParser;
-    FDRFlags FDRFlags;
-    registerXRayFDRFlags(&FDRParser, &FDRFlags);
-    FDRFlags.setDefaults();
+  // TODO: Factor out the flags specific to the FDR mode implementation. For
+  // now, use the global/single definition of the flags, since the FDR mode
+  // flags are already defined there.
+  FlagParser FDRParser;
+  FDRFlags FDRFlags;
+  registerXRayFDRFlags(&FDRParser, &FDRFlags);
+  FDRFlags.setDefaults();
 
-    // Override first from the general XRAY_DEFAULT_OPTIONS compiler-provided
-    // options until we migrate everyone to use the XRAY_FDR_OPTIONS
-    // compiler-provided options.
-    FDRParser.ParseString(useCompilerDefinedFlags());
-    FDRParser.ParseString(useCompilerDefinedFDRFlags());
-    auto *EnvOpts = GetEnv("XRAY_FDR_OPTIONS");
-    if (EnvOpts == nullptr)
-      EnvOpts = "";
-    FDRParser.ParseString(EnvOpts);
+  // Override first from the general XRAY_DEFAULT_OPTIONS compiler-provided
+  // options until we migrate everyone to use the XRAY_FDR_OPTIONS
+  // compiler-provided options.
+  FDRParser.ParseString(useCompilerDefinedFlags());
+  FDRParser.ParseString(useCompilerDefinedFDRFlags());
+  auto *EnvOpts = GetEnv("XRAY_FDR_OPTIONS");
+  if (EnvOpts == nullptr)
+    EnvOpts = "";
+  FDRParser.ParseString(EnvOpts);
 
-    // FIXME: Remove this when we fully remove the deprecated flags.
-    if (internal_strlen(EnvOpts) == 0) {
-      FDRFlags.func_duration_threshold_us =
-          flags()->xray_fdr_log_func_duration_threshold_us;
-      FDRFlags.grace_period_ms = flags()->xray_fdr_log_grace_period_ms;
-    }
-
-    // The provided options should always override the compiler-provided and
-    // environment-variable defined options.
-    FDRParser.ParseString(static_cast<const char *>(Options));
-    *fdrFlags() = FDRFlags;
-    BufferSize = FDRFlags.buffer_size;
-    BufferMax = FDRFlags.buffer_max;
-    SpinMutexLock Guard(&FDROptionsMutex);
-    FDROptions.Fd = -1;
-    FDROptions.ReportErrors = true;
-  } else if (OptionsSize != sizeof(FDRLoggingOptions)) {
-    // FIXME: This is deprecated, and should really be removed.
-    // At this point we use the flag parser specific to the FDR mode
-    // implementation.
-    if (Verbosity())
-      Report("Cannot initialize FDR logging; wrong size for options: %d\n",
-             OptionsSize);
-    return static_cast<XRayLogInitStatus>(
-        atomic_load(&LoggingStatus, memory_order_acquire));
-  } else {
-    if (Verbosity())
-      Report("XRay FDR: struct-based init is deprecated, please use "
-             "string-based configuration instead.\n");
-    SpinMutexLock Guard(&FDROptionsMutex);
-    internal_memcpy(&FDROptions, Options, OptionsSize);
+  // FIXME: Remove this when we fully remove the deprecated flags.
+  if (internal_strlen(EnvOpts) == 0) {
+    FDRFlags.func_duration_threshold_us =
+        flags()->xray_fdr_log_func_duration_threshold_us;
+    FDRFlags.grace_period_ms = flags()->xray_fdr_log_grace_period_ms;
   }
+
+  // The provided options should always override the compiler-provided and
+  // environment-variable defined options.
+  FDRParser.ParseString(static_cast<const char *>(Options));
+  *fdrFlags() = FDRFlags;
+  BufferSize = FDRFlags.buffer_size;
+  BufferMax = FDRFlags.buffer_max;
 
   bool Success = false;
 
   if (BQ != nullptr) {
     BQ->~BufferQueue();
-    InternalFree(BQ);
     BQ = nullptr;
   }
 
   if (BQ == nullptr) {
-    BQ = reinterpret_cast<BufferQueue *>(
-        InternalAlloc(sizeof(BufferQueue), nullptr, 64));
+    BQ = reinterpret_cast<BufferQueue *>(&BufferQueueStorage);
     new (BQ) BufferQueue(BufferSize, BufferMax, Success);
   }
 
@@ -1152,7 +1123,6 @@ XRayLogInitStatus fdrLoggingInit(size_t BufferSize, size_t BufferMax,
     Report("BufferQueue init failed.\n");
     if (BQ != nullptr) {
       BQ->~BufferQueue();
-      InternalFree(BQ);
       BQ = nullptr;
     }
     return XRayLogInitStatus::XRAY_LOG_UNINITIALIZED;
@@ -1169,6 +1139,8 @@ XRayLogInitStatus fdrLoggingInit(size_t BufferSize, size_t BufferMax,
         return;
       auto &TLD = *reinterpret_cast<ThreadLocalData *>(TLDPtr);
       if (TLD.BQ == nullptr)
+        return;
+      if (TLD.Buffer.Data == nullptr)
         return;
       auto EC = TLD.BQ->releaseBuffer(TLD.Buffer);
       if (EC != BufferQueue::ErrorCode::Ok)
@@ -1209,11 +1181,22 @@ bool fdrLogDynamicInitializer() XRAY_NEVER_INSTRUMENT {
   };
   auto RegistrationResult = __xray_log_register_mode("xray-fdr", Impl);
   if (RegistrationResult != XRayLogRegisterStatus::XRAY_REGISTRATION_OK &&
-      Verbosity())
+      Verbosity()) {
     Report("Cannot register XRay FDR mode to 'xray-fdr'; error = %d\n",
            RegistrationResult);
-  if (flags()->xray_fdr_log || !internal_strcmp(flags()->xray_mode, "xray-fdr"))
-    __xray_set_log_impl(Impl);
+    return false;
+  }
+
+  if (flags()->xray_fdr_log ||
+      !internal_strcmp(flags()->xray_mode, "xray-fdr")) {
+    auto SelectResult = __xray_log_select_mode("xray-fdr");
+    if (SelectResult != XRayLogRegisterStatus::XRAY_REGISTRATION_OK &&
+        Verbosity()) {
+      Report("Cannot select XRay FDR mode as 'xray-fdr'; error = %d\n",
+             SelectResult);
+      return false;
+    }
+  }
   return true;
 }
 

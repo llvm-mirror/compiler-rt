@@ -47,9 +47,20 @@ extern "C" {
   // does would cause false reports.
   void __hwasan_handle_longjmp(const void *sp_dst);
 
+  // Libc hook for thread creation. Should be called in the child thread before
+  // any instrumented code.
+  void __hwasan_thread_enter();
+
+  // Libc hook for thread destruction. No instrumented code should run after
+  // this call.
+  void __hwasan_thread_exit();
+
   // Print shadow and origin for the memory range to stderr in a human-readable
   // format.
   void __hwasan_print_shadow(const volatile void *x, size_t size);
+
+  // Print one-line report about the memory usage of the current process.
+  void __hwasan_print_memory_usage();
 
   int __sanitizer_posix_memalign(void **memptr, size_t alignment, size_t size);
   void * __sanitizer_memalign(size_t alignment, size_t size);

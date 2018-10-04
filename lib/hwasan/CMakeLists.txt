@@ -10,6 +10,7 @@ set(HWASAN_RTL_SOURCES
   hwasan_poisoning.cc
   hwasan_report.cc
   hwasan_thread.cc
+  hwasan_thread_list.cc
   )
 
 set(HWASAN_RTL_CXX_SOURCES
@@ -25,8 +26,12 @@ set(HWASAN_RTL_HEADERS
   hwasan_mapping.h
   hwasan_poisoning.h
   hwasan_report.h
-  hwasan_thread.h)
+  hwasan_thread.h
+  hwasan_thread_list.h
+  )
 
+set(HWASAN_DEFINITIONS)
+append_list_if(COMPILER_RT_HWASAN_WITH_INTERCEPTORS HWASAN_WITH_INTERCEPTORS=1 HWASAN_DEFINITIONS)
 
 set(HWASAN_RTL_CFLAGS ${SANITIZER_COMMON_CFLAGS})
 append_rtti_flag(OFF HWASAN_RTL_CFLAGS)
@@ -55,23 +60,27 @@ add_compiler_rt_object_libraries(RTHwasan
   ARCHS ${HWASAN_SUPPORTED_ARCH}
   SOURCES ${HWASAN_RTL_SOURCES}
   ADDITIONAL_HEADERS ${HWASAN_RTL_HEADERS}
-  CFLAGS ${HWASAN_RTL_CFLAGS})
+  CFLAGS ${HWASAN_RTL_CFLAGS}
+  DEFS ${HWASAN_DEFINITIONS})
 add_compiler_rt_object_libraries(RTHwasan_cxx
   ARCHS ${HWASAN_SUPPORTED_ARCH}
   SOURCES ${HWASAN_RTL_CXX_SOURCES}
   ADDITIONAL_HEADERS ${HWASAN_RTL_HEADERS}
-  CFLAGS ${HWASAN_RTL_CFLAGS})
+  CFLAGS ${HWASAN_RTL_CFLAGS}
+  DEFS ${HWASAN_DEFINITIONS})
 add_compiler_rt_object_libraries(RTHwasan_dynamic
   ARCHS ${HWASAN_SUPPORTED_ARCH}
   SOURCES ${HWASAN_RTL_SOURCES} ${HWASAN_RTL_CXX_SOURCES}
   ADDITIONAL_HEADERS ${HWASAN_RTL_HEADERS}
-  CFLAGS ${HWASAN_DYNAMIC_CFLAGS})
+  CFLAGS ${HWASAN_DYNAMIC_CFLAGS}
+  DEFS ${HWASAN_DEFINITIONS})
 
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/dummy.cc "")
 add_compiler_rt_object_libraries(RTHwasan_dynamic_version_script_dummy
   ARCHS ${HWASAN_SUPPORTED_ARCH}
   SOURCES ${CMAKE_CURRENT_BINARY_DIR}/dummy.cc
-  CFLAGS ${HWASAN_DYNAMIC_CFLAGS})
+  CFLAGS ${HWASAN_DYNAMIC_CFLAGS}
+  DEFS ${HWASAN_DEFINITIONS})
 
 foreach(arch ${HWASAN_SUPPORTED_ARCH})
   add_compiler_rt_runtime(clang_rt.hwasan

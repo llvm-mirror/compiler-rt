@@ -17,9 +17,10 @@
 // HWASAN_FLAG(Type, Name, DefaultValue, Description)
 // See COMMON_FLAG in sanitizer_flags.inc for more details.
 
+HWASAN_FLAG(bool, verbose_threads, false,
+            "inform on thread creation/destruction")
 HWASAN_FLAG(bool, tag_in_malloc, true, "")
 HWASAN_FLAG(bool, tag_in_free, true, "")
-HWASAN_FLAG(bool, retag_in_realloc, true, "")
 HWASAN_FLAG(bool, print_stats, false, "")
 HWASAN_FLAG(bool, halt_on_error, true, "")
 HWASAN_FLAG(bool, atexit, false, "")
@@ -44,3 +45,13 @@ HWASAN_FLAG(int, malloc_fill_byte, 0xbe,
           "Value used to fill the newly allocated memory.")
 HWASAN_FLAG(int, free_fill_byte, 0x55,
           "Value used to fill deallocated memory.")
+HWASAN_FLAG(int, heap_history_size, 1023,
+          "The number of heap (de)allocations remembered per thread. "
+          "Affects the quality of heap-related reports, but not the ability "
+          "to find bugs.")
+HWASAN_FLAG(bool, export_memory_stats, true,
+            "Export up-to-date memory stats through /proc")
+HWASAN_FLAG(int, stack_history_size, 1024,
+            "The number of stack frames remembered per thread. "
+            "Affects the quality of stack-related reports, but not the ability "
+            "to find bugs.")

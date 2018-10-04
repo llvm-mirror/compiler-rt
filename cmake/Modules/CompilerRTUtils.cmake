@@ -217,7 +217,7 @@ macro(load_llvm_config)
   endif()
   if (LLVM_CONFIG_PATH)
     execute_process(
-      COMMAND ${LLVM_CONFIG_PATH} "--obj-root" "--bindir" "--libdir" "--src-root"
+      COMMAND ${LLVM_CONFIG_PATH} "--obj-root" "--bindir" "--libdir" "--src-root" "--includedir"
       RESULT_VARIABLE HAD_ERROR
       OUTPUT_VARIABLE CONFIG_OUTPUT)
     if (HAD_ERROR)
@@ -228,11 +228,31 @@ macro(load_llvm_config)
     list(GET CONFIG_OUTPUT 1 TOOLS_BINARY_DIR)
     list(GET CONFIG_OUTPUT 2 LIBRARY_DIR)
     list(GET CONFIG_OUTPUT 3 MAIN_SRC_DIR)
+    list(GET CONFIG_OUTPUT 4 INCLUDE_DIR)
 
     set(LLVM_BINARY_DIR ${BINARY_DIR} CACHE PATH "Path to LLVM build tree")
-    set(LLVM_TOOLS_BINARY_DIR ${TOOLS_BINARY_DIR} CACHE PATH "Path to llvm/bin")
     set(LLVM_LIBRARY_DIR ${LIBRARY_DIR} CACHE PATH "Path to llvm/lib")
     set(LLVM_MAIN_SRC_DIR ${MAIN_SRC_DIR} CACHE PATH "Path to LLVM source tree")
+    set(LLVM_TOOLS_BINARY_DIR ${TOOLS_BINARY_DIR} CACHE PATH "Path to llvm/bin")
+    set(LLVM_INCLUDE_DIR ${INCLUDE_DIR} CACHE PATH "Paths to LLVM headers")
+
+    # Detect if we have the LLVMXRay and TestingSupport library installed and
+    # available from llvm-config.
+    execute_process(
+      COMMAND ${LLVM_CONFIG_PATH} "--ldflags" "--libs" "xray" "testingsupport"
+      RESULT_VARIABLE HAD_ERROR
+      OUTPUT_VARIABLE CONFIG_OUTPUT)
+    if (HAD_ERROR)
+      message(WARNING "llvm-config finding xray failed with status ${HAD_ERROR}")
+      set(COMPILER_RT_HAS_LLVMXRAY FALSE)
+    else()
+      string(REGEX REPLACE "[ \t]*[\r\n]+[ \t]*" ";" CONFIG_OUTPUT ${CONFIG_OUTPUT})
+      list(GET CONFIG_OUTPUT 0 LDFLAGS)
+      list(GET CONFIG_OUTPUT 1 LIBLIST)
+      set(LLVM_XRAY_LDFLAGS ${LDFLAGS} CACHE STRING "Linker flags for LLVMXRay library")
+      set(LLVM_XRAY_LIBLIST ${LIBLIST} CACHE STRING "Library list for LLVMXRay")
+      set(COMPILER_RT_HAS_LLVMXRAY TRUE)
+    endif()
 
     # Make use of LLVM CMake modules.
     # --cmakedir is supported since llvm r291218 (4.0 release)

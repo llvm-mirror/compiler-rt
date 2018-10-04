@@ -91,6 +91,8 @@ append_list_if(COMPILER_RT_HAS_LIBRT rt ASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBM m ASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBPTHREAD pthread ASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBLOG log ASAN_DYNAMIC_LIBS)
+append_list_if(MINGW "${MINGW_LIBRARIES}" ASAN_DYNAMIC_LIBS)
+append_list_if(MINGW psapi ASAN_DYNAMIC_LIBS)
 
 # Compile ASan sources into an object library.
 
@@ -138,6 +140,7 @@ if(APPLE)
   add_weak_symbols("lsan" WEAK_SYMBOL_LINK_FLAGS)
   add_weak_symbols("ubsan" WEAK_SYMBOL_LINK_FLAGS)
   add_weak_symbols("sanitizer_common" WEAK_SYMBOL_LINK_FLAGS)
+  add_weak_symbols("xray" WEAK_SYMBOL_LINK_FLAGS)
 
   add_compiler_rt_runtime(clang_rt.asan
     SHARED
@@ -215,7 +218,7 @@ else()
     endif()
 
     set(ASAN_DYNAMIC_WEAK_INTERCEPTION)
-    if (MSVC)
+    if (WIN32)
       add_compiler_rt_object_libraries(AsanWeakInterception
         ${SANITIZER_COMMON_SUPPORTED_OS}
         ARCHS ${arch}

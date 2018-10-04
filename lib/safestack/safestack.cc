@@ -152,6 +152,7 @@ static void *thread_start(void *arg) {
 struct thread_stack_ll {
   struct thread_stack_ll *next;
   void *stack_base;
+  size_t size;
   pid_t pid;
   tid_t tid;
 };
@@ -182,8 +183,11 @@ static void thread_cleanup_handler(void *_iter) {
   thread_stack_ll **stackp = &temp_stacks;
   while (*stackp) {
     thread_stack_ll *stack = *stackp;
-    if (stack->pid != pid || TgKill(stack->pid, stack->tid, 0) == -ESRCH) {
-      UnmapOrDie(stack->stack_base, unsafe_stack_size + unsafe_stack_guard);
+    int error;
+    if (stack->pid != pid ||
+        (internal_iserror(TgKill(stack->pid, stack->tid, 0), &error) &&
+         error == ESRCH)) {
+      UnmapOrDie(stack->stack_base, stack->size);
       *stackp = stack->next;
       free(stack);
     } else
@@ -193,6 +197,7 @@ static void thread_cleanup_handler(void *_iter) {
   thread_stack_ll *cur_stack =
       (thread_stack_ll *)malloc(sizeof(thread_stack_ll));
   cur_stack->stack_base = (char *)unsafe_stack_start - unsafe_stack_guard;
+  cur_stack->size = unsafe_stack_size + unsafe_stack_guard;
   cur_stack->pid = pid;
   cur_stack->tid = tid;
 
