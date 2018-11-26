@@ -21,16 +21,17 @@
 	.thumb
 #endif
 
-#if __ARM_ARCH_ISA_THUMB == 2
-#define IT(cond)  it cond
-#define ITT(cond) itt cond
-#else
-#define IT(cond)
-#define ITT(cond)
-#endif
+@ unsigned int __udivmodsi4(unsigned int divident, unsigned int divisor,
+@                           unsigned int *remainder)
+@   Calculate the quotient and remainder of the (unsigned) division.  The return
+@   value is the quotient, the remainder is placed in the variable.
 
 	.p2align 2
+#if __ARM_ARCH_ISA_THUMB == 2
+DEFINE_COMPILERRT_THUMB_FUNCTION(__udivmodsi4)
+#else
 DEFINE_COMPILERRT_FUNCTION(__udivmodsi4)
+#endif
 #if __ARM_ARCH_EXT_IDIV__
 	tst     r1, r1
 	beq     LOCAL_LABEL(divby0)
@@ -117,11 +118,11 @@ DEFINE_COMPILERRT_FUNCTION(__udivmodsi4)
 
 #define	IMM	#
 
-#define block(shift) \
-	cmp	r0, r1, lsl IMM shift; \
-	ITT(hs); \
-	addhs.w	r3, r3, IMM (1 << shift); \
-	subhs.w	r0, r0, r1, lsl IMM shift
+#define block(shift)                                                           \
+	cmp	r0, r1, lsl IMM shift;                                         \
+	ITT(hs);                                                               \
+	WIDE(addhs)	r3, r3, IMM (1 << shift);                              \
+	WIDE(subhs)	r0, r0, r1, lsl IMM shift
 
 	block(31)
 	block(30)
@@ -181,3 +182,6 @@ LOCAL_LABEL(divby0):
 #endif
 
 END_COMPILERRT_FUNCTION(__udivmodsi4)
+
+NO_EXEC_STACK_DIRECTIVE
+

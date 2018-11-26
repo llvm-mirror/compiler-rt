@@ -25,6 +25,11 @@ extern "C" {
   /* Get raw origin for an address. */
   uint32_t __msan_get_origin(const volatile void *a);
 
+  /* Test that this_id is a descendant of prev_id (or they are simply equal).
+   * "descendant" here means they are part of the same chain, created with
+   * __msan_chain_origin. */
+  int __msan_origin_is_descendant_or_same(uint32_t this_id, uint32_t prev_id);
+
   /* Returns non-zero if tracking origins. */
   int __msan_get_track_origins();
 
@@ -38,7 +43,9 @@ extern "C" {
      contents). */
   void __msan_unpoison_string(const volatile char *a);
 
-  /* Make memory region fully uninitialized (without changing its contents). */
+  /* Make memory region fully uninitialized (without changing its contents).
+     This is a legacy interface that does not update origin information. Use
+     __msan_allocated_memory() instead. */
   void __msan_poison(const volatile void *a, size_t size);
 
   /* Make memory region partially uninitialized (without changing its contents).
@@ -53,10 +60,6 @@ extern "C" {
   /* Checks that memory range is fully initialized, and reports an error if it
    * is not. */
   void __msan_check_mem_is_initialized(const volatile void *x, size_t size);
-
-  /* Set exit code when error(s) were detected.
-     Value of 0 means don't change the program exit code. */
-  void __msan_set_exit_code(int exit_code);
 
   /* For testing:
      __msan_set_expect_umr(1);
@@ -85,68 +88,22 @@ extern "C" {
      Memory will be marked uninitialized, with origin at the call site. */
   void __msan_allocated_memory(const volatile void* data, size_t size);
 
+  /* Tell MSan about newly destroyed memory. Mark memory as uninitialized. */
+  void __sanitizer_dtor_callback(const volatile void* data, size_t size);
+
   /* This function may be optionally provided by user and should return
      a string containing Msan runtime options. See msan_flags.h for details. */
   const char* __msan_default_options();
 
-  /* Sets the callback to be called right before death on error.
-     Passing 0 will unset the callback. */
+  /* Deprecated. Call __sanitizer_set_death_callback instead. */
   void __msan_set_death_callback(void (*callback)(void));
 
-  /***********************************/
-  /* Allocator statistics interface. */
-
-  /* Returns the estimated number of bytes that will be reserved by allocator
-     for request of "size" bytes. If Msan allocator can't allocate that much
-     memory, returns the maximal possible allocation size, otherwise returns
-     "size". */
-  /* DEPRECATED: Use __sanitizer_get_estimated_allocated_size instead. */
-  size_t __msan_get_estimated_allocated_size(size_t size);
-
-  /* Returns true if p was returned by the Msan allocator and
-     is not yet freed. */
-  /* DEPRECATED: Use __sanitizer_get_ownership instead. */
-  int __msan_get_ownership(const volatile void *p);
-
-  /* Returns the number of bytes reserved for the pointer p.
-     Requires (get_ownership(p) == true) or (p == 0). */
-  /* DEPRECATED: Use __sanitizer_get_allocated_size instead. */
-  size_t __msan_get_allocated_size(const volatile void *p);
-
-  /* Number of bytes, allocated and not yet freed by the application. */
-  /* DEPRECATED: Use __sanitizer_get_current_allocated_bytes instead. */
-  size_t __msan_get_current_allocated_bytes();
-
-  /* Number of bytes, mmaped by msan allocator to fulfill allocation requests.
-     Generally, for request of X bytes, allocator can reserve and add to free
-     lists a large number of chunks of size X to use them for future requests.
-     All these chunks count toward the heap size. Currently, allocator never
-     releases memory to OS (instead, it just puts freed chunks to free
-     lists). */
-  /* DEPRECATED: Use __sanitizer_get_heap_size instead. */
-  size_t __msan_get_heap_size();
-
-  /* Number of bytes, mmaped by msan allocator, which can be used to fulfill
-     allocation requests. When a user program frees memory chunk, it can first
-     fall into quarantine and will count toward __msan_get_free_bytes()
-     later. */
-  /* DEPRECATED: Use __sanitizer_get_free_bytes instead. */
-  size_t __msan_get_free_bytes();
-
-  /* Number of bytes in unmapped pages, that are released to OS. Currently,
-     always returns 0. */
-  /* DEPRECATED: Use __sanitizer_get_unmapped_bytes instead. */
-  size_t __msan_get_unmapped_bytes();
-
-  /* Malloc hooks that may be optionally provided by user.
-     __msan_malloc_hook(ptr, size) is called immediately after
-       allocation of "size" bytes, which returned "ptr".
-     __msan_free_hook(ptr) is called immediately before
-       deallocation of "ptr". */
-  /* DEPRECATED: Use __sanitizer_malloc_hook / __sanitizer_free_hook instead. */
-  void __msan_malloc_hook(const volatile void *ptr, size_t size);
-  void __msan_free_hook(const volatile void *ptr);
-
+  /* Update shadow for the application copy of size bytes from src to dst.
+     Src and dst are application addresses. This function does not copy the
+     actual application memory, it only updates shadow and origin for such
+     copy. Source and destination regions can overlap. */
+  void __msan_copy_shadow(const volatile void *dst, const volatile void *src,
+                          size_t size);
 #ifdef __cplusplus
 }  // extern "C"
 #endif

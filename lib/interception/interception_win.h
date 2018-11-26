@@ -22,27 +22,63 @@
 #define INTERCEPTION_WIN_H
 
 namespace __interception {
-// returns true if a function with the given name was found.
-bool GetRealFunctionAddress(const char *func_name, uptr *func_addr);
+// All the functions in the OverrideFunction() family return true on success,
+// false on failure (including "couldn't find the function").
 
-// returns true if the old function existed, false on failure.
-bool OverrideFunction(uptr old_func, uptr new_func, uptr *orig_old_func);
-}  // namespace __interception
+// Overrides a function by its address.
+bool OverrideFunction(uptr old_func, uptr new_func, uptr *orig_old_func = 0);
 
-#if defined(_DLL)
-# define INTERCEPT_FUNCTION_WIN(func) \
-    ::__interception::GetRealFunctionAddress( \
-        #func, (::__interception::uptr*)&REAL(func))
-#else
-# define INTERCEPT_FUNCTION_WIN(func) \
-    ::__interception::OverrideFunction( \
-        (::__interception::uptr)func, \
-        (::__interception::uptr)WRAP(func), \
-        (::__interception::uptr*)&REAL(func))
+// Overrides a function in a system DLL or DLL CRT by its exported name.
+bool OverrideFunction(const char *name, uptr new_func, uptr *orig_old_func = 0);
+
+// Windows-only replacement for GetProcAddress. Useful for some sanitizers.
+uptr InternalGetProcAddress(void *module, const char *func_name);
+
+// Overrides a function only when it is called from a specific DLL. For example,
+// this is used to override calls to HeapAlloc/HeapFree from ucrtbase without
+// affecting other third party libraries.
+bool OverrideImportedFunction(const char *module_to_patch,
+                              const char *imported_module,
+                              const char *function_name, uptr new_function,
+                              uptr *orig_old_func);
+
+#if !SANITIZER_WINDOWS64
+// Exposed for unittests
+bool OverrideFunctionWithDetour(
+    uptr old_func, uptr new_func, uptr *orig_old_func);
 #endif
 
-#define INTERCEPT_FUNCTION_VER_WIN(func, symver) \
-    INTERCEPT_FUNCTION_WIN(func)
+// Exposed for unittests
+bool OverrideFunctionWithRedirectJump(
+    uptr old_func, uptr new_func, uptr *orig_old_func);
+bool OverrideFunctionWithHotPatch(
+    uptr old_func, uptr new_func, uptr *orig_old_func);
+bool OverrideFunctionWithTrampoline(
+    uptr old_func, uptr new_func, uptr *orig_old_func);
+
+// Exposed for unittests
+void TestOnlyReleaseTrampolineRegions();
+
+}  // namespace __interception
+
+#if defined(INTERCEPTION_DYNAMIC_CRT)
+#define INTERCEPT_FUNCTION_WIN(func)                                           \
+  ::__interception::OverrideFunction(#func,                                    \
+                                     (::__interception::uptr)WRAP(func),       \
+                                     (::__interception::uptr *)&REAL(func))
+#else
+#define INTERCEPT_FUNCTION_WIN(func)                                           \
+  ::__interception::OverrideFunction((::__interception::uptr)func,             \
+                                     (::__interception::uptr)WRAP(func),       \
+                                     (::__interception::uptr *)&REAL(func))
+#endif
+
+#define INTERCEPT_FUNCTION_VER_WIN(func, symver) INTERCEPT_FUNCTION_WIN(func)
+
+#define INTERCEPT_FUNCTION_DLLIMPORT(user_dll, provider_dll, func)       \
+  ::__interception::OverrideImportedFunction(                            \
+      user_dll, provider_dll, #func, (::__interception::uptr)WRAP(func), \
+      (::__interception::uptr *)&REAL(func))
 
 #endif  // INTERCEPTION_WIN_H
 #endif  // _WIN32

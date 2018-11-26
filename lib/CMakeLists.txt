@@ -3,37 +3,60 @@
 
 include(AddCompilerRT)
 include(SanitizerUtils)
-# Don't build sanitizers in the bootstrap build.
-if(NOT LLVM_USE_SANITIZER)
-  # AddressSanitizer is supported on Linux, FreeBSD and Mac OS X.
-  # 32-bit Windows support is experimental.
-  if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux|FreeBSD")
-    set(SUPPORTS_BUILDING_ASAN TRUE)
-  elseif(CMAKE_SYSTEM_NAME MATCHES "Windows"
-         AND MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
-    set(SUPPORTS_BUILDING_ASAN TRUE)
-  else()
-    set(SUPPORTS_BUILDING_ASAN FALSE)
-  endif()
-  if(SUPPORTS_BUILDING_ASAN)
-    add_subdirectory(asan)
-    add_subdirectory(interception)
-    add_subdirectory(sanitizer_common)
-  endif()
-  if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux|FreeBSD" AND NOT ANDROID)
-    # LSan, UBsan and profile can be built on Mac OS, FreeBSD and Linux.
-    add_subdirectory(lsan)
-    add_subdirectory(profile)
-    add_subdirectory(ubsan)
-  endif()
-  if(CMAKE_SYSTEM_NAME MATCHES "Linux" AND NOT ANDROID)
-    # ThreadSanitizer and MemorySanitizer are supported on Linux only.
-    add_subdirectory(tsan)
-    add_subdirectory(tsan/dd)
-    add_subdirectory(msan)
-    add_subdirectory(msandr)
-    add_subdirectory(dfsan)
-  endif()
+
+# Hoist the building of sanitizer_common on whether we're building either the
+# sanitizers or xray (or both).
+#
+#TODO: Refactor sanitizer_common into smaller pieces (e.g. flag parsing, utils).
+if (COMPILER_RT_HAS_SANITIZER_COMMON AND
+    (COMPILER_RT_BUILD_SANITIZERS OR COMPILER_RT_BUILD_XRAY))
+  add_subdirectory(sanitizer_common)
 endif()
 
-add_subdirectory(builtins)
+if(COMPILER_RT_BUILD_BUILTINS)
+  add_subdirectory(builtins)
+endif()
+
+function(compiler_rt_build_runtime runtime)
+  string(TOUPPER ${runtime} runtime_uppercase)
+  if(COMPILER_RT_HAS_${runtime_uppercase})
+    add_subdirectory(${runtime})
+    foreach(directory ${ARGN})
+      add_subdirectory(${directory})
+    endforeach()
+  endif()
+endfunction()
+
+function(compiler_rt_build_sanitizer sanitizer)
+  string(TOUPPER ${sanitizer} sanitizer_uppercase)
+  string(TOLOWER ${sanitizer} sanitizer_lowercase)
+  list(FIND COMPILER_RT_SANITIZERS_TO_BUILD ${sanitizer_lowercase} result)
+  if(NOT ${result} EQUAL -1)
+    compiler_rt_build_runtime(${sanitizer} ${ARGN})
+  endif()
+endfunction()
+
+if(COMPILER_RT_BUILD_SANITIZERS)
+  compiler_rt_build_runtime(interception)
+
+  if(COMPILER_RT_HAS_SANITIZER_COMMON)
+    add_subdirectory(stats)
+    add_subdirectory(lsan)
+    add_subdirectory(ubsan)
+  endif()
+
+  compiler_rt_build_sanitizer(asan)
+  compiler_rt_build_sanitizer(dfsan)
+  compiler_rt_build_sanitizer(msan)
+  compiler_rt_build_sanitizer(tsan tsan/dd)
+  compiler_rt_build_sanitizer(safestack)
+  compiler_rt_build_sanitizer(cfi)
+  compiler_rt_build_sanitizer(esan)
+  compiler_rt_build_sanitizer(scudo)
+
+  compiler_rt_build_runtime(profile)
+endif()
+
+if(COMPILER_RT_BUILD_XRAY)
+  compiler_rt_build_runtime(xray)
+endif()

@@ -1,4 +1,4 @@
-// RUN: %clangxx_msan -m64 -O0 %s -o %t && %run %t
+// RUN: %clangxx_msan -O0 %s -o %t && %run %t
 
 #include <assert.h>
 #include <execinfo.h>
@@ -15,9 +15,9 @@ void f() {
     if (!buf[i])
       exit(1);
   char **s = backtrace_symbols(buf, sz);
-  assert(s > 0);
+  assert(s != 0);
   for (int i = 0; i < sz; ++i)
-    printf("%d\n", strlen(s[i]));
+    printf("%d\n", (int)strlen(s[i]));
 }
 
 int main(void) {

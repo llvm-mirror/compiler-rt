@@ -16,16 +16,25 @@ endif()
 # Create a separate config for each tool we support.
 foreach(tool ${SUPPORTED_TOOLS})
   string(TOUPPER ${tool} tool_toupper)
-  if(${tool_toupper}_SUPPORTED_ARCH)
+  if(${tool_toupper}_SUPPORTED_ARCH AND NOT COMPILER_RT_STANDALONE_BUILD)
+    list(APPEND SANITIZER_COMMON_TEST_DEPS ${tool})
+  endif()
+  set(TEST_ARCH ${${tool_toupper}_SUPPORTED_ARCH})
+  if(APPLE)
+    darwin_filter_host_archs(${tool_toupper}_SUPPORTED_ARCH TEST_ARCH)
+  endif()
+
+  foreach(arch ${TEST_ARCH})
     set(SANITIZER_COMMON_LIT_TEST_MODE ${tool})
+    set(SANITIZER_COMMON_TEST_TARGET_ARCH ${arch})
+    get_test_cc_for_arch(${arch} SANITIZER_COMMON_TEST_TARGET_CC SANITIZER_COMMON_TEST_TARGET_CFLAGS)
+    set(CONFIG_NAME ${tool}-${arch}-${OS_NAME})
     configure_lit_site_cfg(
       ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.in
-      ${CMAKE_CURRENT_BINARY_DIR}/${tool}/lit.site.cfg)
-    list(APPEND SANITIZER_COMMON_TESTSUITES ${CMAKE_CURRENT_BINARY_DIR}/${tool})
-    if(NOT COMPILER_RT_STANDALONE_BUILD)
-      list(APPEND SANITIZER_COMMON_TEST_DEPS ${tool})
-    endif()
-  endif()
+      ${CMAKE_CURRENT_BINARY_DIR}/${CONFIG_NAME}/lit.site.cfg)
+    list(APPEND SANITIZER_COMMON_TESTSUITES
+         ${CMAKE_CURRENT_BINARY_DIR}/${CONFIG_NAME})
+  endforeach()
 endforeach()
 
 # Unit tests.
@@ -42,5 +51,5 @@ if(SANITIZER_COMMON_TESTSUITES)
     ${SANITIZER_COMMON_TESTSUITES}
     DEPENDS ${SANITIZER_COMMON_TEST_DEPS})
   set_target_properties(check-sanitizer PROPERTIES FOLDER
-                        "sanitizer_common tests")
+                        "Compiler-RT Misc")
 endif()

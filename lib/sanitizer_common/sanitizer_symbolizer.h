@@ -19,17 +19,19 @@
 #ifndef SANITIZER_SYMBOLIZER_H
 #define SANITIZER_SYMBOLIZER_H
 
-#include "sanitizer_allocator_internal.h"
-#include "sanitizer_internal_defs.h"
-#include "sanitizer_libc.h"
+#include "sanitizer_common.h"
+#include "sanitizer_mutex.h"
 
 namespace __sanitizer {
 
 struct AddressInfo {
+  // Owns all the string members. Storage for them is
+  // (de)allocated using sanitizer internal allocator.
   uptr address;
 
   char *module;
   uptr module_offset;
+  ModuleArch module_arch;
 
   static const uptr kUnknown = ~(uptr)0;
   char *function;
@@ -39,76 +41,73 @@ struct AddressInfo {
   int line;
   int column;
 
-  AddressInfo() {
-    internal_memset(this, 0, sizeof(AddressInfo));
-    function_offset = kUnknown;
-  }
-
+  AddressInfo();
   // Deletes all strings and resets all fields.
-  void Clear() {
-    InternalFree(module);
-    InternalFree(function);
-    InternalFree(file);
-    internal_memset(this, 0, sizeof(AddressInfo));
-    function_offset = kUnknown;
-  }
-
-  void FillAddressAndModuleInfo(uptr addr, const char *mod_name,
-                                uptr mod_offset) {
-    address = addr;
-    module = internal_strdup(mod_name);
-    module_offset = mod_offset;
-  }
+  void Clear();
+  void FillModuleInfo(const char *mod_name, uptr mod_offset, ModuleArch arch);
 };
 
+// Linked list of symbolized frames (each frame is described by AddressInfo).
+struct SymbolizedStack {
+  SymbolizedStack *next;
+  AddressInfo info;
+  static SymbolizedStack *New(uptr addr);
+  // Deletes current, and all subsequent frames in the linked list.
+  // The object cannot be accessed after the call to this function.
+  void ClearAll();
+
+ private:
+  SymbolizedStack();
+};
+
+// For now, DataInfo is used to describe global variable.
 struct DataInfo {
-  uptr address;
+  // Owns all the string members. Storage for them is
+  // (de)allocated using sanitizer internal allocator.
   char *module;
   uptr module_offset;
+  ModuleArch module_arch;
+
+  char *file;
+  uptr line;
   char *name;
   uptr start;
   uptr size;
+
+  DataInfo();
+  void Clear();
 };
 
-class Symbolizer {
+class SymbolizerTool;
+
+class Symbolizer final {
  public:
-  /// Returns platform-specific implementation of Symbolizer. The symbolizer
-  /// must be initialized (with init or disable) before calling this function.
-  static Symbolizer *Get();
-  /// Returns platform-specific implementation of Symbolizer, or null if not
-  /// initialized.
-  static Symbolizer *GetOrNull();
-  /// Returns platform-specific implementation of Symbolizer.  Will
-  /// automatically initialize symbolizer as if by calling Init(0) if needed.
+  /// Initialize and return platform-specific implementation of symbolizer
+  /// (if it wasn't already initialized).
   static Symbolizer *GetOrInit();
-  /// Initialize and return the symbolizer, given an optional path to an
-  /// external symbolizer.  The path argument is only required for legacy
-  /// reasons as this function will check $PATH for an external symbolizer.  Not
-  /// thread safe.
-  static Symbolizer *Init(const char* path_to_external = 0);
-  // Fills at most "max_frames" elements of "frames" with descriptions
-  // for a given address (in all inlined functions). Returns the number
-  // of descriptions actually filled.
-  virtual uptr SymbolizePC(uptr address, AddressInfo *frames, uptr max_frames) {
-    return 0;
+  static void LateInitialize();
+  // Returns a list of symbolized frames for a given address (containing
+  // all inlined functions, if necessary).
+  SymbolizedStack *SymbolizePC(uptr address);
+  bool SymbolizeData(uptr address, DataInfo *info);
+
+  // The module names Symbolizer returns are stable and unique for every given
+  // module.  It is safe to store and compare them as pointers.
+  bool GetModuleNameAndOffsetForPC(uptr pc, const char **module_name,
+                                   uptr *module_address);
+  const char *GetModuleNameForPc(uptr pc) {
+    const char *module_name = nullptr;
+    uptr unused;
+    if (GetModuleNameAndOffsetForPC(pc, &module_name, &unused))
+      return module_name;
+    return nullptr;
   }
-  virtual bool SymbolizeData(uptr address, DataInfo *info) {
-    return false;
-  }
-  virtual bool GetModuleNameAndOffsetForPC(uptr pc, const char **module_name,
-                                           uptr *module_address) {
-    return false;
-  }
-  virtual bool CanReturnFileLineInfo() {
-    return false;
-  }
+
   // Release internal caches (if any).
-  virtual void Flush() {}
+  void Flush();
   // Attempts to demangle the provided C++ mangled name.
-  virtual const char *Demangle(const char *name) {
-    return name;
-  }
-  virtual void PrepareForSandboxing() {}
+  const char *Demangle(const char *name);
+  void PrepareForSandboxing();
 
   // Allow user to install hooks that would be called before/after Symbolizer
   // does the actual file/line info fetching. Specific sanitizers may need this
@@ -120,20 +119,54 @@ class Symbolizer {
   void AddHooks(StartSymbolizationHook start_hook,
                 EndSymbolizationHook end_hook);
 
+  const LoadedModule *FindModuleForAddress(uptr address);
+
  private:
+  // GetModuleNameAndOffsetForPC has to return a string to the caller.
+  // Since the corresponding module might get unloaded later, we should create
+  // our owned copies of the strings that we can safely return.
+  // ModuleNameOwner does not provide any synchronization, thus calls to
+  // its method should be protected by |mu_|.
+  class ModuleNameOwner {
+   public:
+    explicit ModuleNameOwner(BlockingMutex *synchronized_by)
+        : storage_(kInitialCapacity), last_match_(nullptr),
+          mu_(synchronized_by) {}
+    const char *GetOwnedCopy(const char *str);
+
+   private:
+    static const uptr kInitialCapacity = 1000;
+    InternalMmapVector<const char*> storage_;
+    const char *last_match_;
+
+    BlockingMutex *mu_;
+  } module_names_;
+
   /// Platform-specific function for creating a Symbolizer object.
-  static Symbolizer *PlatformInit(const char *path_to_external);
-  /// Create a symbolizer and store it to symbolizer_ without checking if one
-  /// already exists.  Not thread safe.
-  static Symbolizer *CreateAndStore(const char *path_to_external);
-  /// Initialize the symbolizer in a disabled state.  Not thread safe.
-  static Symbolizer *Disable();
+  static Symbolizer *PlatformInit();
+
+  bool FindModuleNameAndOffsetForAddress(uptr address, const char **module_name,
+                                         uptr *module_offset,
+                                         ModuleArch *module_arch);
+  ListOfModules modules_;
+  // If stale, need to reload the modules before looking up addresses.
+  bool modules_fresh_;
+
+  // Platform-specific default demangler, must not return nullptr.
+  const char *PlatformDemangle(const char *name);
+  void PlatformPrepareForSandboxing();
 
   static Symbolizer *symbolizer_;
   static StaticSpinMutex init_mu_;
 
- protected:
-  Symbolizer();
+  // Mutex locked from public methods of |Symbolizer|, so that the internals
+  // (including individual symbolizer tools and platform-specific methods) are
+  // always synchronized.
+  BlockingMutex mu_;
+
+  IntrusiveList<SymbolizerTool> tools_;
+
+  explicit Symbolizer(IntrusiveList<SymbolizerTool> tools);
 
   static LowLevelAllocator symbolizer_allocator_;
 
@@ -147,6 +180,10 @@ class Symbolizer {
     const Symbolizer *sym_;
   };
 };
+
+#ifdef SANITIZER_WINDOWS
+void InitializeDbgHelpIfNeeded();
+#endif
 
 }  // namespace __sanitizer
 

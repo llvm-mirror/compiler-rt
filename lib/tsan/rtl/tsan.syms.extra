@@ -1,4 +1,5 @@
 __tsan_init
+__tsan_flush_memory
 __tsan_read*
 __tsan_write*
 __tsan_vptr*
@@ -8,6 +9,7 @@ __tsan_java*
 __tsan_unaligned*
 __tsan_release
 __tsan_acquire
+__ubsan_*
 Annotate*
 WTFAnnotate*
 RunningOnValgrind

@@ -1,8 +1,9 @@
-// RUN: %clang_dfsan                         -m64 %s -o %t && %run %t | FileCheck %s
-// RUN: %clang_dfsan  -mllvm -dfsan-args-abi -m64 %s -o %t && %run %t | FileCheck %s
+// RUN: %clang_dfsan                         %s -o %t && %run %t | FileCheck %s
+// RUN: %clang_dfsan  -mllvm -dfsan-args-abi %s -o %t && %run %t | FileCheck %s
 
 // Tests that the custom implementation of write() does writes with or without
 // a callback set using dfsan_set_write_callback().
+// REQUIRES: stable-runtime
 
 #include <sanitizer/dfsan_interface.h>
 

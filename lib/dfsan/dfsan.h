@@ -16,6 +16,10 @@
 #define DFSAN_H
 
 #include "sanitizer_common/sanitizer_internal_defs.h"
+#include "dfsan_platform.h"
+
+using __sanitizer::uptr;
+using __sanitizer::u16;
 
 // Copy declarations from public sanitizer/dfsan_interface.h header here.
 typedef u16 dfsan_label;
@@ -44,7 +48,7 @@ namespace __dfsan {
 void InitializeInterceptors();
 
 inline dfsan_label *shadow_for(void *ptr) {
-  return (dfsan_label *) ((((uptr) ptr) & ~0x700000000000) << 1);
+  return (dfsan_label *) ((((uptr) ptr) & ShadowMask()) << 1);
 }
 
 inline const dfsan_label *shadow_for(const void *ptr) {
@@ -52,15 +56,11 @@ inline const dfsan_label *shadow_for(const void *ptr) {
 }
 
 struct Flags {
-  // Whether to warn on unimplemented functions.
-  bool warn_unimplemented;
-  // Whether to warn on non-zero labels.
-  bool warn_nonzero_labels;
-  // Whether to propagate labels only when there is an obvious data dependency
-  // (e.g., when comparing strings, ignore the fact that the output of the
-  // comparison might be data-dependent on the content of the strings). This
-  // applies only to the custom functions defined in 'custom.c'.
-  bool strict_data_dependencies;
+#define DFSAN_FLAG(Type, Name, DefaultValue, Description) Type Name;
+#include "dfsan_flags.inc"
+#undef DFSAN_FLAG
+
+  void SetDefaults();
 };
 
 extern Flags flags_data;

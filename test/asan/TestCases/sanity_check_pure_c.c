@@ -3,9 +3,9 @@
 // RUN: not %run %t 2>&1 | FileCheck %s
 
 // Sanity checking a test in pure C with -pie.
-// RUN: %clang_asan -O2 %s -pie -fPIE -o %t
+// RUN: %clang_asan -O2 %s %pie %fPIE -o %t
 // RUN: not %run %t 2>&1 | FileCheck %s
-// XFAIL: arm-linux-gnueabi
+// REQUIRES: stable-runtime
 
 #include <stdlib.h>
 int main() {

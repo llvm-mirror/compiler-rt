@@ -107,13 +107,13 @@ static void TestRegistry(ThreadRegistry *registry, bool has_quarantine) {
             registry->FindThread(HasUid, (void*)0x1234));
   // Detach and finish and join remaining threads.
   for (u32 i = 6; i <= 10; i++) {
-    registry->DetachThread(i);
+    registry->DetachThread(i, 0);
     registry->FinishThread(i);
   }
   for (u32 i = 0; i < new_tids.size(); i++) {
     u32 tid = new_tids[i];
     registry->StartThread(tid, 0, 0);
-    registry->DetachThread(tid);
+    registry->DetachThread(tid, 0);
     registry->FinishThread(tid);
   }
   CheckThreadQuantity(registry, exp_total, 1, 1);
@@ -224,6 +224,10 @@ static void ThreadedTestRegistry(ThreadRegistry *registry) {
 }
 
 TEST(SanitizerCommon, ThreadRegistryThreadedTest) {
+  memset(&num_created, 0, sizeof(num_created));
+  memset(&num_started, 0, sizeof(num_created));
+  memset(&num_joined, 0, sizeof(num_created));
+
   ThreadRegistry registry(GetThreadContext<TestThreadContext>,
                           kThreadsPerShard * kNumShards + 1, 10);
   ThreadedTestRegistry(&registry);

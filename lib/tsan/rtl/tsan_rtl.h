@@ -52,13 +52,30 @@
 
 namespace __tsan {
 
-#ifndef TSAN_GO
-const uptr kAllocatorSpace = 0x7d0000000000ULL;
-const uptr kAllocatorSize  =  0x10000000000ULL;  // 1T.
-
+#if !SANITIZER_GO
 struct MapUnmapCallback;
-typedef SizeClassAllocator64<kAllocatorSpace, kAllocatorSize, 0,
-    DefaultSizeClassMap, MapUnmapCallback> PrimaryAllocator;
+#if defined(__mips64) || defined(__aarch64__) || defined(__powerpc__)
+static const uptr kAllocatorSpace = 0;
+static const uptr kAllocatorSize = SANITIZER_MMAP_RANGE_SIZE;
+static const uptr kAllocatorRegionSizeLog = 20;
+static const uptr kAllocatorNumRegions =
+    kAllocatorSize >> kAllocatorRegionSizeLog;
+typedef TwoLevelByteMap<(kAllocatorNumRegions >> 12), 1 << 12,
+    MapUnmapCallback> ByteMap;
+typedef SizeClassAllocator32<kAllocatorSpace, kAllocatorSize, 0,
+    CompactSizeClassMap, kAllocatorRegionSizeLog, ByteMap,
+    MapUnmapCallback> PrimaryAllocator;
+#else
+struct AP64 {  // Allocator64 parameters. Deliberately using a short name.
+  static const uptr kSpaceBeg = Mapping::kHeapMemBeg;
+  static const uptr kSpaceSize = Mapping::kHeapMemEnd - Mapping::kHeapMemBeg;
+  static const uptr kMetadataSize = 0;
+  typedef DefaultSizeClassMap SizeClassMap;
+  typedef __tsan::MapUnmapCallback MapUnmapCallback;
+  static const uptr kFlags = 0;
+};
+typedef SizeClassAllocator64<AP64> PrimaryAllocator;
+#endif
 typedef SizeClassAllocatorLocalCache<PrimaryAllocator> AllocatorCache;
 typedef LargeMmapAllocator<MapUnmapCallback> SecondaryAllocator;
 typedef CombinedAllocator<PrimaryAllocator, AllocatorCache,
@@ -303,13 +320,46 @@ class Shadow : public FastState {
   }
 };
 
-struct SignalContext;
+struct ThreadSignalContext;
 
 struct JmpBuf {
   uptr sp;
   uptr mangled_sp;
+  int int_signal_send;
+  bool in_blocking_func;
+  uptr in_signal_handler;
   uptr *shadow_stack_pos;
 };
+
+// A Processor represents a physical thread, or a P for Go.
+// It is used to store internal resources like allocate cache, and does not
+// participate in race-detection logic (invisible to end user).
+// In C++ it is tied to an OS thread just like ThreadState, however ideally
+// it should be tied to a CPU (this way we will have fewer allocator caches).
+// In Go it is tied to a P, so there are significantly fewer Processor's than
+// ThreadState's (which are tied to Gs).
+// A ThreadState must be wired with a Processor to handle events.
+struct Processor {
+  ThreadState *thr; // currently wired thread, or nullptr
+#if !SANITIZER_GO
+  AllocatorCache alloc_cache;
+  InternalAllocatorCache internal_alloc_cache;
+#endif
+  DenseSlabAllocCache block_cache;
+  DenseSlabAllocCache sync_cache;
+  DenseSlabAllocCache clock_cache;
+  DDPhysicalThread *dd_pt;
+};
+
+#if !SANITIZER_GO
+// ScopedGlobalProcessor temporary setups a global processor for the current
+// thread, if it does not have one. Intended for interceptors that can run
+// at the very thread end, when we already destroyed the thread processor.
+struct ScopedGlobalProcessor {
+  ScopedGlobalProcessor();
+  ~ScopedGlobalProcessor();
+};
+#endif
 
 // This struct is stored in TLS.
 struct ThreadState {
@@ -332,7 +382,7 @@ struct ThreadState {
   int ignore_reads_and_writes;
   int ignore_sync;
   // Go does not support ignores.
-#ifndef TSAN_GO
+#if !SANITIZER_GO
   IgnoreSet mop_ignore_set;
   IgnoreSet sync_ignore_set;
 #endif
@@ -345,18 +395,19 @@ struct ThreadState {
   u64 racy_state[2];
   MutexSet mset;
   ThreadClock clock;
-#ifndef TSAN_GO
-  AllocatorCache alloc_cache;
-  InternalAllocatorCache internal_alloc_cache;
+#if !SANITIZER_GO
   Vector<JmpBuf> jmp_bufs;
   int ignore_interceptors;
 #endif
+#if TSAN_COLLECT_STATS
   u64 stat[StatCnt];
+#endif
   const int tid;
   const int unique_id;
   bool in_symbolizer;
   bool in_ignored_lib;
-  bool is_alive;
+  bool is_inited;
+  bool is_dead;
   bool is_freeing;
   bool is_vptr_access;
   const uptr stk_addr;
@@ -365,17 +416,23 @@ struct ThreadState {
   const uptr tls_size;
   ThreadContext *tctx;
 
+#if SANITIZER_DEBUG && !SANITIZER_GO
   InternalDeadlockDetector internal_deadlock_detector;
-  DDPhysicalThread *dd_pt;
+#endif
   DDLogicalThread *dd_lt;
 
-  bool in_signal_handler;
-  SignalContext *signal_ctx;
+  // Current wired Processor, or nullptr. Required to handle any events.
+  Processor *proc1;
+#if !SANITIZER_GO
+  Processor *proc() { return proc1; }
+#else
+  Processor *proc();
+#endif
 
-  DenseSlabAllocCache block_cache;
-  DenseSlabAllocCache sync_cache;
+  atomic_uintptr_t in_signal_handler;
+  ThreadSignalContext *signal_ctx;
 
-#ifndef TSAN_GO
+#if !SANITIZER_GO
   u32 last_sleep_stack_id;
   ThreadClock last_sleep_clock;
 #endif
@@ -384,19 +441,27 @@ struct ThreadState {
   // If set, malloc must not be called.
   int nomalloc;
 
+  const ReportDesc *current_report;
+
   explicit ThreadState(Context *ctx, int tid, int unique_id, u64 epoch,
                        unsigned reuse_count,
                        uptr stk_addr, uptr stk_size,
                        uptr tls_addr, uptr tls_size);
 };
 
-#ifndef TSAN_GO
+#if !SANITIZER_GO
+#if SANITIZER_MAC || SANITIZER_ANDROID
+ThreadState *cur_thread();
+void cur_thread_finalize();
+#else
 __attribute__((tls_model("initial-exec")))
 extern THREADLOCAL char cur_thread_placeholder[];
 INLINE ThreadState *cur_thread() {
   return reinterpret_cast<ThreadState *>(&cur_thread_placeholder);
 }
-#endif
+INLINE void cur_thread_finalize() { }
+#endif  // SANITIZER_MAC || SANITIZER_ANDROID
+#endif  // SANITIZER_GO
 
 class ThreadContext : public ThreadContextBase {
  public:
@@ -412,12 +477,13 @@ class ThreadContext : public ThreadContextBase {
   u64 epoch1;
 
   // Override superclass callbacks.
-  void OnDead();
-  void OnJoined(void *arg);
-  void OnFinished();
-  void OnStarted(void *arg);
-  void OnCreated(void *arg);
-  void OnReset();
+  void OnDead() override;
+  void OnJoined(void *arg) override;
+  void OnFinished() override;
+  void OnStarted(void *arg) override;
+  void OnCreated(void *arg) override;
+  void OnReset() override;
+  void OnDetached(void *arg) override;
 };
 
 struct RacyStacks {
@@ -438,7 +504,7 @@ struct RacyAddress {
 
 struct FiredSuppression {
   ReportType type;
-  uptr pc;
+  uptr pc_or_addr;
   Suppression *supp;
 };
 
@@ -460,11 +526,15 @@ struct Context {
 
   ThreadRegistry *thread_registry;
 
+  Mutex racy_mtx;
   Vector<RacyStacks> racy_stacks;
   Vector<RacyAddress> racy_addresses;
   // Number of fired suppressions may be large enough.
+  Mutex fired_suppressions_mtx;
   InternalMmapVector<FiredSuppression> fired_suppressions;
   DDetector *dd;
+
+  ClockAlloc clock_alloc;
 
   Flags flags;
 
@@ -477,13 +547,13 @@ extern Context *ctx;  // The one and the only global runtime context.
 
 struct ScopedIgnoreInterceptors {
   ScopedIgnoreInterceptors() {
-#ifndef TSAN_GO
+#if !SANITIZER_GO
     cur_thread()->ignore_interceptors++;
 #endif
   }
 
   ~ScopedIgnoreInterceptors() {
-#ifndef TSAN_GO
+#if !SANITIZER_GO
     cur_thread()->ignore_interceptors--;
 #endif
   }
@@ -494,9 +564,9 @@ class ScopedReport {
   explicit ScopedReport(ReportType typ);
   ~ScopedReport();
 
-  void AddMemoryAccess(uptr addr, Shadow s, const StackTrace *stack,
+  void AddMemoryAccess(uptr addr, Shadow s, StackTrace stack,
                        const MutexSet *mset);
-  void AddStack(const StackTrace *stack, bool suppressable = false);
+  void AddStack(StackTrace stack, bool suppressable = false);
   void AddThread(const ThreadContext *tctx, bool suppressable = false);
   void AddThread(int unique_tid, bool suppressable = false);
   void AddUniqueTid(int unique_tid);
@@ -520,21 +590,40 @@ class ScopedReport {
   void operator = (const ScopedReport&);
 };
 
-void RestoreStack(int tid, const u64 epoch, StackTrace *stk, MutexSet *mset);
+ThreadContext *IsThreadStackOrTls(uptr addr, bool *is_stack);
+void RestoreStack(int tid, const u64 epoch, VarSizeStackTrace *stk,
+                  MutexSet *mset);
 
+template<typename StackTraceTy>
+void ObtainCurrentStack(ThreadState *thr, uptr toppc, StackTraceTy *stack) {
+  uptr size = thr->shadow_stack_pos - thr->shadow_stack;
+  uptr start = 0;
+  if (size + !!toppc > kStackTraceMax) {
+    start = size + !!toppc - kStackTraceMax;
+    size = kStackTraceMax - !!toppc;
+  }
+  stack->Init(&thr->shadow_stack[start], size, toppc);
+}
+
+
+#if TSAN_COLLECT_STATS
 void StatAggregate(u64 *dst, u64 *src);
 void StatOutput(u64 *stat);
+#endif
+
 void ALWAYS_INLINE StatInc(ThreadState *thr, StatType typ, u64 n = 1) {
-  if (kCollectStats)
-    thr->stat[typ] += n;
+#if TSAN_COLLECT_STATS
+  thr->stat[typ] += n;
+#endif
 }
 void ALWAYS_INLINE StatSet(ThreadState *thr, StatType typ, u64 n) {
-  if (kCollectStats)
-    thr->stat[typ] = n;
+#if TSAN_COLLECT_STATS
+  thr->stat[typ] = n;
+#endif
 }
 
 void MapShadow(uptr addr, uptr size);
-void MapThreadTrace(uptr addr, uptr size);
+void MapThreadTrace(uptr addr, uptr size, const char *name);
 void DontNeedShadowFor(uptr addr, uptr size);
 void InitializeShadowMemory();
 void InitializeInterceptors();
@@ -547,13 +636,9 @@ void ForkChildAfter(ThreadState *thr, uptr pc);
 
 void ReportRace(ThreadState *thr);
 bool OutputReport(ThreadState *thr, const ScopedReport &srep);
-bool IsFiredSuppression(Context *ctx,
-                        const ScopedReport &srep,
-                        const StackTrace &trace);
+bool IsFiredSuppression(Context *ctx, ReportType type, StackTrace trace);
 bool IsExpectedReport(uptr addr, uptr size);
 void PrintMatchedBenignRaces();
-bool FrameIsInternal(const ReportStack *frame);
-ReportStack *SkipTsanInternalFrames(ReportStack *ent);
 
 #if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 1
 # define DPrintf Printf
@@ -570,7 +655,7 @@ ReportStack *SkipTsanInternalFrames(ReportStack *ent);
 u32 CurrentStackId(ThreadState *thr, uptr pc);
 ReportStack *SymbolizeStackId(u32 stack_id);
 void PrintCurrentStack(ThreadState *thr, uptr pc);
-void PrintCurrentStackSlow();  // uses libunwind
+void PrintCurrentStackSlow(uptr pc);  // uses libunwind
 
 void Initialize(ThreadState *thr);
 int Finalize(ThreadState *thr);
@@ -638,6 +723,11 @@ void ThreadSetName(ThreadState *thr, const char *name);
 int ThreadCount(ThreadState *thr);
 void ProcessPendingSignals(ThreadState *thr);
 
+Processor *ProcCreate();
+void ProcDestroy(Processor *proc);
+void ProcWire(Processor *proc, ThreadState *thr);
+void ProcUnwire(Processor *proc, ThreadState *thr);
+
 void MutexCreate(ThreadState *thr, uptr pc, uptr addr,
                  bool rw, bool recursive, bool linker_init);
 void MutexDestroy(ThreadState *thr, uptr pc, uptr addr);
@@ -648,8 +738,15 @@ void MutexReadLock(ThreadState *thr, uptr pc, uptr addr, bool try_lock = false);
 void MutexReadUnlock(ThreadState *thr, uptr pc, uptr addr);
 void MutexReadOrWriteUnlock(ThreadState *thr, uptr pc, uptr addr);
 void MutexRepair(ThreadState *thr, uptr pc, uptr addr);  // call on EOWNERDEAD
+void MutexInvalidAccess(ThreadState *thr, uptr pc, uptr addr);
 
 void Acquire(ThreadState *thr, uptr pc, uptr addr);
+// AcquireGlobal synchronizes the current thread with all other threads.
+// In terms of happens-before relation, it draws a HB edge from all threads
+// (where they happen to execute right now) to the current thread. We use it to
+// handle Go finalizers. Namely, finalizer goroutine executes AcquireGlobal
+// right before executing finalizers. This provides a coarse, but simple
+// approximation of the actual required synchronization.
 void AcquireGlobal(ThreadState *thr, uptr pc);
 void Release(ThreadState *thr, uptr pc, uptr addr);
 void ReleaseStore(ThreadState *thr, uptr pc, uptr addr);
@@ -665,7 +762,7 @@ void AcquireReleaseImpl(ThreadState *thr, uptr pc, SyncClock *c);
 // The trick is that the call preserves all registers and the compiler
 // does not treat it as a call.
 // If it does not work for you, use normal call.
-#if TSAN_DEBUG == 0
+#if !SANITIZER_DEBUG && defined(__x86_64__) && !SANITIZER_MAC
 // The caller may not create the stack frame for itself at all,
 // so we create a reserve stack frame for it (1024b must be enough).
 #define HACKY_CALL(f) \
@@ -697,7 +794,7 @@ void ALWAYS_INLINE TraceAddEvent(ThreadState *thr, FastState fs,
   StatInc(thr, StatEvents);
   u64 pos = fs.GetTracePos();
   if (UNLIKELY((pos % kTracePartSize) == 0)) {
-#ifndef TSAN_GO
+#if !SANITIZER_GO
     HACKY_CALL(__tsan_trace_switch);
 #else
     TraceSwitch(thr);
@@ -708,6 +805,12 @@ void ALWAYS_INLINE TraceAddEvent(ThreadState *thr, FastState fs,
   Event ev = (u64)addr | ((u64)typ << 61);
   *evp = ev;
 }
+
+#if !SANITIZER_GO
+uptr ALWAYS_INLINE HeapEnd() {
+  return HeapMemEnd() + PrimaryAllocator::AdditionalSize();
+}
+#endif
 
 }  // namespace __tsan
 

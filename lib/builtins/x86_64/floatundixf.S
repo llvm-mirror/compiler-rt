@@ -7,14 +7,9 @@
 
 #ifdef __x86_64__
 
-#if defined(__APPLE__)
-	.const
-#elif defined(__ELF__)
-	.rodata
-#else
-	.section .rdata,"rd"
-#endif
-	.balign 4
+CONST_SECTION
+
+	.balign 16
 twop64:
 	.quad 0x43f0000000000000
 
@@ -41,13 +36,8 @@ END_COMPILERRT_FUNCTION(__floatundixf)
 
 #ifdef __x86_64__
 
-#if defined(__APPLE__)
-	.const
-#elif defined(__ELF__)
-	.rdata
-#else
-	.section .rdata,"rd"
-#endif
+CONST_SECTION
+
 	.balign 4
 twop52:
 	.quad 0x4330000000000000
@@ -76,3 +66,6 @@ END_COMPILERRT_FUNCTION(__floatundixf)
 #endif // __x86_64__
 
 */
+
+NO_EXEC_STACK_DIRECTIVE
+

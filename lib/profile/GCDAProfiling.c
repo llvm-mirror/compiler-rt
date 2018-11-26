@@ -20,21 +20,29 @@
 |*
 \*===----------------------------------------------------------------------===*/
 
+#include "InstrProfilingPort.h"
+#include "InstrProfilingUtil.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+#include "WindowsMMap.h"
+#else
 #include <sys/mman.h>
-#ifdef _WIN32
-#include <direct.h>
+#include <sys/file.h>
+#ifndef MAP_FILE
+#define MAP_FILE 0
+#endif
 #endif
 
-#define I386_FREEBSD (defined(__FreeBSD__) && defined(__i386__))
-
-#if !I386_FREEBSD
-#include <sys/stat.h>
-#include <sys/types.h>
+#if defined(__FreeBSD__) && defined(__i386__)
+#define I386_FREEBSD 1
+#else
+#define I386_FREEBSD 0
 #endif
 
 #if !defined(_MSC_VER) && !I386_FREEBSD
@@ -42,6 +50,7 @@
 #endif
 
 #if defined(_MSC_VER)
+typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
 #elif I386_FREEBSD
@@ -51,7 +60,6 @@ typedef unsigned long long uint64_t;
 typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
-int mkdir(const char*, unsigned short);
 #endif
 
 /* #define DEBUG_GCDAPROFILING */
@@ -166,61 +174,18 @@ static uint64_t read_64bit_value() {
 
 static char *mangle_filename(const char *orig_filename) {
   char *new_filename;
-  size_t filename_len, prefix_len;
+  size_t prefix_len;
   int prefix_strip;
-  int level = 0;
-  const char *fname, *ptr;
-  const char *prefix = getenv("GCOV_PREFIX");
-  const char *prefix_strip_str = getenv("GCOV_PREFIX_STRIP");
+  const char *prefix = lprofGetPathPrefix(&prefix_strip, &prefix_len);
 
-  if (prefix == NULL || prefix[0] == '\0')
+  if (prefix == NULL)
     return strdup(orig_filename);
 
-  if (prefix_strip_str) {
-    prefix_strip = atoi(prefix_strip_str);
-
-    /* Negative GCOV_PREFIX_STRIP values are ignored */
-    if (prefix_strip < 0)
-      prefix_strip = 0;
-  } else {
-    prefix_strip = 0;
-  }
-
-  fname = orig_filename;
-  for (level = 0, ptr = fname + 1; level < prefix_strip; ++ptr) {
-    if (*ptr == '\0')
-      break;
-    if (*ptr != '/')
-      continue;
-    fname = ptr;
-    ++level;
-  }
-
-  filename_len = strlen(fname);
-  prefix_len = strlen(prefix);
-  new_filename = malloc(prefix_len + 1 + filename_len + 1);
-  memcpy(new_filename, prefix, prefix_len);
-
-  if (prefix[prefix_len - 1] != '/')
-    new_filename[prefix_len++] = '/';
-  memcpy(new_filename + prefix_len, fname, filename_len + 1);
+  new_filename = malloc(prefix_len + 1 + strlen(orig_filename) + 1);
+  lprofApplyPathPrefix(new_filename, orig_filename, prefix, prefix_len,
+                       prefix_strip);
 
   return new_filename;
-}
-
-static void recursive_mkdir(char *path) {
-  int i;
-
-  for (i = 1; path[i] != '\0'; ++i) {
-    if (path[i] != '/') continue;
-    path[i] = '\0';
-#ifdef _WIN32
-    _mkdir(path);
-#else
-    mkdir(path, 0755);  /* Some of these will fail, ignore it. */
-#endif
-    path[i] = '/';
-  }
 }
 
 static int map_file() {
@@ -282,7 +247,7 @@ void llvm_gcda_start_file(const char *orig_filename, const char version[4],
     fd = open(filename, O_RDWR | O_CREAT, 0644);
     if (fd == -1) {
       /* Try creating the directories first then opening the file. */
-      recursive_mkdir(filename);
+      __llvm_profile_recursive_mkdir(filename);
       fd = open(filename, O_RDWR | O_CREAT, 0644);
       if (fd == -1) {
         /* Bah! It's hopeless. */
@@ -294,6 +259,11 @@ void llvm_gcda_start_file(const char *orig_filename, const char version[4],
     }
   }
 
+  /* Try to flock the file to serialize concurrent processes writing out to the
+   * same GCDA. This can fail if the filesystem doesn't support it, but in that
+   * case we'll just carry on with the old racy behaviour and hope for the best.
+   */
+  flock(fd, LOCK_EX);
   output_file = fdopen(fd, mode);
 
   /* Initialize the write buffer. */
@@ -389,13 +359,17 @@ void llvm_gcda_emit_arcs(uint32_t num_counters, uint64_t *counters) {
   if (val != (uint32_t)-1) {
     /* There are counters present in the file. Merge them. */
     if (val != 0x01a10000) {
-      fprintf(stderr, "profiling:invalid arc tag (0x%08x)\n", val);
+      fprintf(stderr, "profiling: %s: cannot merge previous GCDA file: "
+                      "corrupt arc tag (0x%08x)\n",
+              filename, val);
       return;
     }
 
     val = read_32bit_value();
     if (val == (uint32_t)-1 || val / 2 != num_counters) {
-      fprintf(stderr, "profiling:invalid number of counters (%d)\n", val);
+      fprintf(stderr, "profiling: %s: cannot merge previous GCDA file: "
+                      "mismatched number of counters (%d)\n",
+              filename, val);
       return;
     }
 
@@ -437,13 +411,17 @@ void llvm_gcda_summary_info() {
   if (val != (uint32_t)-1) {
     /* There are counters present in the file. Merge them. */
     if (val != 0xa1000000) {
-      fprintf(stderr, "profiling:invalid object tag (0x%08x)\n", val);
+      fprintf(stderr, "profiling: %s: cannot merge previous run count: "
+                      "corrupt object tag (0x%08x)\n",
+              filename, val);
       return;
     }
 
     val = read_32bit_value(); /* length */
     if (val != obj_summary_len) {
-      fprintf(stderr, "profiling:invalid object length (%d)\n", val);
+      fprintf(stderr, "profiling: %s: cannot merge previous run count: "
+                      "mismatched object length (%d)\n",
+              filename, val);
       return;
     }
 
@@ -484,6 +462,7 @@ void llvm_gcda_end_file() {
       unmap_file();
     }
 
+    flock(fd, LOCK_UN);
     fclose(output_file);
     output_file = NULL;
     write_buffer = NULL;
@@ -508,7 +487,7 @@ void llvm_register_writeout_function(writeout_fn fn) {
   }
 }
 
-void llvm_writeout_files() {
+void llvm_writeout_files(void) {
   struct writeout_fn_node *curr = writeout_fn_head;
 
   while (curr) {
@@ -517,7 +496,7 @@ void llvm_writeout_files() {
   }
 }
 
-void llvm_delete_writeout_function_list() {
+void llvm_delete_writeout_function_list(void) {
   while (writeout_fn_head) {
     struct writeout_fn_node *node = writeout_fn_head;
     writeout_fn_head = writeout_fn_head->next;
@@ -549,7 +528,7 @@ void __gcov_flush() {
   }
 }
 
-void llvm_delete_flush_function_list() {
+void llvm_delete_flush_function_list(void) {
   while (flush_fn_head) {
     struct flush_fn_node *node = flush_fn_head;
     flush_fn_head = flush_fn_head->next;

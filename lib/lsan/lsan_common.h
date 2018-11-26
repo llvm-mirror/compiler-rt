@@ -19,13 +19,20 @@
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_platform.h"
+#include "sanitizer_common/sanitizer_stoptheworld.h"
 #include "sanitizer_common/sanitizer_symbolizer.h"
 
-#if SANITIZER_LINUX && defined(__x86_64__) && (SANITIZER_WORDSIZE == 64)
+#if (SANITIZER_LINUX && !SANITIZER_ANDROID) && (SANITIZER_WORDSIZE == 64) \
+     && (defined(__x86_64__) ||  defined(__mips64) ||  defined(__aarch64__))
 #define CAN_SANITIZE_LEAKS 1
 #else
 #define CAN_SANITIZE_LEAKS 0
 #endif
+
+namespace __sanitizer {
+class FlagParser;
+struct DTLS;
+}
 
 namespace __lsan {
 
@@ -38,48 +45,19 @@ enum ChunkTag {
 };
 
 struct Flags {
+#define LSAN_FLAG(Type, Name, DefaultValue, Description) Type Name;
+#include "lsan_flags.inc"
+#undef LSAN_FLAG
+
+  void SetDefaults();
   uptr pointer_alignment() const {
     return use_unaligned ? 1 : sizeof(uptr);
   }
-
-  // Print addresses of leaked objects after main leak report.
-  bool report_objects;
-  // Aggregate two objects into one leak if this many stack frames match. If
-  // zero, the entire stack trace must match.
-  int resolution;
-  // The number of leaks reported.
-  int max_leaks;
-  // If nonzero kill the process with this exit code upon finding leaks.
-  int exitcode;
-  // Print matched suppressions after leak checking.
-  bool print_suppressions;
-  // Suppressions file name.
-  const char* suppressions;
-
-  // Flags controlling the root set of reachable memory.
-  // Global variables (.data and .bss).
-  bool use_globals;
-  // Thread stacks.
-  bool use_stacks;
-  // Thread registers.
-  bool use_registers;
-  // TLS and thread-specific storage.
-  bool use_tls;
-  // Regions added via __lsan_register_root_region().
-  bool use_root_regions;
-
-  // Consider unaligned pointers valid.
-  bool use_unaligned;
-  // Consider pointers found in poisoned memory to be valid.
-  bool use_poisoned;
-
-  // Debug logging.
-  bool log_pointers;
-  bool log_threads;
 };
 
 extern Flags lsan_flags;
 inline Flags *flags() { return &lsan_flags; }
+void RegisterLsanFlags(FlagParser *parser, Flags *f);
 
 struct Leak {
   u32 id;
@@ -123,6 +101,8 @@ typedef InternalMmapVector<uptr> Frontier;
 void InitializePlatformSpecificModules();
 void ProcessGlobalRegions(Frontier *frontier);
 void ProcessPlatformSpecificAllocations(Frontier *frontier);
+// Run stoptheworld while holding any platform-specific locks.
+void DoStopTheWorld(StopTheWorldCallback callback, void* argument);
 
 void ScanRangeForPointers(uptr begin, uptr end,
                           Frontier *frontier,
@@ -138,6 +118,16 @@ enum IgnoreObjectResult {
 void InitCommonLsan();
 void DoLeakCheck();
 bool DisabledInThisThread();
+
+// Used to implement __lsan::ScopedDisabler.
+void DisableInThisThread();
+void EnableInThisThread();
+// Can be used to ignore memory allocated by an intercepted
+// function.
+struct ScopedInterceptorDisabler {
+  ScopedInterceptorDisabler() { DisableInThisThread(); }
+  ~ScopedInterceptorDisabler() { EnableInThisThread(); }
+};
 
 // Special case for "new T[0]" where T is a type with DTOR.
 // new T[0] will allocate one word for the array size (0) and store a pointer
@@ -162,8 +152,8 @@ bool WordIsPoisoned(uptr addr);
 void LockThreadRegistry();
 void UnlockThreadRegistry();
 bool GetThreadRangesLocked(uptr os_id, uptr *stack_begin, uptr *stack_end,
-                           uptr *tls_begin, uptr *tls_end,
-                           uptr *cache_begin, uptr *cache_end);
+                           uptr *tls_begin, uptr *tls_end, uptr *cache_begin,
+                           uptr *cache_end, DTLS **dtls);
 void ForEachExtraStackRange(uptr os_id, RangeIteratorCallback callback,
                             void *arg);
 // If called from the main thread, updates the main thread's TID in the thread

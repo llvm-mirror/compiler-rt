@@ -47,19 +47,19 @@ struct SyncVar {
   SyncClock clock;
 
   void Init(ThreadState *thr, uptr pc, uptr addr, u64 uid);
-  void Reset();
+  void Reset(Processor *proc);
 
   u64 GetId() const {
-    // 47 lsb is addr, then 14 bits is low part of uid, then 3 zero bits.
-    return GetLsb((u64)addr | (uid << 47), 61);
+    // 48 lsb is addr, then 14 bits is low part of uid, then 2 zero bits.
+    return GetLsb((u64)addr | (uid << 48), 60);
   }
   bool CheckId(u64 uid) const {
     CHECK_EQ(uid, GetLsb(uid, 14));
     return GetLsb(this->uid, 14) == uid;
   }
   static uptr SplitId(u64 id, u64 *uid) {
-    *uid = id >> 47;
-    return (uptr)GetLsb(id, 47);
+    *uid = id >> 48;
+    return (uptr)GetLsb(id, 48);
   }
 };
 
@@ -72,22 +72,23 @@ class MetaMap {
   MetaMap();
 
   void AllocBlock(ThreadState *thr, uptr pc, uptr p, uptr sz);
-  uptr FreeBlock(ThreadState *thr, uptr pc, uptr p);
-  void FreeRange(ThreadState *thr, uptr pc, uptr p, uptr sz);
+  uptr FreeBlock(Processor *proc, uptr p);
+  bool FreeRange(Processor *proc, uptr p, uptr sz);
+  void ResetRange(Processor *proc, uptr p, uptr sz);
   MBlock* GetBlock(uptr p);
 
   SyncVar* GetOrCreateAndLock(ThreadState *thr, uptr pc,
                               uptr addr, bool write_lock);
-  SyncVar* GetIfExistsAndLock(uptr addr);
+  SyncVar* GetIfExistsAndLock(uptr addr, bool write_lock);
 
   void MoveMemory(uptr src, uptr dst, uptr sz);
 
-  void OnThreadIdle(ThreadState *thr);
+  void OnProcIdle(Processor *proc);
 
  private:
-  static const u32 kFlagMask  = 3 << 30;
-  static const u32 kFlagBlock = 1 << 30;
-  static const u32 kFlagSync  = 2 << 30;
+  static const u32 kFlagMask  = 3u << 30;
+  static const u32 kFlagBlock = 1u << 30;
+  static const u32 kFlagSync  = 2u << 30;
   typedef DenseSlabAlloc<MBlock, 1<<16, 1<<12> BlockAlloc;
   typedef DenseSlabAlloc<SyncVar, 1<<16, 1<<10> SyncAlloc;
   BlockAlloc block_alloc_;

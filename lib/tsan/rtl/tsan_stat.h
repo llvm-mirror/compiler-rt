@@ -169,9 +169,11 @@ enum StatType {
   StatMtxAnnotations,
   StatMtxAtExit,
   StatMtxMBlock,
-  StatMtxJavaMBlock,
   StatMtxDeadlockDetector,
+  StatMtxFired,
+  StatMtxRacy,
   StatMtxFD,
+  StatMtxGlobalProc,
 
   // This must be the last.
   StatCnt

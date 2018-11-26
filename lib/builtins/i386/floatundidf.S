@@ -17,14 +17,19 @@
 
 #ifdef __i386__
 
-#ifndef __ELF__
-.const
-#endif
-.balign 4
-twop52: .quad 0x4330000000000000
+CONST_SECTION
+
+	.balign 16
+twop52:
+	.quad 0x4330000000000000
+
+	.balign 16
 twop84_plus_twop52:
-		.quad 0x4530000000100000
-twop84: .quad 0x4530000000000000
+	.quad 0x4530000000100000
+
+	.balign 16
+twop84:
+	.quad 0x4530000000000000
 
 #define REL_ADDR(_a)	(_a)-0b(%eax)
 
@@ -45,3 +50,6 @@ DEFINE_COMPILERRT_FUNCTION(__floatundidf)
 END_COMPILERRT_FUNCTION(__floatundidf)
 
 #endif // __i386__
+
+NO_EXEC_STACK_DIRECTIVE
+

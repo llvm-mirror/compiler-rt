@@ -14,80 +14,103 @@
 
 #include "sanitizer_common/sanitizer_platform.h"
 #if SANITIZER_WINDOWS
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 #include "asan_allocator.h"
 #include "asan_interceptors.h"
 #include "asan_internal.h"
 #include "asan_stack.h"
-#include "sanitizer_common/sanitizer_interception.h"
+#include "interception/interception.h"
 
 #include <stddef.h>
 
-// ---------------------- Replacement functions ---------------- {{{1
 using namespace __asan;  // NOLINT
 
-// FIXME: Simply defining functions with the same signature in *.obj
-// files overrides the standard functions in *.lib
-// This works well for simple helloworld-like tests but might need to be
-// revisited in the future.
+// MT: Simply defining functions with the same signature in *.obj
+// files overrides the standard functions in the CRT.
+// MD: Memory allocation functions are defined in the CRT .dll,
+// so we have to intercept them before they are called for the first time.
+
+#if ASAN_DYNAMIC
+# define ALLOCATION_FUNCTION_ATTRIBUTE
+#else
+# define ALLOCATION_FUNCTION_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE
+#endif
 
 extern "C" {
-SANITIZER_INTERFACE_ATTRIBUTE
+ALLOCATION_FUNCTION_ATTRIBUTE
 void free(void *ptr) {
   GET_STACK_TRACE_FREE;
   return asan_free(ptr, &stack, FROM_MALLOC);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
-void _free_dbg(void* ptr, int) {
+ALLOCATION_FUNCTION_ATTRIBUTE
+void _free_dbg(void *ptr, int) {
   free(ptr);
 }
 
-void cfree(void *ptr) {
-  CHECK(!"cfree() should not be used on Windows?");
+ALLOCATION_FUNCTION_ATTRIBUTE
+void _free_base(void *ptr) {
+  free(ptr);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+ALLOCATION_FUNCTION_ATTRIBUTE
 void *malloc(size_t size) {
   GET_STACK_TRACE_MALLOC;
   return asan_malloc(size, &stack);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
-void* _malloc_dbg(size_t size, int , const char*, int) {
+ALLOCATION_FUNCTION_ATTRIBUTE
+void *_malloc_base(size_t size) {
   return malloc(size);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+ALLOCATION_FUNCTION_ATTRIBUTE
+void *_malloc_dbg(size_t size, int, const char *, int) {
+  return malloc(size);
+}
+
+ALLOCATION_FUNCTION_ATTRIBUTE
 void *calloc(size_t nmemb, size_t size) {
   GET_STACK_TRACE_MALLOC;
   return asan_calloc(nmemb, size, &stack);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
-void* _calloc_dbg(size_t n, size_t size, int, const char*, int) {
-  return calloc(n, size);
+ALLOCATION_FUNCTION_ATTRIBUTE
+void *_calloc_base(size_t nmemb, size_t size) {
+  return calloc(nmemb, size);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+ALLOCATION_FUNCTION_ATTRIBUTE
+void *_calloc_dbg(size_t nmemb, size_t size, int, const char *, int) {
+  return calloc(nmemb, size);
+}
+
+ALLOCATION_FUNCTION_ATTRIBUTE
 void *_calloc_impl(size_t nmemb, size_t size, int *errno_tmp) {
   return calloc(nmemb, size);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+ALLOCATION_FUNCTION_ATTRIBUTE
 void *realloc(void *ptr, size_t size) {
   GET_STACK_TRACE_MALLOC;
   return asan_realloc(ptr, size, &stack);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+ALLOCATION_FUNCTION_ATTRIBUTE
 void *_realloc_dbg(void *ptr, size_t size, int) {
   CHECK(!"_realloc_dbg should not exist!");
   return 0;
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
-void* _recalloc(void* p, size_t n, size_t elem_size) {
+ALLOCATION_FUNCTION_ATTRIBUTE
+void *_realloc_base(void *ptr, size_t size) {
+  return realloc(ptr, size);
+}
+
+ALLOCATION_FUNCTION_ATTRIBUTE
+void *_recalloc(void *p, size_t n, size_t elem_size) {
   if (!p)
     return calloc(n, elem_size);
   const size_t size = n * elem_size;
@@ -96,23 +119,28 @@ void* _recalloc(void* p, size_t n, size_t elem_size) {
   return realloc(p, size);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
-size_t _msize(void *ptr) {
+ALLOCATION_FUNCTION_ATTRIBUTE
+void *_recalloc_base(void *p, size_t n, size_t elem_size) {
+  return _recalloc(p, n, elem_size);
+}
+
+ALLOCATION_FUNCTION_ATTRIBUTE
+size_t _msize(const void *ptr) {
   GET_CURRENT_PC_BP_SP;
   (void)sp;
   return asan_malloc_usable_size(ptr, pc, bp);
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+ALLOCATION_FUNCTION_ATTRIBUTE
 void *_expand(void *memblock, size_t size) {
   // _expand is used in realloc-like functions to resize the buffer if possible.
   // We don't want memory to stand still while resizing buffers, so return 0.
   return 0;
 }
 
-SANITIZER_INTERFACE_ATTRIBUTE
+ALLOCATION_FUNCTION_ATTRIBUTE
 void *_expand_dbg(void *memblock, size_t size) {
-  return 0;
+  return _expand(memblock, size);
 }
 
 // TODO(timurrrr): Might want to add support for _aligned_* allocation
@@ -133,37 +161,90 @@ int _CrtSetReportMode(int, int) {
 }
 }  // extern "C"
 
-using __interception::GetRealFunctionAddress;
+INTERCEPTOR_WINAPI(LPVOID, HeapAlloc, HANDLE hHeap, DWORD dwFlags,
+                   SIZE_T dwBytes) {
+  GET_STACK_TRACE_MALLOC;
+  void *p = asan_malloc(dwBytes, &stack);
+  // Reading MSDN suggests that the *entire* usable allocation is zeroed out.
+  // Otherwise it is difficult to HeapReAlloc with HEAP_ZERO_MEMORY.
+  // https://blogs.msdn.microsoft.com/oldnewthing/20120316-00/?p=8083
+  if (dwFlags == HEAP_ZERO_MEMORY)
+    internal_memset(p, 0, asan_mz_size(p));
+  else
+    CHECK(dwFlags == 0 && "unsupported heap flags");
+  return p;
+}
 
-// We don't want to include "windows.h" in this file to avoid extra attributes
-// set on malloc/free etc (e.g. dllimport), so declare a few things manually:
-extern "C" int __stdcall VirtualProtect(void* addr, size_t size,
-                                        DWORD prot, DWORD *old_prot);
-const int PAGE_EXECUTE_READWRITE = 0x40;
+INTERCEPTOR_WINAPI(BOOL, HeapFree, HANDLE hHeap, DWORD dwFlags, LPVOID lpMem) {
+  CHECK(dwFlags == 0 && "unsupported heap flags");
+  GET_STACK_TRACE_FREE;
+  asan_free(lpMem, &stack, FROM_MALLOC);
+  return true;
+}
+
+INTERCEPTOR_WINAPI(LPVOID, HeapReAlloc, HANDLE hHeap, DWORD dwFlags,
+                   LPVOID lpMem, SIZE_T dwBytes) {
+  GET_STACK_TRACE_MALLOC;
+  // Realloc should never reallocate in place.
+  if (dwFlags & HEAP_REALLOC_IN_PLACE_ONLY)
+    return nullptr;
+  CHECK(dwFlags == 0 && "unsupported heap flags");
+  return asan_realloc(lpMem, dwBytes, &stack);
+}
+
+INTERCEPTOR_WINAPI(SIZE_T, HeapSize, HANDLE hHeap, DWORD dwFlags,
+                   LPCVOID lpMem) {
+  CHECK(dwFlags == 0 && "unsupported heap flags");
+  GET_CURRENT_PC_BP_SP;
+  (void)sp;
+  return asan_malloc_usable_size(lpMem, pc, bp);
+}
 
 namespace __asan {
+
+static void TryToOverrideFunction(const char *fname, uptr new_func) {
+  // Failure here is not fatal. The CRT may not be present, and different CRT
+  // versions use different symbols.
+  if (!__interception::OverrideFunction(fname, new_func))
+    VPrintf(2, "Failed to override function %s\n", fname);
+}
+
 void ReplaceSystemMalloc() {
-#if defined(_DLL)
-# ifdef _WIN64
-#  error ReplaceSystemMalloc was not tested on x64
-# endif
-  char *crt_malloc;
-  if (GetRealFunctionAddress("malloc", (void**)&crt_malloc)) {
-    // Replace malloc in the CRT dll with a jump to our malloc.
-    DWORD old_prot, unused;
-    CHECK(VirtualProtect(crt_malloc, 16, PAGE_EXECUTE_READWRITE, &old_prot));
-    REAL(memset)(crt_malloc, 0xCC /* int 3 */, 16);  // just in case.
+#if defined(ASAN_DYNAMIC)
+  TryToOverrideFunction("free", (uptr)free);
+  TryToOverrideFunction("_free_base", (uptr)free);
+  TryToOverrideFunction("malloc", (uptr)malloc);
+  TryToOverrideFunction("_malloc_base", (uptr)malloc);
+  TryToOverrideFunction("_malloc_crt", (uptr)malloc);
+  TryToOverrideFunction("calloc", (uptr)calloc);
+  TryToOverrideFunction("_calloc_base", (uptr)calloc);
+  TryToOverrideFunction("_calloc_crt", (uptr)calloc);
+  TryToOverrideFunction("realloc", (uptr)realloc);
+  TryToOverrideFunction("_realloc_base", (uptr)realloc);
+  TryToOverrideFunction("_realloc_crt", (uptr)realloc);
+  TryToOverrideFunction("_recalloc", (uptr)_recalloc);
+  TryToOverrideFunction("_recalloc_base", (uptr)_recalloc);
+  TryToOverrideFunction("_recalloc_crt", (uptr)_recalloc);
+  TryToOverrideFunction("_msize", (uptr)_msize);
+  TryToOverrideFunction("_expand", (uptr)_expand);
+  TryToOverrideFunction("_expand_base", (uptr)_expand);
 
-    ptrdiff_t jmp_offset = (char*)malloc - (char*)crt_malloc - 5;
-    crt_malloc[0] = 0xE9;  // jmp, should be followed by an offset.
-    REAL(memcpy)(crt_malloc + 1, &jmp_offset, sizeof(jmp_offset));
-
-    CHECK(VirtualProtect(crt_malloc, 16, old_prot, &unused));
-
-    // FYI: FlushInstructionCache is needed on Itanium etc but not on x86/x64.
-  }
-
-  // FIXME: investigate whether anything else is needed.
+  // Recent versions of ucrtbase.dll appear to be built with PGO and LTCG, which
+  // enable cross-module inlining. This means our _malloc_base hook won't catch
+  // all CRT allocations. This code here patches the import table of
+  // ucrtbase.dll so that all attempts to use the lower-level win32 heap
+  // allocation API will be directed to ASan's heap. We don't currently
+  // intercept all calls to HeapAlloc. If we did, we would have to check on
+  // HeapFree whether the pointer came from ASan of from the system.
+#define INTERCEPT_UCRT_FUNCTION(func)                                         \
+  if (!INTERCEPT_FUNCTION_DLLIMPORT("ucrtbase.dll",                           \
+                                    "api-ms-win-core-heap-l1-1-0.dll", func)) \
+    VPrintf(2, "Failed to intercept ucrtbase.dll import %s\n", #func);
+  INTERCEPT_UCRT_FUNCTION(HeapAlloc);
+  INTERCEPT_UCRT_FUNCTION(HeapFree);
+  INTERCEPT_UCRT_FUNCTION(HeapReAlloc);
+  INTERCEPT_UCRT_FUNCTION(HeapSize);
+#undef INTERCEPT_UCRT_FUNCTION
 #endif
 }
 }  // namespace __asan

@@ -18,7 +18,7 @@
 
 #ifdef __i386__
 
-.const
+CONST_SECTION
 .balign 3
 
 		.quad	0x43f0000000000000
@@ -52,15 +52,21 @@ END_COMPILERRT_FUNCTION(__floatundisf)
 
 #ifdef __i386__
 
-#ifndef __ELF__
-.const
-#endif
-.balign 8
-twop52: .quad 0x4330000000000000
-		.quad 0x0000000000000fff
-sticky: .quad 0x0000000000000000
-		.long 0x00000012
-twelve:	.long 0x00000000
+CONST_SECTION
+
+	.balign 16
+twop52:
+	.quad 0x4330000000000000
+	.quad 0x0000000000000fff
+
+	.balign 16
+sticky:
+	.quad 0x0000000000000000
+	.long 0x00000012
+
+	.balign 16
+twelve:
+	.long 0x00000000
 
 #define			TWOp52			twop52-0b(%ecx)
 #define			STICKY			sticky-0b(%ecx,%eax,8)
@@ -97,3 +103,6 @@ DEFINE_COMPILERRT_FUNCTION(__floatundisf)
 END_COMPILERRT_FUNCTION(__floatundisf)
 
 #endif // __i386__
+
+NO_EXEC_STACK_DIRECTIVE
+

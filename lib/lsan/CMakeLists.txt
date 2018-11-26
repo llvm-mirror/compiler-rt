@@ -1,7 +1,7 @@
 include_directories(..)
 
 set(LSAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})
-append_no_rtti_flag(LSAN_CFLAGS)
+append_rtti_flag(OFF LSAN_CFLAGS)
 
 set(LSAN_COMMON_SOURCES
   lsan_common.cc
@@ -16,37 +16,24 @@ set(LSAN_SOURCES
 
 set(LSAN_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
-# The common files need to build on every arch supported by ASan.
-# (Even if they build into dummy object files.)
-filter_available_targets(LSAN_COMMON_SUPPORTED_ARCH
-  x86_64 i386 powerpc64 arm aarch64 mips)
+add_compiler_rt_object_libraries(RTLSanCommon
+    OS ${SANITIZER_COMMON_SUPPORTED_OS}
+    ARCHS ${LSAN_COMMON_SUPPORTED_ARCH}
+    SOURCES ${LSAN_COMMON_SOURCES}
+    CFLAGS ${LSAN_CFLAGS})
 
-add_custom_target(lsan)
-
-if(APPLE)
-  foreach(os ${SANITIZER_COMMON_SUPPORTED_DARWIN_OS})
-    add_compiler_rt_darwin_object_library(RTLSanCommon ${os}
-      ARCH ${LSAN_COMMON_SUPPORTED_ARCH}
-      SOURCES ${LSAN_COMMON_SOURCES}
-      CFLAGS ${LSAN_CFLAGS})
-  endforeach()
-elseif(NOT ANDROID)
-  foreach(arch ${LSAN_COMMON_SUPPORTED_ARCH})
-    add_compiler_rt_object_library(RTLSanCommon ${arch}
-      SOURCES ${LSAN_COMMON_SOURCES}
-      CFLAGS ${LSAN_CFLAGS})
-  endforeach()
-
+if(COMPILER_RT_HAS_LSAN)
+  add_compiler_rt_component(lsan)
   foreach(arch ${LSAN_SUPPORTED_ARCH})
-    add_compiler_rt_runtime(clang_rt.lsan-${arch} ${arch} STATIC
+    add_compiler_rt_runtime(clang_rt.lsan
+      STATIC
+      ARCHS ${arch}
       SOURCES ${LSAN_SOURCES}
               $<TARGET_OBJECTS:RTInterception.${arch}>
               $<TARGET_OBJECTS:RTSanitizerCommon.${arch}>
               $<TARGET_OBJECTS:RTSanitizerCommonLibc.${arch}>
               $<TARGET_OBJECTS:RTLSanCommon.${arch}>
-      CFLAGS ${LSAN_CFLAGS})
-    add_dependencies(lsan clang_rt.lsan-${arch})
+      CFLAGS ${LSAN_CFLAGS}
+      PARENT_TARGET lsan)
   endforeach()
 endif()
-
-add_dependencies(compiler-rt lsan)

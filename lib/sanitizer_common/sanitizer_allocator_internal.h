@@ -1,4 +1,4 @@
-//===-- sanitizer_allocator_internal.h -------------------------- C++ -----===//
+//===-- sanitizer_allocator_internal.h --------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -25,43 +25,44 @@ typedef CompactSizeClassMap InternalSizeClassMap;
 
 static const uptr kInternalAllocatorSpace = 0;
 static const u64 kInternalAllocatorSize = SANITIZER_MMAP_RANGE_SIZE;
-#if SANITIZER_WORDSIZE == 32
 static const uptr kInternalAllocatorRegionSizeLog = 20;
+#if SANITIZER_WORDSIZE == 32
 static const uptr kInternalAllocatorNumRegions =
     kInternalAllocatorSize >> kInternalAllocatorRegionSizeLog;
 typedef FlatByteMap<kInternalAllocatorNumRegions> ByteMap;
 #else
-static const uptr kInternalAllocatorRegionSizeLog = 24;
 static const uptr kInternalAllocatorNumRegions =
     kInternalAllocatorSize >> kInternalAllocatorRegionSizeLog;
 typedef TwoLevelByteMap<(kInternalAllocatorNumRegions >> 12), 1 << 12> ByteMap;
 #endif
 typedef SizeClassAllocator32<
-    kInternalAllocatorSpace, kInternalAllocatorSize, 16, InternalSizeClassMap,
+    kInternalAllocatorSpace, kInternalAllocatorSize, 0, InternalSizeClassMap,
     kInternalAllocatorRegionSizeLog, ByteMap> PrimaryInternalAllocator;
 
 typedef SizeClassAllocatorLocalCache<PrimaryInternalAllocator>
     InternalAllocatorCache;
 
-// We don't want our internal allocator to do any map/unmap operations from
-// LargeMmapAllocator.
-struct CrashOnMapUnmap {
-  void OnMap(uptr p, uptr size) const {
-    RAW_CHECK_MSG(0, "Unexpected mmap in InternalAllocator!\n");
-  }
-  void OnUnmap(uptr p, uptr size) const {
-    RAW_CHECK_MSG(0, "Unexpected munmap in InternalAllocator!\n");
-  }
-};
-
 typedef CombinedAllocator<PrimaryInternalAllocator, InternalAllocatorCache,
-                          LargeMmapAllocator<CrashOnMapUnmap> >
-    InternalAllocator;
+                          LargeMmapAllocator<> > InternalAllocator;
 
-void *InternalAlloc(uptr size, InternalAllocatorCache *cache = 0);
-void InternalFree(void *p, InternalAllocatorCache *cache = 0);
+void *InternalAlloc(uptr size, InternalAllocatorCache *cache = nullptr,
+                    uptr alignment = 0);
+void *InternalRealloc(void *p, uptr size,
+                      InternalAllocatorCache *cache = nullptr);
+void *InternalCalloc(uptr countr, uptr size,
+                     InternalAllocatorCache *cache = nullptr);
+void InternalFree(void *p, InternalAllocatorCache *cache = nullptr);
 InternalAllocator *internal_allocator();
 
-}  // namespace __sanitizer
+enum InternalAllocEnum {
+  INTERNAL_ALLOC
+};
 
-#endif  // SANITIZER_ALLOCATOR_INTERNAL_H
+} // namespace __sanitizer
+
+inline void *operator new(__sanitizer::operator_new_size_type size,
+                          __sanitizer::InternalAllocEnum) {
+  return __sanitizer::InternalAlloc(size);
+}
+
+#endif // SANITIZER_ALLOCATOR_INTERNAL_H

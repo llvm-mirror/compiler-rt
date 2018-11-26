@@ -20,7 +20,11 @@
 #endif
 
 	.p2align	2
+#if __ARM_ARCH_ISA_THUMB == 2
+DEFINE_COMPILERRT_THUMB_FUNCTION(__clzsi2)
+#else
 DEFINE_COMPILERRT_FUNCTION(__clzsi2)
+#endif
 #ifdef __ARM_FEATURE_CLZ
 	clz	r0, r0
 	JMP(lr)
@@ -70,3 +74,6 @@ DEFINE_COMPILERRT_FUNCTION(__clzsi2)
 	JMP(lr)
 #endif // __ARM_FEATURE_CLZ
 END_COMPILERRT_FUNCTION(__clzsi2)
+
+NO_EXEC_STACK_DIRECTIVE
+

@@ -5,14 +5,12 @@
 
 // RUN: %clangxx_tsan -O1 %s -fsanitize-blacklist=%t.blacklist -o %t
 // RUN: %deflake %run %t 2>&1 | FileCheck %s
-#include <pthread.h>
-#include <stdio.h>
-#include <unistd.h>
+#include "test.h"
 
 int Global;
 
 void *Thread1(void *x) {
-  sleep(1);
+  barrier_wait(&barrier);
   // CHECK: ThreadSanitizer: data race
   // CHECK: Write of size 4
   // CHECK: #0 Thread1{{.*}}blacklist2.cc:[[@LINE+1]]
@@ -22,7 +20,7 @@ void *Thread1(void *x) {
 
 void TouchGlobal() {
   // CHECK: Previous write of size 4
-  // CHECK: #0 TouchGlobal(){{.*}}blacklist2.cc:[[@LINE+1]]
+  // CHECK: #0 TouchGlobal{{.*}}blacklist2.cc:[[@LINE+1]]
   Global--;
 }
 
@@ -35,15 +33,17 @@ void *Blacklisted_Thread2(void *x) {
   Global--;
   // CHECK: #2 Blacklisted_Thread2{{.*}}blacklist2.cc:[[@LINE+1]]
   CallTouchGlobal();
+  barrier_wait(&barrier);
   return NULL;
 }
 
 int main() {
+  barrier_init(&barrier, 2);
   pthread_t t[2];
   pthread_create(&t[0], NULL, Thread1, NULL);
   pthread_create(&t[1], NULL, Blacklisted_Thread2, NULL);
   pthread_join(t[0], NULL);
   pthread_join(t[1], NULL);
-  printf("PASS\n");
+  fprintf(stderr, "PASS\n");
   return 0;
 }

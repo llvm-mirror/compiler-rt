@@ -14,7 +14,7 @@ MsanThread *MsanThread::Create(thread_callback_t start_routine,
   MsanThread *thread = (MsanThread*)MmapOrDie(size, __func__);
   thread->start_routine_ = start_routine;
   thread->arg_ = arg;
-  thread->destructor_iterations_ = kPthreadDestructorIterations;
+  thread->destructor_iterations_ = GetPthreadDestructorIterations();
 
   return thread;
 }
@@ -36,6 +36,7 @@ void MsanThread::ClearShadowForThreadStackAndTLS() {
   if (tls_begin_ != tls_end_)
     __msan_unpoison((void *)tls_begin_, tls_end_ - tls_begin_);
   DTLS *dtls = DTLS_Get();
+  CHECK_NE(dtls, 0);
   for (uptr i = 0; i < dtls->dtv_size; ++i)
     __msan_unpoison((void *)(dtls->dtv[i].beg), dtls->dtv[i].size);
 }
@@ -73,20 +74,9 @@ thread_return_t MsanThread::ThreadStart() {
     return 0;
   }
 
-  thread_return_t res = IndirectExternCall(start_routine_)(arg_);
+  thread_return_t res = start_routine_(arg_);
 
   return res;
-}
-
-MsanThread *GetCurrentThread() {
-  return reinterpret_cast<MsanThread *>(MsanTSDGet());
-}
-
-void SetCurrentThread(MsanThread *t) {
-  // Make sure we do not reset the current MsanThread.
-  CHECK_EQ(0, MsanTSDGet());
-  MsanTSDSet(t);
-  CHECK_EQ(t, MsanTSDGet());
 }
 
 } // namespace __msan

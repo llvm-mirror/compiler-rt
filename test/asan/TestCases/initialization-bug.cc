@@ -1,12 +1,15 @@
 // Test to make sure basic initialization order errors are caught.
 
-// RUN: %clangxx_asan -O0 %s %p/Helpers/initialization-bug-extra2.cc -o %t
-// RUN: env ASAN_OPTIONS=check_initialization_order=true not %run %t 2>&1 | FileCheck %s
+// RUN: %clangxx_asan %macos_min_target_10_11 -O0 %s %p/Helpers/initialization-bug-extra2.cc -o %t-INIT-ORDER-EXE
+// RUN: %env_asan_opts=check_initialization_order=true not %run %t-INIT-ORDER-EXE 2>&1 | FileCheck %s
 
 // Do not test with optimization -- the error may be optimized away.
 
 // FIXME: https://code.google.com/p/address-sanitizer/issues/detail?id=186
-// XFAIL: darwin
+// XFAIL: win32
+
+// The test is expected to fail on OS X Yosemite and older
+// UNSUPPORTED: osx-no-ld64-live_support
 
 #include <cstdio>
 
@@ -32,6 +35,8 @@ int __attribute__((noinline)) initX() {
   // CHECK: {{AddressSanitizer: initialization-order-fiasco}}
   // CHECK: {{READ of size .* at 0x.* thread T0}}
   // CHECK: {{0x.* is located 0 bytes inside of global variable .*(y|z).*}}
+  // CHECK: registered at:
+  // CHECK: 0x{{.*}} in __asan_register_globals
 }
 
 // This initializer begins our initialization order problems.

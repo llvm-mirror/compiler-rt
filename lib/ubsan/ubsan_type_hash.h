@@ -41,7 +41,10 @@ public:
 };
 
 /// \brief Get information about the dynamic type of an object.
-DynamicTypeInfo getDynamicTypeInfo(void *Object);
+DynamicTypeInfo getDynamicTypeInfoFromObject(void *Object);
+
+/// \brief Get information about the dynamic type of an object from its vtable.
+DynamicTypeInfo getDynamicTypeInfoFromVtable(void *Vtable);
 
 /// \brief Check whether the dynamic type of \p Object has a \p Type subobject
 /// at offset 0.
@@ -49,6 +52,10 @@ DynamicTypeInfo getDynamicTypeInfo(void *Object);
 bool checkDynamicType(void *Object, void *Type, HashValue Hash);
 
 const unsigned VptrTypeCacheSize = 128;
+
+/// A sanity check for Vtable. Offsets to top must be reasonably small
+/// numbers (by absolute value). It's a weak check for Vtable corruption.
+const int VptrMaxOffsetToTop = 1<<20;
 
 /// \brief A cache of the results of checkDynamicType. \c checkDynamicType would
 /// return \c true (modulo hash collisions) if

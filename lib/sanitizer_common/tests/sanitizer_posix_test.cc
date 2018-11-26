@@ -18,6 +18,7 @@
 #include "gtest/gtest.h"
 
 #include <pthread.h>
+#include <sys/mman.h>
 
 namespace __sanitizer {
 
@@ -51,10 +52,28 @@ static void SpawnThread(uptr iteration) {
 
 TEST(SanitizerCommon, PthreadDestructorIterations) {
   ASSERT_EQ(0, pthread_key_create(&key, &destructor));
-  SpawnThread(kPthreadDestructorIterations);
+  SpawnThread(GetPthreadDestructorIterations());
   EXPECT_TRUE(destructor_executed);
-  SpawnThread(kPthreadDestructorIterations + 1);
+  SpawnThread(GetPthreadDestructorIterations() + 1);
   EXPECT_FALSE(destructor_executed);
+  ASSERT_EQ(0, pthread_key_delete(key));
+}
+
+TEST(SanitizerCommon, IsAccessibleMemoryRange) {
+  const int page_size = GetPageSize();
+  uptr mem = (uptr)mmap(0, 3 * page_size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANON, -1, 0);
+  // Protect the middle page.
+  mprotect((void *)(mem + page_size), page_size, PROT_NONE);
+  EXPECT_TRUE(IsAccessibleMemoryRange(mem, page_size - 1));
+  EXPECT_TRUE(IsAccessibleMemoryRange(mem, page_size));
+  EXPECT_FALSE(IsAccessibleMemoryRange(mem, page_size + 1));
+  EXPECT_TRUE(IsAccessibleMemoryRange(mem + page_size - 1, 1));
+  EXPECT_FALSE(IsAccessibleMemoryRange(mem + page_size - 1, 2));
+  EXPECT_FALSE(IsAccessibleMemoryRange(mem + 2 * page_size - 1, 1));
+  EXPECT_TRUE(IsAccessibleMemoryRange(mem + 2 * page_size, page_size));
+  EXPECT_FALSE(IsAccessibleMemoryRange(mem, 3 * page_size));
+  EXPECT_FALSE(IsAccessibleMemoryRange(0x0, 2));
 }
 
 }  // namespace __sanitizer

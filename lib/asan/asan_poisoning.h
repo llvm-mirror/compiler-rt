@@ -19,6 +19,10 @@
 
 namespace __asan {
 
+// Enable/disable memory poisoning.
+void SetCanPoisonMemory(bool value);
+bool CanPoisonMemory();
+
 // Poisons the shadow memory for "size" bytes starting from "addr".
 void PoisonShadow(uptr addr, uptr size, u8 value);
 
@@ -34,8 +38,7 @@ void PoisonShadowPartialRightRedzone(uptr addr,
 // performance-critical code with care.
 ALWAYS_INLINE void FastPoisonShadow(uptr aligned_beg, uptr aligned_size,
                                     u8 value) {
-  DCHECK(flags()->poison_heap);
-  uptr PageSize = GetPageSizeCached();
+  DCHECK(CanPoisonMemory());
   uptr shadow_beg = MEM_TO_SHADOW(aligned_beg);
   uptr shadow_end = MEM_TO_SHADOW(
       aligned_beg + aligned_size - SHADOW_GRANULARITY) + 1;
@@ -48,8 +51,9 @@ ALWAYS_INLINE void FastPoisonShadow(uptr aligned_beg, uptr aligned_size,
       shadow_end - shadow_beg < common_flags()->clear_shadow_mmap_threshold) {
     REAL(memset)((void*)shadow_beg, value, shadow_end - shadow_beg);
   } else {
-    uptr page_beg = RoundUpTo(shadow_beg, PageSize);
-    uptr page_end = RoundDownTo(shadow_end, PageSize);
+    uptr page_size = GetPageSizeCached();
+    uptr page_beg = RoundUpTo(shadow_beg, page_size);
+    uptr page_end = RoundDownTo(shadow_end, page_size);
 
     if (page_beg >= page_end) {
       REAL(memset)((void *)shadow_beg, 0, shadow_end - shadow_beg);
@@ -60,15 +64,14 @@ ALWAYS_INLINE void FastPoisonShadow(uptr aligned_beg, uptr aligned_size,
       if (page_end != shadow_end) {
         REAL(memset)((void *)page_end, 0, shadow_end - page_end);
       }
-      void *res = MmapFixedNoReserve(page_beg, page_end - page_beg);
-      CHECK_EQ(page_beg, res);
+      ReserveShadowMemoryRange(page_beg, page_end - 1, nullptr);
     }
   }
 }
 
 ALWAYS_INLINE void FastPoisonShadowPartialRightRedzone(
     uptr aligned_addr, uptr size, uptr redzone_size, u8 value) {
-  DCHECK(flags()->poison_heap);
+  DCHECK(CanPoisonMemory());
   bool poison_partial = flags()->poison_partial;
   u8 *shadow = (u8*)MEM_TO_SHADOW(aligned_addr);
   for (uptr i = 0; i < redzone_size; i += SHADOW_GRANULARITY, shadow++) {
@@ -83,8 +86,8 @@ ALWAYS_INLINE void FastPoisonShadowPartialRightRedzone(
   }
 }
 
-// Calls __sanitizer::FlushUnneededShadowMemory() on
-// [MemToShadow(p), MemToShadow(p+size)] with proper rounding.
+// Calls __sanitizer::ReleaseMemoryPagesToOS() on
+// [MemToShadow(p), MemToShadow(p+size)].
 void FlushUnneededASanShadowMemory(uptr p, uptr size);
 
 }  // namespace __asan

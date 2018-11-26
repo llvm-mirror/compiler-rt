@@ -92,8 +92,8 @@ typedef __sanitizer::OFF64_T OFF64_T;
 
 // Just a pair of pointers.
 struct interpose_substitution {
-  const uptr replacement;
-  const uptr original;
+  const __sanitizer::uptr replacement;
+  const __sanitizer::uptr original;
 };
 
 // For a function foo() create a global pair of pointers { wrap_foo, foo } in
@@ -122,15 +122,9 @@ const interpose_substitution substitution_##func_name[] \
 # define DECLARE_WRAPPER(ret_type, func, ...)
 
 #elif defined(_WIN32)
-# if defined(_DLL)  // DLL CRT
-#  define WRAP(x) x
-#  define WRAPPER_NAME(x) #x
-#  define INTERCEPTOR_ATTRIBUTE
-# else  // Static CRT
-#  define WRAP(x) __asan_wrap_##x
-#  define WRAPPER_NAME(x) "__asan_wrap_"#x
-#  define INTERCEPTOR_ATTRIBUTE __declspec(dllexport)
-# endif
+# define WRAP(x) __asan_wrap_##x
+# define WRAPPER_NAME(x) "__asan_wrap_"#x
+# define INTERCEPTOR_ATTRIBUTE __declspec(dllexport)
 # define DECLARE_WRAPPER(ret_type, func, ...) \
     extern "C" ret_type func(__VA_ARGS__);
 # define DECLARE_WRAPPER_WINAPI(ret_type, func, ...) \
@@ -164,10 +158,12 @@ const interpose_substitution substitution_##func_name[] \
     namespace __interception { \
       extern FUNC_TYPE(func) PTR_TO_REAL(func); \
     }
+# define ASSIGN_REAL(dst, src) REAL(dst) = REAL(src)
 #else  // __APPLE__
 # define REAL(x) x
 # define DECLARE_REAL(ret_type, func, ...) \
     extern "C" ret_type func(__VA_ARGS__);
+# define ASSIGN_REAL(x, y)
 #endif  // __APPLE__
 
 #define DECLARE_REAL_AND_INTERCEPTOR(ret_type, func, ...) \
@@ -225,7 +221,6 @@ const interpose_substitution substitution_##func_name[] \
     namespace __interception { \
       FUNC_TYPE(func) PTR_TO_REAL(func); \
     } \
-    DECLARE_WRAPPER_WINAPI(ret_type, func, __VA_ARGS__) \
     extern "C" \
     INTERCEPTOR_ATTRIBUTE \
     ret_type __stdcall WRAP(func)(__VA_ARGS__)

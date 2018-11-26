@@ -7,12 +7,15 @@
 
 #ifdef __i386__
 
-#ifndef __ELF__
-.const
-#endif
-.balign 4
-twop52: .quad 0x4330000000000000
-twop32: .quad 0x41f0000000000000
+CONST_SECTION
+
+	.balign 16
+twop52:
+	.quad 0x4330000000000000
+
+	.balign 16
+twop32:
+	.quad 0x41f0000000000000
 
 #define REL_ADDR(_a)	(_a)-0b(%eax)
 
@@ -34,3 +37,6 @@ DEFINE_COMPILERRT_FUNCTION(__floatdidf)
 END_COMPILERRT_FUNCTION(__floatdidf)
 
 #endif // __i386__
+
+NO_EXEC_STACK_DIRECTIVE
+

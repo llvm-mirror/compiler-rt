@@ -31,13 +31,13 @@ NOINLINE void free_aaa(void *p) { free_bbb(p); break_optimization(0);}
 
 template<typename T>
 NOINLINE void uaf_test(int size, int off) {
-  char *p = (char *)malloc_aaa(size);
+  void *p = malloc_aaa(size);
   free_aaa(p);
   for (int i = 1; i < 100; i++)
     free_aaa(malloc_aaa(i));
   fprintf(stderr, "writing %ld byte(s) at %p with offset %d\n",
           (long)sizeof(T), p, off);
-  asan_write((T*)(p + off));
+  asan_write((T *)((char *)p + off));
 }
 
 TEST(AddressSanitizer, HasFeatureAddressSanitizerTest) {
@@ -117,7 +117,7 @@ TEST(AddressSanitizer, CallocReturnsZeroMem) {
 }
 
 // No valloc on Windows or Android.
-#if !defined(_WIN32) && !defined(ANDROID) && !defined(__ANDROID__)
+#if !defined(_WIN32) && !defined(__ANDROID__)
 TEST(AddressSanitizer, VallocTest) {
   void *a = valloc(100);
   EXPECT_EQ(0U, (uintptr_t)a % kPageSize);
@@ -250,12 +250,12 @@ TEST(AddressSanitizer, BitFieldNegativeTest) {
 #if ASAN_NEEDS_SEGV
 namespace {
 
-const char kUnknownCrash[] = "AddressSanitizer: SEGV on unknown address";
+const char kSEGVCrash[] = "AddressSanitizer: SEGV on unknown address";
 const char kOverriddenHandler[] = "ASan signal handler has been overridden\n";
 
 TEST(AddressSanitizer, WildAddressTest) {
   char *c = (char*)0x123;
-  EXPECT_DEATH(*c = 0, kUnknownCrash);
+  EXPECT_DEATH(*c = 0, kSEGVCrash);
 }
 
 void my_sigaction_sighandler(int, siginfo_t*, void*) {
@@ -279,10 +279,10 @@ TEST(AddressSanitizer, SignalTest) {
   EXPECT_EQ(0, sigaction(SIGBUS, &sigact, 0));
 #endif
   char *c = (char*)0x123;
-  EXPECT_DEATH(*c = 0, kUnknownCrash);
+  EXPECT_DEATH(*c = 0, kSEGVCrash);
   // ... and signal().
   EXPECT_EQ(0, signal(SIGSEGV, my_signal_sighandler));
-  EXPECT_DEATH(*c = 0, kUnknownCrash);
+  EXPECT_DEATH(*c = 0, kSEGVCrash);
 }
 }  // namespace
 #endif
@@ -300,6 +300,7 @@ TEST(AddressSanitizer, LargeMallocTest) {
   }
 }
 
+#if !GTEST_USES_SIMPLE_RE
 TEST(AddressSanitizer, HugeMallocTest) {
   if (SANITIZER_WORDSIZE != 64 || ASAN_AVOID_EXPENSIVE_TESTS) return;
   size_t n_megs = 4100;
@@ -307,6 +308,7 @@ TEST(AddressSanitizer, HugeMallocTest) {
                "is located 1 bytes to the left|"
                "AddressSanitizer failed to allocate");
 }
+#endif
 
 #if SANITIZER_TEST_HAS_MEMALIGN
 void MemalignRun(size_t align, size_t size, int idx) {
@@ -335,6 +337,8 @@ void *ManyThreadsWorker(void *a) {
   return 0;
 }
 
+#if !defined(__aarch64__)
+// FIXME: Infinite loop in AArch64 (PR24389).
 TEST(AddressSanitizer, ManyThreadsTest) {
   const size_t kNumThreads =
       (SANITIZER_WORDSIZE == 32 || ASAN_AVOID_EXPENSIVE_TESTS) ? 30 : 1000;
@@ -346,6 +350,7 @@ TEST(AddressSanitizer, ManyThreadsTest) {
     PTHREAD_JOIN(t[i], 0);
   }
 }
+#endif
 
 TEST(AddressSanitizer, ReallocTest) {
   const int kMinElem = 5;
@@ -436,10 +441,10 @@ TEST(AddressSanitizer, WrongFreeTest) {
 
 void DoubleFree() {
   int *x = (int*)malloc(100 * sizeof(int));
-  fprintf(stderr, "DoubleFree: x=%p\n", x);
+  fprintf(stderr, "DoubleFree: x=%p\n", (void *)x);
   free(x);
   free(x);
-  fprintf(stderr, "should have failed in the second free(%p)\n", x);
+  fprintf(stderr, "should have failed in the second free(%p)\n", (void *)x);
   abort();
 }
 
@@ -569,17 +574,6 @@ TEST(AddressSanitizer, LongJmpTest) {
 }
 
 #if !defined(_WIN32)  // Only basic longjmp is available on Windows.
-NOINLINE void BuiltinLongJmpFunc1(jmp_buf buf) {
-  // create three red zones for these two stack objects.
-  int a;
-  int b;
-
-  int *A = Ident(&a);
-  int *B = Ident(&b);
-  *A = *B;
-  __builtin_longjmp((void**)buf, 1);
-}
-
 NOINLINE void UnderscopeLongJmpFunc1(jmp_buf buf) {
   // create three red zones for these two stack objects.
   int a;
@@ -602,10 +596,22 @@ NOINLINE void SigLongJmpFunc1(sigjmp_buf buf) {
   siglongjmp(buf, 1);
 }
 
-#if !defined(__ANDROID__) && \
-    !defined(__powerpc64__) && !defined(__powerpc__)
-// Does not work on Power:
-// https://code.google.com/p/address-sanitizer/issues/detail?id=185
+#if !defined(__ANDROID__) && !defined(__arm__) && \
+    !defined(__aarch64__) && !defined(__mips__) && \
+    !defined(__mips64) && !defined(__s390__)
+NOINLINE void BuiltinLongJmpFunc1(jmp_buf buf) {
+  // create three red zones for these two stack objects.
+  int a;
+  int b;
+
+  int *A = Ident(&a);
+  int *B = Ident(&b);
+  *A = *B;
+  __builtin_longjmp((void**)buf, 1);
+}
+
+// Does not work on ARM:
+// https://github.com/google/sanitizers/issues/185
 TEST(AddressSanitizer, BuiltinLongJmpTest) {
   static jmp_buf buf;
   if (!__builtin_setjmp((void**)buf)) {
@@ -614,8 +620,9 @@ TEST(AddressSanitizer, BuiltinLongJmpTest) {
     TouchStackFunc();
   }
 }
-#endif  // !defined(__ANDROID__) && !defined(__powerpc64__) &&
-        // !defined(__powerpc__)
+#endif  // !defined(__ANDROID__) && !defined(__arm__) &&
+        // !defined(__aarch64__) && !defined(__mips__)
+        // !defined(__mips64) && !defined(__s390__)
 
 TEST(AddressSanitizer, UnderscopeLongJmpTest) {
   static jmp_buf buf;
@@ -685,7 +692,7 @@ TEST(AddressSanitizer, ThreadStackReuseTest) {
   PTHREAD_JOIN(t, 0);
 }
 
-#if defined(__i686__) || defined(__x86_64__)
+#if defined(__SSE2__)
 #include <emmintrin.h>
 TEST(AddressSanitizer, Store128Test) {
   char *a = Ident((char*)malloc(Ident(12)));
@@ -769,7 +776,7 @@ char* MallocAndMemsetString(size_t size) {
   return MallocAndMemsetString(size, 'z');
 }
 
-#if defined(__linux__) && !defined(ANDROID) && !defined(__ANDROID__)
+#if defined(__linux__) && !defined(__ANDROID__)
 #define READ_TEST(READ_N_BYTES)                                          \
   char *x = new char[10];                                                \
   int fd = open("/proc/self/stat", O_RDONLY);                            \
@@ -792,7 +799,7 @@ TEST(AddressSanitizer, pread64) {
 TEST(AddressSanitizer, read) {
   READ_TEST(read(fd, x, 15));
 }
-#endif  // defined(__linux__) && !defined(ANDROID) && !defined(__ANDROID__)
+#endif  // defined(__linux__) && !defined(__ANDROID__)
 
 // This test case fails
 // Clang optimizes memcpy/memset calls which lead to unaligned access
@@ -802,9 +809,6 @@ TEST(AddressSanitizer, DISABLED_MemIntrinsicUnalignedAccessTest) {
   EXPECT_DEATH(memset(s + size - 1, 0, 2), RightOOBWriteMessage(0));
   free(s);
 }
-
-// TODO(samsonov): Add a test with malloc(0)
-// TODO(samsonov): Add tests for str* and mem* functions.
 
 NOINLINE static int LargeFunction(bool do_bad_access) {
   int *x = new int[100];
@@ -832,7 +836,7 @@ NOINLINE static int LargeFunction(bool do_bad_access) {
   x[18]++;
   x[19]++;
 
-  delete x;
+  delete[] x;
   return res;
 }
 
@@ -935,6 +939,8 @@ TEST(AddressSanitizer, ShadowGapTest) {
 #else
 # if defined(__powerpc64__)
   char *addr = (char*)0x024000800000;
+# elif defined(__s390x__)
+  char *addr = (char*)0x11000000000000;
 # else
   char *addr = (char*)0x0000100000080000;
 # endif
@@ -1150,14 +1156,19 @@ TEST(AddressSanitizer, AttributeNoSanitizeAddressTest) {
 // The new/delete/etc mismatch checks don't work on Android,
 //   as calls to new/delete go through malloc/free.
 // OS X support is tracked here:
-//   https://code.google.com/p/address-sanitizer/issues/detail?id=131
+//   https://github.com/google/sanitizers/issues/131
 // Windows support is tracked here:
-//   https://code.google.com/p/address-sanitizer/issues/detail?id=309
-#if !defined(ANDROID) && !defined(__ANDROID__) && \
+//   https://github.com/google/sanitizers/issues/309
+#if !defined(__ANDROID__) && \
     !defined(__APPLE__) && \
     !defined(_WIN32)
 static string MismatchStr(const string &str) {
   return string("AddressSanitizer: alloc-dealloc-mismatch \\(") + str;
+}
+
+static string MismatchOrNewDeleteTypeStr(const string &mismatch_str) {
+  return "(" + MismatchStr(mismatch_str) +
+         ")|(AddressSanitizer: new-delete-type-mismatch)";
 }
 
 TEST(AddressSanitizer, AllocDeallocMismatch) {
@@ -1165,10 +1176,11 @@ TEST(AddressSanitizer, AllocDeallocMismatch) {
                MismatchStr("operator new vs free"));
   EXPECT_DEATH(free(Ident(new int[2])),
                MismatchStr("operator new \\[\\] vs free"));
-  EXPECT_DEATH(delete (Ident(new int[2])),
-               MismatchStr("operator new \\[\\] vs operator delete"));
-  EXPECT_DEATH(delete (Ident((int*)malloc(2 * sizeof(int)))),
-               MismatchStr("malloc vs operator delete"));
+  EXPECT_DEATH(
+      delete (Ident(new int[2])),
+      MismatchOrNewDeleteTypeStr("operator new \\[\\] vs operator delete"));
+  EXPECT_DEATH(delete (Ident((int *)malloc(2 * sizeof(int)))),
+               MismatchOrNewDeleteTypeStr("malloc vs operator delete"));
   EXPECT_DEATH(delete [] (Ident(new int)),
                MismatchStr("operator new vs operator delete \\[\\]"));
   EXPECT_DEATH(delete [] (Ident((int*)malloc(2 * sizeof(int)))),
@@ -1242,14 +1254,14 @@ TEST(AddressSanitizer, DISABLED_DemoTooMuchMemoryTest) {
   const size_t kAllocSize = (1 << 28) - 1024;
   size_t total_size = 0;
   while (true) {
-    char *x = (char*)malloc(kAllocSize);
+    void *x = malloc(kAllocSize);
     memset(x, 0, kAllocSize);
     total_size += kAllocSize;
     fprintf(stderr, "total: %ldM %p\n", (long)total_size >> 20, x);
   }
 }
 
-// http://code.google.com/p/address-sanitizer/issues/detail?id=66
+// https://github.com/google/sanitizers/issues/66
 TEST(AddressSanitizer, BufferOverflowAfterManyFrees) {
   for (int i = 0; i < 1000000; i++) {
     delete [] (Ident(new char [8644]));
@@ -1282,5 +1294,35 @@ TEST(AddressSanitizer, pthread_getschedparam) {
       "AddressSanitizer: stack-buffer-.*flow");
   int res = pthread_getschedparam(pthread_self(), &policy, &param);
   ASSERT_EQ(0, res);
+}
+#endif
+
+#if SANITIZER_TEST_HAS_PRINTF_L
+static int vsnprintf_l_wrapper(char *s, size_t n,
+                               locale_t l, const char *format, ...) {
+  va_list va;
+  va_start(va, format);
+  int res = vsnprintf_l(s, n , l, format, va);
+  va_end(va);
+  return res;
+}
+
+TEST(AddressSanitizer, snprintf_l) {
+  char buff[5];
+  // Check that snprintf_l() works fine with Asan.
+  int res = snprintf_l(buff, 5,
+                       _LIBCPP_GET_C_LOCALE, "%s", "snprintf_l()");
+  EXPECT_EQ(12, res);
+  // Check that vsnprintf_l() works fine with Asan.
+  res = vsnprintf_l_wrapper(buff, 5,
+                            _LIBCPP_GET_C_LOCALE, "%s", "vsnprintf_l()");
+  EXPECT_EQ(13, res);
+
+  EXPECT_DEATH(snprintf_l(buff, 10,
+                          _LIBCPP_GET_C_LOCALE, "%s", "snprintf_l()"),
+                "AddressSanitizer: stack-buffer-overflow");
+  EXPECT_DEATH(vsnprintf_l_wrapper(buff, 10,
+                                  _LIBCPP_GET_C_LOCALE, "%s", "vsnprintf_l()"),
+                "AddressSanitizer: stack-buffer-overflow");
 }
 #endif

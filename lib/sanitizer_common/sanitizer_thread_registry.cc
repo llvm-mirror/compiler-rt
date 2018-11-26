@@ -131,7 +131,7 @@ u32 ThreadRegistry::CreateThread(uptr user_id, bool detached, u32 parent_tid,
     tctx = context_factory_(tid);
     threads_[tid] = tctx;
   } else {
-#ifndef SANITIZER_GO
+#if !SANITIZER_GO
     Report("%s: Thread limit (%u threads) exceeded. Dying.\n",
            SanitizerToolName, max_threads_);
 #else
@@ -218,7 +218,7 @@ void ThreadRegistry::SetThreadNameByUserId(uptr user_id, const char *name) {
   }
 }
 
-void ThreadRegistry::DetachThread(u32 tid) {
+void ThreadRegistry::DetachThread(u32 tid, void *arg) {
   BlockingMutexLock l(&mtx_);
   CHECK_LT(tid, n_contexts_);
   ThreadContextBase *tctx = threads_[tid];
@@ -227,6 +227,7 @@ void ThreadRegistry::DetachThread(u32 tid) {
     Report("%s: Detach of non-existent thread\n", SanitizerToolName);
     return;
   }
+  tctx->OnDetached(arg);
   if (tctx->status == ThreadStatusFinished) {
     tctx->SetDead();
     QuarantinePush(tctx);
@@ -276,6 +277,8 @@ void ThreadRegistry::StartThread(u32 tid, uptr os_id, void *arg) {
 }
 
 void ThreadRegistry::QuarantinePush(ThreadContextBase *tctx) {
+  if (tctx->tid == 0)
+    return;  // Don't reuse the main thread.  It's a special snowflake.
   dead_threads_.push_back(tctx);
   if (dead_threads_.size() <= thread_quarantine_size_)
     return;

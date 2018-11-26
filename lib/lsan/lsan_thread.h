@@ -17,23 +17,30 @@
 
 #include "sanitizer_common/sanitizer_thread_registry.h"
 
+namespace __sanitizer {
+struct DTLS;
+}
+
 namespace __lsan {
 
 class ThreadContext : public ThreadContextBase {
  public:
   explicit ThreadContext(int tid);
-  void OnStarted(void *arg);
-  void OnFinished();
+  void OnStarted(void *arg) override;
+  void OnFinished() override;
   uptr stack_begin() { return stack_begin_; }
   uptr stack_end() { return stack_end_; }
   uptr tls_begin() { return tls_begin_; }
   uptr tls_end() { return tls_end_; }
   uptr cache_begin() { return cache_begin_; }
   uptr cache_end() { return cache_end_; }
+  DTLS *dtls() { return dtls_; }
+
  private:
   uptr stack_begin_, stack_end_,
        cache_begin_, cache_end_,
        tls_begin_, tls_end_;
+  DTLS *dtls_;
 };
 
 void InitializeThreadRegistry();

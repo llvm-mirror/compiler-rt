@@ -4,16 +4,16 @@
 //
 // RUN: %clangxx_asan -O0 %s -o %t
 // RUN: not %run %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mCRASH
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=0 not %run %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mCRASH
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=1     %run %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mNULL
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=0 not %run %t calloc 2>&1 | FileCheck %s --check-prefix=CHECK-cCRASH
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=1     %run %t calloc 2>&1 | FileCheck %s --check-prefix=CHECK-cNULL
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=0 not %run %t calloc-overflow 2>&1 | FileCheck %s --check-prefix=CHECK-coCRASH
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=1     %run %t calloc-overflow 2>&1 | FileCheck %s --check-prefix=CHECK-coNULL
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=0 not %run %t realloc 2>&1 | FileCheck %s --check-prefix=CHECK-rCRASH
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=1     %run %t realloc 2>&1 | FileCheck %s --check-prefix=CHECK-rNULL
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=0 not %run %t realloc-after-malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mrCRASH
-// RUN: env ASAN_OPTIONS=allocator_may_return_null=1     %run %t realloc-after-malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mrNULL
+// RUN: %env_asan_opts=allocator_may_return_null=0 not %run %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mCRASH
+// RUN: %env_asan_opts=allocator_may_return_null=1     %run %t malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mNULL
+// RUN: %env_asan_opts=allocator_may_return_null=0 not %run %t calloc 2>&1 | FileCheck %s --check-prefix=CHECK-cCRASH
+// RUN: %env_asan_opts=allocator_may_return_null=1     %run %t calloc 2>&1 | FileCheck %s --check-prefix=CHECK-cNULL
+// RUN: %env_asan_opts=allocator_may_return_null=0 not %run %t calloc-overflow 2>&1 | FileCheck %s --check-prefix=CHECK-coCRASH
+// RUN: %env_asan_opts=allocator_may_return_null=1     %run %t calloc-overflow 2>&1 | FileCheck %s --check-prefix=CHECK-coNULL
+// RUN: %env_asan_opts=allocator_may_return_null=0 not %run %t realloc 2>&1 | FileCheck %s --check-prefix=CHECK-rCRASH
+// RUN: %env_asan_opts=allocator_may_return_null=1     %run %t realloc 2>&1 | FileCheck %s --check-prefix=CHECK-rNULL
+// RUN: %env_asan_opts=allocator_may_return_null=0 not %run %t realloc-after-malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mrCRASH
+// RUN: %env_asan_opts=allocator_may_return_null=1     %run %t realloc-after-malloc 2>&1 | FileCheck %s --check-prefix=CHECK-mrNULL
 
 #include <limits.h>
 #include <stdlib.h>
@@ -22,16 +22,19 @@
 #include <assert.h>
 #include <limits>
 int main(int argc, char **argv) {
+  // Disable stderr buffering. Needed on Windows.
+  setvbuf(stderr, NULL, _IONBF, 0);
+
   volatile size_t size = std::numeric_limits<size_t>::max() - 10000;
   assert(argc == 2);
-  char *x = 0;
+  void *x = 0;
   if (!strcmp(argv[1], "malloc")) {
     fprintf(stderr, "malloc:\n");
-    x = (char*)malloc(size);
+    x = malloc(size);
   }
   if (!strcmp(argv[1], "calloc")) {
     fprintf(stderr, "calloc:\n");
-    x = (char*)calloc(size / 4, 4);
+    x = calloc(size / 4, 4);
   }
 
   if (!strcmp(argv[1], "calloc-overflow")) {
@@ -39,18 +42,18 @@ int main(int argc, char **argv) {
     volatile size_t kMaxSizeT = std::numeric_limits<size_t>::max();
     size_t kArraySize = 4096;
     volatile size_t kArraySize2 = kMaxSizeT / kArraySize + 10;
-    x = (char*)calloc(kArraySize, kArraySize2);
+    x = calloc(kArraySize, kArraySize2);
   }
 
   if (!strcmp(argv[1], "realloc")) {
     fprintf(stderr, "realloc:\n");
-    x = (char*)realloc(0, size);
+    x = realloc(0, size);
   }
   if (!strcmp(argv[1], "realloc-after-malloc")) {
     fprintf(stderr, "realloc-after-malloc:\n");
     char *t = (char*)malloc(100);
     *t = 42;
-    x = (char*)realloc(t, size);
+    x = realloc(t, size);
     assert(*t == 42);
     free(t);
   }

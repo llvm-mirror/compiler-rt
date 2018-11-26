@@ -68,6 +68,7 @@ class ThreadContextBase {
   virtual void OnStarted(void *arg) {}
   virtual void OnCreated(void *arg) {}
   virtual void OnReset() {}
+  virtual void OnDetached(void *arg) {}
 };
 
 typedef ThreadContextBase* (*ThreadContextFactory)(u32 tid);
@@ -78,7 +79,8 @@ class ThreadRegistry {
 
   ThreadRegistry(ThreadContextFactory factory, u32 max_threads,
                  u32 thread_quarantine_size, u32 max_reuse = 0);
-  void GetNumberOfThreads(uptr *total = 0, uptr *running = 0, uptr *alive = 0);
+  void GetNumberOfThreads(uptr *total = nullptr, uptr *running = nullptr,
+                          uptr *alive = nullptr);
   uptr GetMaxAliveThreads();
 
   void Lock() { mtx_.Lock(); }
@@ -110,7 +112,7 @@ class ThreadRegistry {
 
   void SetThreadName(u32 tid, const char *name);
   void SetThreadNameByUserId(uptr user_id, const char *name);
-  void DetachThread(u32 tid);
+  void DetachThread(u32 tid, void *arg);
   void JoinThread(u32 tid, void *arg);
   void FinishThread(u32 tid);
   void StartThread(u32 tid, uptr os_id, void *arg);
@@ -141,7 +143,6 @@ class ThreadRegistry {
 
 typedef GenericScopedLock<ThreadRegistry> ThreadRegistryLock;
 
-}  // namespace __sanitizer
+} // namespace __sanitizer
 
-#endif  // SANITIZER_THREAD_REGISTRY_H
-
+#endif // SANITIZER_THREAD_REGISTRY_H

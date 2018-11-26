@@ -53,9 +53,9 @@ TEST(Mman, UserRealloc) {
   uptr pc = 0;
   {
     void *p = user_realloc(thr, pc, 0, 0);
-    // Strictly saying this is incorrect, realloc(NULL, N) is equivalent to
-    // malloc(N), thus must return non-NULL pointer.
-    EXPECT_EQ(p, (void*)0);
+    // Realloc(NULL, N) is equivalent to malloc(N), thus must return
+    // non-NULL pointer.
+    EXPECT_NE(p, (void*)0);
   }
   {
     void *p = user_realloc(thr, pc, 0, 100);
@@ -68,7 +68,7 @@ TEST(Mman, UserRealloc) {
     EXPECT_NE(p, (void*)0);
     memset(p, 0xde, 100);
     void *p2 = user_realloc(thr, pc, p, 0);
-    EXPECT_EQ(p2, (void*)0);
+    EXPECT_NE(p2, (void*)0);
   }
   {
     void *p = user_realloc(thr, pc, 0, 100);
@@ -103,7 +103,7 @@ TEST(Mman, UsableSize) {
   EXPECT_EQ(20U, user_alloc_usable_size(p2));
   user_free(thr, pc, p);
   user_free(thr, pc, p2);
-  EXPECT_EQ(0U, user_alloc_usable_size((void*)0x123));
+  EXPECT_EQ(0U, user_alloc_usable_size((void*)0x4123));
 }
 
 TEST(Mman, Stats) {
@@ -136,16 +136,18 @@ TEST(Mman, Stats) {
 }
 
 TEST(Mman, CallocOverflow) {
-#if TSAN_DEBUG
+#if SANITIZER_DEBUG
   // EXPECT_DEATH clones a thread with 4K stack,
   // which is overflown by tsan memory accesses functions in debug mode.
   return;
 #endif
+  ThreadState *thr = cur_thread();
+  uptr pc = 0;
   size_t kArraySize = 4096;
   volatile size_t kMaxSizeT = std::numeric_limits<size_t>::max();
   volatile size_t kArraySize2 = kMaxSizeT / kArraySize + 10;
   volatile void *p = NULL;
-  EXPECT_DEATH(p = calloc(kArraySize, kArraySize2),
+  EXPECT_DEATH(p = user_calloc(thr, pc, kArraySize, kArraySize2),
                "allocator is terminating the process instead of returning 0");
   EXPECT_EQ(0L, p);
 }

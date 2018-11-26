@@ -12,16 +12,19 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "interception/interception.h"
 #include "sanitizer_common/sanitizer_allocator.h"
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flags.h"
-#include "sanitizer_common/sanitizer_interception.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_linux.h"
+#include "sanitizer_common/sanitizer_platform_interceptors.h"
 #include "sanitizer_common/sanitizer_platform_limits_posix.h"
+#include "sanitizer_common/sanitizer_tls_get_addr.h"
 #include "lsan.h"
 #include "lsan_allocator.h"
+#include "lsan_common.h"
 #include "lsan_thread.h"
 
 using namespace __lsan;
@@ -33,21 +36,6 @@ int pthread_attr_getdetachstate(void *attr, int *v);
 int pthread_key_create(unsigned *key, void (*destructor)(void* v));
 int pthread_setspecific(unsigned key, const void *v);
 }
-
-#define GET_STACK_TRACE                                              \
-  StackTrace stack;                                                  \
-  {                                                                  \
-    uptr stack_top = 0, stack_bottom = 0;                            \
-    ThreadContext *t;                                                \
-    bool fast = common_flags()->fast_unwind_on_malloc;               \
-    if (fast && (t = CurrentThreadContext())) {                      \
-      stack_top = t->stack_end();                                    \
-      stack_bottom = t->stack_begin();                               \
-    }                                                                \
-    stack.Unwind(__sanitizer::common_flags()->malloc_context_size,   \
-                 StackTrace::GetCurrentPc(), GET_CURRENT_FRAME(), 0, \
-                 stack_top, stack_bottom, fast);                     \
-  }
 
 #define ENSURE_LSAN_INITED do {   \
   CHECK(!lsan_init_is_running);   \
@@ -65,7 +53,7 @@ namespace std {
 
 INTERCEPTOR(void*, malloc, uptr size) {
   ENSURE_LSAN_INITED;
-  GET_STACK_TRACE;
+  GET_STACK_TRACE_MALLOC;
   return Allocate(stack, size, 1, kAlwaysClearMemory);
 }
 
@@ -86,34 +74,49 @@ INTERCEPTOR(void*, calloc, uptr nmemb, uptr size) {
     CHECK(allocated < kCallocPoolSize);
     return mem;
   }
-  if (CallocShouldReturnNullDueToOverflow(size, nmemb)) return 0;
+  if (CallocShouldReturnNullDueToOverflow(size, nmemb)) return nullptr;
   ENSURE_LSAN_INITED;
-  GET_STACK_TRACE;
+  GET_STACK_TRACE_MALLOC;
   size *= nmemb;
   return Allocate(stack, size, 1, true);
 }
 
 INTERCEPTOR(void*, realloc, void *q, uptr size) {
   ENSURE_LSAN_INITED;
-  GET_STACK_TRACE;
+  GET_STACK_TRACE_MALLOC;
   return Reallocate(stack, q, size, 1);
 }
 
+#if SANITIZER_INTERCEPT_MEMALIGN
 INTERCEPTOR(void*, memalign, uptr alignment, uptr size) {
   ENSURE_LSAN_INITED;
-  GET_STACK_TRACE;
+  GET_STACK_TRACE_MALLOC;
   return Allocate(stack, size, alignment, kAlwaysClearMemory);
 }
+#define LSAN_MAYBE_INTERCEPT_MEMALIGN INTERCEPT_FUNCTION(memalign)
+
+INTERCEPTOR(void *, __libc_memalign, uptr alignment, uptr size) {
+  ENSURE_LSAN_INITED;
+  GET_STACK_TRACE_MALLOC;
+  void *res = Allocate(stack, size, alignment, kAlwaysClearMemory);
+  DTLS_on_libc_memalign(res, size);
+  return res;
+}
+#define LSAN_MAYBE_INTERCEPT___LIBC_MEMALIGN INTERCEPT_FUNCTION(__libc_memalign)
+#else
+#define LSAN_MAYBE_INTERCEPT_MEMALIGN
+#define LSAN_MAYBE_INTERCEPT___LIBC_MEMALIGN
+#endif // SANITIZER_INTERCEPT_MEMALIGN
 
 INTERCEPTOR(void*, aligned_alloc, uptr alignment, uptr size) {
   ENSURE_LSAN_INITED;
-  GET_STACK_TRACE;
+  GET_STACK_TRACE_MALLOC;
   return Allocate(stack, size, alignment, kAlwaysClearMemory);
 }
 
 INTERCEPTOR(int, posix_memalign, void **memptr, uptr alignment, uptr size) {
   ENSURE_LSAN_INITED;
-  GET_STACK_TRACE;
+  GET_STACK_TRACE_MALLOC;
   *memptr = Allocate(stack, size, alignment, kAlwaysClearMemory);
   // FIXME: Return ENOMEM if user requested more than max alloc size.
   return 0;
@@ -121,7 +124,7 @@ INTERCEPTOR(int, posix_memalign, void **memptr, uptr alignment, uptr size) {
 
 INTERCEPTOR(void*, valloc, uptr size) {
   ENSURE_LSAN_INITED;
-  GET_STACK_TRACE;
+  GET_STACK_TRACE_MALLOC;
   if (size == 0)
     size = GetPageSizeCached();
   return Allocate(stack, size, GetPageSizeCached(), kAlwaysClearMemory);
@@ -132,6 +135,7 @@ INTERCEPTOR(uptr, malloc_usable_size, void *ptr) {
   return GetMallocUsableSize(ptr);
 }
 
+#if SANITIZER_INTERCEPT_MALLOPT_AND_MALLINFO
 struct fake_mallinfo {
   int x[10];
 };
@@ -141,14 +145,21 @@ INTERCEPTOR(struct fake_mallinfo, mallinfo, void) {
   internal_memset(&res, 0, sizeof(res));
   return res;
 }
+#define LSAN_MAYBE_INTERCEPT_MALLINFO INTERCEPT_FUNCTION(mallinfo)
 
 INTERCEPTOR(int, mallopt, int cmd, int value) {
   return -1;
 }
+#define LSAN_MAYBE_INTERCEPT_MALLOPT INTERCEPT_FUNCTION(mallopt)
+#else
+#define LSAN_MAYBE_INTERCEPT_MALLINFO
+#define LSAN_MAYBE_INTERCEPT_MALLOPT
+#endif // SANITIZER_INTERCEPT_MALLOPT_AND_MALLINFO
 
+#if SANITIZER_INTERCEPT_PVALLOC
 INTERCEPTOR(void*, pvalloc, uptr size) {
   ENSURE_LSAN_INITED;
-  GET_STACK_TRACE;
+  GET_STACK_TRACE_MALLOC;
   uptr PageSize = GetPageSizeCached();
   size = RoundUpTo(size, PageSize);
   if (size == 0) {
@@ -157,12 +168,21 @@ INTERCEPTOR(void*, pvalloc, uptr size) {
   }
   return Allocate(stack, size, GetPageSizeCached(), kAlwaysClearMemory);
 }
+#define LSAN_MAYBE_INTERCEPT_PVALLOC INTERCEPT_FUNCTION(pvalloc)
+#else
+#define LSAN_MAYBE_INTERCEPT_PVALLOC
+#endif // SANITIZER_INTERCEPT_PVALLOC
 
+#if SANITIZER_INTERCEPT_CFREE
 INTERCEPTOR(void, cfree, void *p) ALIAS(WRAPPER_NAME(free));
+#define LSAN_MAYBE_INTERCEPT_CFREE INTERCEPT_FUNCTION(cfree)
+#else
+#define LSAN_MAYBE_INTERCEPT_CFREE
+#endif // SANITIZER_INTERCEPT_CFREE
 
 #define OPERATOR_NEW_BODY                              \
   ENSURE_LSAN_INITED;                                  \
-  GET_STACK_TRACE;                                     \
+  GET_STACK_TRACE_MALLOC;                              \
   return Allocate(stack, size, 1, kAlwaysClearMemory);
 
 INTERCEPTOR_ATTRIBUTE
@@ -179,20 +199,15 @@ void *operator new[](uptr size, std::nothrow_t const&) { OPERATOR_NEW_BODY; }
   Deallocate(ptr);
 
 INTERCEPTOR_ATTRIBUTE
-void operator delete(void *ptr) throw() { OPERATOR_DELETE_BODY; }
+void operator delete(void *ptr) NOEXCEPT { OPERATOR_DELETE_BODY; }
 INTERCEPTOR_ATTRIBUTE
-void operator delete[](void *ptr) throw() { OPERATOR_DELETE_BODY; }
+void operator delete[](void *ptr) NOEXCEPT { OPERATOR_DELETE_BODY; }
 INTERCEPTOR_ATTRIBUTE
 void operator delete(void *ptr, std::nothrow_t const&) { OPERATOR_DELETE_BODY; }
 INTERCEPTOR_ATTRIBUTE
 void operator delete[](void *ptr, std::nothrow_t const &) {
   OPERATOR_DELETE_BODY;
 }
-
-// We need this to intercept the __libc_memalign calls that are used to
-// allocate dynamic TLS space in ld-linux.so.
-INTERCEPTOR(void *, __libc_memalign, uptr align, uptr s)
-    ALIAS(WRAPPER_NAME(memalign));
 
 ///// Thread initialization and finalization. /////
 
@@ -223,16 +238,16 @@ extern "C" void *__lsan_thread_start_func(void *arg) {
   // Wait until the last iteration to maximize the chance that we are the last
   // destructor to run.
   if (pthread_setspecific(g_thread_finalize_key,
-                          (void*)kPthreadDestructorIterations)) {
+                          (void*)GetPthreadDestructorIterations())) {
     Report("LeakSanitizer: failed to set thread key.\n");
     Die();
   }
   int tid = 0;
   while ((tid = atomic_load(&p->tid, memory_order_acquire)) == 0)
     internal_sched_yield();
-  atomic_store(&p->tid, 0, memory_order_release);
   SetCurrentThread(tid);
   ThreadStart(tid, GetTid());
+  atomic_store(&p->tid, 0, memory_order_release);
   return callback(param);
 }
 
@@ -241,7 +256,7 @@ INTERCEPTOR(int, pthread_create, void *th, void *attr,
   ENSURE_LSAN_INITED;
   EnsureMainThreadIDIsCorrect();
   __sanitizer_pthread_attr_t myattr;
-  if (attr == 0) {
+  if (!attr) {
     pthread_attr_init(&myattr);
     attr = &myattr;
   }
@@ -252,7 +267,15 @@ INTERCEPTOR(int, pthread_create, void *th, void *attr,
   p.callback = callback;
   p.param = param;
   atomic_store(&p.tid, 0, memory_order_relaxed);
-  int res = REAL(pthread_create)(th, attr, __lsan_thread_start_func, &p);
+  int res;
+  {
+    // Ignore all allocations made by pthread_create: thread stack/TLS may be
+    // stored by pthread for future reuse even after thread destruction, and
+    // the linked list it's stored in doesn't even hold valid pointers to the
+    // objects, the latter are calculated by obscure pointer arithmetic.
+    ScopedInterceptorDisabler disabler;
+    res = REAL(pthread_create)(th, attr, __lsan_thread_start_func, &p);
+  }
   if (res == 0) {
     int tid = ThreadCreate(GetCurrentThread(), *(uptr *)th, detached);
     CHECK_NE(tid, 0);
@@ -279,17 +302,18 @@ namespace __lsan {
 void InitializeInterceptors() {
   INTERCEPT_FUNCTION(malloc);
   INTERCEPT_FUNCTION(free);
-  INTERCEPT_FUNCTION(cfree);
+  LSAN_MAYBE_INTERCEPT_CFREE;
   INTERCEPT_FUNCTION(calloc);
   INTERCEPT_FUNCTION(realloc);
-  INTERCEPT_FUNCTION(memalign);
+  LSAN_MAYBE_INTERCEPT_MEMALIGN;
+  LSAN_MAYBE_INTERCEPT___LIBC_MEMALIGN;
+  INTERCEPT_FUNCTION(aligned_alloc);
   INTERCEPT_FUNCTION(posix_memalign);
-  INTERCEPT_FUNCTION(__libc_memalign);
   INTERCEPT_FUNCTION(valloc);
-  INTERCEPT_FUNCTION(pvalloc);
+  LSAN_MAYBE_INTERCEPT_PVALLOC;
   INTERCEPT_FUNCTION(malloc_usable_size);
-  INTERCEPT_FUNCTION(mallinfo);
-  INTERCEPT_FUNCTION(mallopt);
+  LSAN_MAYBE_INTERCEPT_MALLINFO;
+  LSAN_MAYBE_INTERCEPT_MALLOPT;
   INTERCEPT_FUNCTION(pthread_create);
   INTERCEPT_FUNCTION(pthread_join);
 
@@ -299,4 +323,4 @@ void InitializeInterceptors() {
   }
 }
 
-}  // namespace __lsan
+} // namespace __lsan

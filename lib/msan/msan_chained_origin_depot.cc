@@ -19,6 +19,24 @@ namespace __msan {
 struct ChainedOriginDepotDesc {
   u32 here_id;
   u32 prev_id;
+};
+
+struct ChainedOriginDepotNode {
+  ChainedOriginDepotNode *link;
+  u32 id;
+  u32 here_id;
+  u32 prev_id;
+
+  typedef ChainedOriginDepotDesc args_type;
+
+  bool eq(u32 hash, const args_type &args) const {
+    return here_id == args.here_id && prev_id == args.prev_id;
+  }
+
+  static uptr storage_size(const args_type &args) {
+    return sizeof(ChainedOriginDepotNode);
+  }
+
   /* This is murmur2 hash for the 64->32 bit case.
      It does not behave all that well because the keys have a very biased
      distribution (I've seen 7-element buckets with the table only 14% full).
@@ -32,19 +50,19 @@ struct ChainedOriginDepotDesc {
      split, or one of two reserved values (-1) or (-2). Either case can
      dominate depending on the workload.
   */
-  u32 hash() const {
+  static u32 hash(const args_type &args) {
     const u32 m = 0x5bd1e995;
     const u32 seed = 0x9747b28c;
     const u32 r = 24;
     u32 h = seed;
-    u32 k = here_id;
+    u32 k = args.here_id;
     k *= m;
     k ^= k >> r;
     k *= m;
     h *= m;
     h ^= k;
 
-    k = prev_id;
+    k = args.prev_id;
     k *= m;
     k ^= k >> r;
     k *= m;
@@ -56,46 +74,33 @@ struct ChainedOriginDepotDesc {
     h ^= h >> 15;
     return h;
   }
-  bool is_valid() { return true; }
-};
-
-struct ChainedOriginDepotNode {
-  ChainedOriginDepotNode *link;
-  u32 id;
-  u32 here_id;
-  u32 prev_id;
-
-  typedef ChainedOriginDepotDesc args_type;
-  bool eq(u32 hash, const args_type &args) const {
-    return here_id == args.here_id && prev_id == args.prev_id;
-  }
-  static uptr storage_size(const args_type &args) {
-    return sizeof(ChainedOriginDepotNode);
-  }
+  static bool is_valid(const args_type &args) { return true; }
   void store(const args_type &args, u32 other_hash) {
     here_id = args.here_id;
     prev_id = args.prev_id;
   }
+
   args_type load() const {
     args_type ret = {here_id, prev_id};
     return ret;
   }
+
   struct Handle {
     ChainedOriginDepotNode *node_;
-    Handle() : node_(0) {}
+    Handle() : node_(nullptr) {}
     explicit Handle(ChainedOriginDepotNode *node) : node_(node) {}
     bool valid() { return node_; }
     u32 id() { return node_->id; }
     int here_id() { return node_->here_id; }
     int prev_id() { return node_->prev_id; }
   };
+
   Handle get_handle() { return Handle(this); }
 
   typedef Handle handle_type;
 };
 
-// kTabSizeLog = 22 => 32Mb static storage for bucket pointers.
-static StackDepotBase<ChainedOriginDepotNode, 3, 20> chainedOriginDepot;
+static StackDepotBase<ChainedOriginDepotNode, 4, 20> chainedOriginDepot;
 
 StackDepotStats *ChainedOriginDepotGetStats() {
   return chainedOriginDepot.GetStats();
@@ -116,4 +121,12 @@ u32 ChainedOriginDepotGet(u32 id, u32 *other) {
   return desc.here_id;
 }
 
-}  // namespace __msan
+void ChainedOriginDepotLockAll() {
+  chainedOriginDepot.LockAll();
+}
+
+void ChainedOriginDepotUnlockAll() {
+  chainedOriginDepot.UnlockAll();
+}
+
+} // namespace __msan

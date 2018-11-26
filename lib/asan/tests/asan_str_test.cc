@@ -20,10 +20,41 @@
 static char global_string[] = "global";
 static size_t global_string_length = 6;
 
+const char kStackReadUnderflow[] =
+#if !GTEST_USES_SIMPLE_RE
+    ASAN_PCRE_DOTALL
+    "READ.*"
+#endif
+    "underflows this variable";
+const char kStackReadOverflow[] =
+#if !GTEST_USES_SIMPLE_RE
+    ASAN_PCRE_DOTALL
+    "READ.*"
+#endif
+    "overflows this variable";
+
+namespace {
+enum class OOBKind {
+  Heap,
+  Stack,
+  Global,
+};
+
+string LeftOOBReadMessage(OOBKind oob_kind, int oob_distance) {
+  return oob_kind == OOBKind::Stack ? kStackReadUnderflow
+                                    : ::LeftOOBReadMessage(oob_distance);
+}
+
+string RightOOBReadMessage(OOBKind oob_kind, int oob_distance) {
+  return oob_kind == OOBKind::Stack ? kStackReadOverflow
+                                    : ::RightOOBReadMessage(oob_distance);
+}
+}  // namespace
+
 // Input to a test is a zero-terminated string str with given length
 // Accesses to the bytes to the left and to the right of str
 // are presumed to produce OOB errors
-void StrLenOOBTestTemplate(char *str, size_t length, bool is_global) {
+void StrLenOOBTestTemplate(char *str, size_t length, OOBKind oob_kind) {
   // Normal strlen calls
   EXPECT_EQ(strlen(str), length);
   if (length > 0) {
@@ -31,17 +62,18 @@ void StrLenOOBTestTemplate(char *str, size_t length, bool is_global) {
     EXPECT_EQ(0U, strlen(str + length));
   }
   // Arg of strlen is not malloced, OOB access
-  if (!is_global) {
+  if (oob_kind != OOBKind::Global) {
     // We don't insert RedZones to the left of global variables
-    EXPECT_DEATH(Ident(strlen(str - 1)), LeftOOBReadMessage(1));
-    EXPECT_DEATH(Ident(strlen(str - 5)), LeftOOBReadMessage(5));
+    EXPECT_DEATH(Ident(strlen(str - 1)), LeftOOBReadMessage(oob_kind, 1));
+    EXPECT_DEATH(Ident(strlen(str - 5)), LeftOOBReadMessage(oob_kind, 5));
   }
-  EXPECT_DEATH(Ident(strlen(str + length + 1)), RightOOBReadMessage(0));
+  EXPECT_DEATH(Ident(strlen(str + length + 1)),
+               RightOOBReadMessage(oob_kind, 0));
   // Overwrite terminator
   str[length] = 'a';
   // String is not zero-terminated, strlen will lead to OOB access
-  EXPECT_DEATH(Ident(strlen(str)), RightOOBReadMessage(0));
-  EXPECT_DEATH(Ident(strlen(str + length)), RightOOBReadMessage(0));
+  EXPECT_DEATH(Ident(strlen(str)), RightOOBReadMessage(oob_kind, 0));
+  EXPECT_DEATH(Ident(strlen(str + length)), RightOOBReadMessage(oob_kind, 0));
   // Restore terminator
   str[length] = 0;
 }
@@ -57,11 +89,9 @@ TEST(AddressSanitizer, StrLenOOBTest) {
   }
   heap_string[length] = 0;
   stack_string[length] = 0;
-  StrLenOOBTestTemplate(heap_string, length, false);
-  // TODO(samsonov): Fix expected messages in StrLenOOBTestTemplate to
-  //      make test for stack_string work. Or move it to output tests.
-  // StrLenOOBTestTemplate(stack_string, length, false);
-  StrLenOOBTestTemplate(global_string, global_string_length, true);
+  StrLenOOBTestTemplate(heap_string, length, OOBKind::Heap);
+  StrLenOOBTestTemplate(stack_string, length, OOBKind::Stack);
+  StrLenOOBTestTemplate(global_string, global_string_length, OOBKind::Global);
   free(heap_string);
 }
 
@@ -97,7 +127,15 @@ TEST(AddressSanitizer, StrNLenOOBTest) {
 }
 #endif  // SANITIZER_TEST_HAS_STRNLEN
 
-TEST(AddressSanitizer, StrDupOOBTest) {
+// This test fails with the WinASan dynamic runtime because we fail to intercept
+// strdup.
+#if defined(_MSC_VER) && defined(_DLL)
+#define MAYBE_StrDupOOBTest DISABLED_StrDupOOBTest
+#else
+#define MAYBE_StrDupOOBTest StrDupOOBTest
+#endif
+
+TEST(AddressSanitizer, MAYBE_StrDupOOBTest) {
   size_t size = Ident(42);
   char *str = MallocAndMemsetString(size);
   char *new_str;
@@ -186,23 +224,8 @@ TEST(AddressSanitizer, StrNCpyOOBTest) {
 typedef char*(*PointerToStrChr1)(const char*, int);
 typedef char*(*PointerToStrChr2)(char*, int);
 
-UNUSED static void RunStrChrTest(PointerToStrChr1 StrChr) {
-  size_t size = Ident(100);
-  char *str = MallocAndMemsetString(size);
-  str[10] = 'q';
-  str[11] = '\0';
-  EXPECT_EQ(str, StrChr(str, 'z'));
-  EXPECT_EQ(str + 10, StrChr(str, 'q'));
-  EXPECT_EQ(NULL, StrChr(str, 'a'));
-  // StrChr argument points to not allocated memory.
-  EXPECT_DEATH(Ident(StrChr(str - 1, 'z')), LeftOOBReadMessage(1));
-  EXPECT_DEATH(Ident(StrChr(str + size, 'z')), RightOOBReadMessage(0));
-  // Overwrite the terminator and hit not allocated memory.
-  str[11] = 'z';
-  EXPECT_DEATH(Ident(StrChr(str, 'a')), RightOOBReadMessage(0));
-  free(str);
-}
-UNUSED static void RunStrChrTest(PointerToStrChr2 StrChr) {
+template<typename StrChrFn>
+static void RunStrChrTestImpl(StrChrFn *StrChr) {
   size_t size = Ident(100);
   char *str = MallocAndMemsetString(size);
   str[10] = 'q';
@@ -219,10 +242,19 @@ UNUSED static void RunStrChrTest(PointerToStrChr2 StrChr) {
   free(str);
 }
 
+// Prefer to use the standard signature if both are available.
+UNUSED static void RunStrChrTest(PointerToStrChr1 StrChr, ...) {
+  RunStrChrTestImpl(StrChr);
+}
+UNUSED static void RunStrChrTest(PointerToStrChr2 StrChr, int) {
+  RunStrChrTestImpl(StrChr);
+}
+
 TEST(AddressSanitizer, StrChrAndIndexOOBTest) {
-  RunStrChrTest(&strchr);
-#if !defined(_WIN32)  // no index() on Windows.
-  RunStrChrTest(&index);
+  RunStrChrTest(&strchr, 0);
+// No index() on Windows and on Android L.
+#if !defined(_WIN32) && !defined(__ANDROID__)
+  RunStrChrTest(&index, 0);
 #endif
 }
 
@@ -289,9 +321,6 @@ void RunStrCmpTest(PointerToStrCmp StrCmp) {
   Ident(StrCmp(s1, s2));
   Ident(StrCmp(s1, s2 + size - 1));
   Ident(StrCmp(s1 + size - 1, s2 + size - 1));
-  s1[size - 1] = 'z';
-  s2[size - 1] = 'x';
-  Ident(StrCmp(s1, s2));
   // One of arguments points to not allocated memory.
   EXPECT_DEATH(Ident(StrCmp)(s1 - 1, s2), LeftOOBReadMessage(1));
   EXPECT_DEATH(Ident(StrCmp)(s1, s2 - 1), LeftOOBReadMessage(1));
@@ -370,17 +399,14 @@ TEST(AddressSanitizer, StrCatOOBTest) {
   // One of arguments points to not allocated memory.
   EXPECT_DEATH(strcat(to - 1, from), LeftOOBAccessMessage(1));
   EXPECT_DEATH(strcat(to, from - 1), LeftOOBReadMessage(1));
-  EXPECT_DEATH(strcat(to + to_size, from), RightOOBWriteMessage(0));
   EXPECT_DEATH(strcat(to, from + from_size), RightOOBReadMessage(0));
 
   // "from" is not zero-terminated.
   from[from_size - 1] = 'z';
   EXPECT_DEATH(strcat(to, from), RightOOBReadMessage(0));
   from[from_size - 1] = '\0';
-  // "to" is not zero-terminated.
-  memset(to, 'z', to_size);
-  EXPECT_DEATH(strcat(to, from), RightOOBWriteMessage(0));
   // "to" is too short to fit "from".
+  memset(to, 'z', to_size);
   to[to_size - from_size + 1] = '\0';
   EXPECT_DEATH(strcat(to, from), RightOOBWriteMessage(0));
   // length of "to" is just enough.
@@ -408,7 +434,6 @@ TEST(AddressSanitizer, StrNCatOOBTest) {
   // One of arguments points to not allocated memory.
   EXPECT_DEATH(strncat(to - 1, from, 2), LeftOOBAccessMessage(1));
   EXPECT_DEATH(strncat(to, from - 1, 2), LeftOOBReadMessage(1));
-  EXPECT_DEATH(strncat(to + to_size, from, 2), RightOOBWriteMessage(0));
   EXPECT_DEATH(strncat(to, from + from_size, 2), RightOOBReadMessage(0));
 
   memset(from, 'z', from_size);
@@ -416,8 +441,6 @@ TEST(AddressSanitizer, StrNCatOOBTest) {
   to[0] = '\0';
   // "from" is too short.
   EXPECT_DEATH(strncat(to, from, from_size + 1), RightOOBReadMessage(0));
-  // "to" is not zero-terminated.
-  EXPECT_DEATH(strncat(to + 1, from, 1), RightOOBWriteMessage(0));
   // "to" is too short to fit "from".
   to[0] = 'z';
   to[to_size - from_size + 1] = '\0';
@@ -442,11 +465,13 @@ TEST(AddressSanitizer, StrArgsOverlapTest) {
 #if !defined(__APPLE__) || !defined(MAC_OS_X_VERSION_10_7) || \
     (MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_7)
   // Check "memcpy". Use Ident() to avoid inlining.
+#if PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE
   memset(str, 'z', size);
   Ident(memcpy)(str + 1, str + 11, 10);
   Ident(memcpy)(str, str, 0);
   EXPECT_DEATH(Ident(memcpy)(str, str + 14, 15), OverlapErrorMessage("memcpy"));
   EXPECT_DEATH(Ident(memcpy)(str + 14, str, 15), OverlapErrorMessage("memcpy"));
+#endif
 #endif
 
   // We do not treat memcpy with to==from as a bug.
@@ -498,15 +523,6 @@ TEST(AddressSanitizer, StrArgsOverlapTest) {
   free(str);
 }
 
-void CallAtoi(const char *nptr) {
-  Ident(atoi(nptr));
-}
-void CallAtol(const char *nptr) {
-  Ident(atol(nptr));
-}
-void CallAtoll(const char *nptr) {
-  Ident(atoll(nptr));
-}
 typedef void(*PointerToCallAtoi)(const char*);
 
 void RunAtoiOOBTest(PointerToCallAtoi Atoi) {
@@ -516,24 +532,28 @@ void RunAtoiOOBTest(PointerToCallAtoi Atoi) {
   EXPECT_DEATH(Atoi(array - 1), LeftOOBReadMessage(1));
   // Die if a buffer doesn't have terminating NULL.
   EXPECT_DEATH(Atoi(array), RightOOBReadMessage(0));
-  // Make last symbol a terminating NULL or other non-digit.
+  // Make last symbol a terminating NULL
   array[9] = '\0';
   Atoi(array);
-  array[9] = 'a';
-  Atoi(array);
-  Atoi(array + 9);
   // Sometimes we need to detect overflow if no digits are found.
   memset(array, ' ', 10);
   EXPECT_DEATH(Atoi(array), RightOOBReadMessage(0));
   array[9] = '-';
   EXPECT_DEATH(Atoi(array), RightOOBReadMessage(0));
   EXPECT_DEATH(Atoi(array + 9), RightOOBReadMessage(0));
-  array[8] = '-';
-  Atoi(array);
   free(array);
 }
 
 #if !defined(_WIN32)  // FIXME: Fix and enable on Windows.
+void CallAtoi(const char *nptr) {
+  Ident(atoi(nptr));
+}
+void CallAtol(const char *nptr) {
+  Ident(atol(nptr));
+}
+void CallAtoll(const char *nptr) {
+  Ident(atoll(nptr));
+}
 TEST(AddressSanitizer, AtoiAndFriendsOOBTest) {
   RunAtoiOOBTest(&CallAtoi);
   RunAtoiOOBTest(&CallAtol);
@@ -541,17 +561,10 @@ TEST(AddressSanitizer, AtoiAndFriendsOOBTest) {
 }
 #endif
 
-void CallStrtol(const char *nptr, char **endptr, int base) {
-  Ident(strtol(nptr, endptr, base));
-}
-void CallStrtoll(const char *nptr, char **endptr, int base) {
-  Ident(strtoll(nptr, endptr, base));
-}
 typedef void(*PointerToCallStrtol)(const char*, char**, int);
 
 void RunStrtolOOBTest(PointerToCallStrtol Strtol) {
   char *array = MallocAndMemsetString(3);
-  char *endptr = NULL;
   array[0] = '1';
   array[1] = '2';
   array[2] = '3';
@@ -559,19 +572,12 @@ void RunStrtolOOBTest(PointerToCallStrtol Strtol) {
   EXPECT_DEATH(Strtol(array + 3, NULL, 0), RightOOBReadMessage(0));
   EXPECT_DEATH(Strtol(array - 1, NULL, 0), LeftOOBReadMessage(1));
   // Buffer overflow if there is no terminating null (depends on base).
-  Strtol(array, &endptr, 3);
-  EXPECT_EQ(array + 2, endptr);
   EXPECT_DEATH(Strtol(array, NULL, 0), RightOOBReadMessage(0));
   array[2] = 'z';
-  Strtol(array, &endptr, 35);
-  EXPECT_EQ(array + 2, endptr);
   EXPECT_DEATH(Strtol(array, NULL, 36), RightOOBReadMessage(0));
   // Add terminating zero to get rid of overflow.
   array[2] = '\0';
   Strtol(array, NULL, 36);
-  // Don't check for overflow if base is invalid.
-  Strtol(array - 1, NULL, -1);
-  Strtol(array + 3, NULL, 1);
   // Sometimes we need to detect overflow if no digits are found.
   array[0] = array[1] = array[2] = ' ';
   EXPECT_DEATH(Strtol(array, NULL, 0), RightOOBReadMessage(0));
@@ -579,17 +585,16 @@ void RunStrtolOOBTest(PointerToCallStrtol Strtol) {
   EXPECT_DEATH(Strtol(array, NULL, 0), RightOOBReadMessage(0));
   array[2] = '-';
   EXPECT_DEATH(Strtol(array, NULL, 0), RightOOBReadMessage(0));
-  array[1] = '+';
-  Strtol(array, NULL, 0);
-  array[1] = array[2] = 'z';
-  Strtol(array, &endptr, 0);
-  EXPECT_EQ(array, endptr);
-  Strtol(array + 2, NULL, 0);
-  EXPECT_EQ(array, endptr);
   free(array);
 }
 
 #if !defined(_WIN32)  // FIXME: Fix and enable on Windows.
+void CallStrtol(const char *nptr, char **endptr, int base) {
+  Ident(strtol(nptr, endptr, base));
+}
+void CallStrtoll(const char *nptr, char **endptr, int base) {
+  Ident(strtoll(nptr, endptr, base));
+}
 TEST(AddressSanitizer, StrtollOOBTest) {
   RunStrtolOOBTest(&CallStrtoll);
 }

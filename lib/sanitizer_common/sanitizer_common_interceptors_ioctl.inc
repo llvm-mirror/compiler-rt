@@ -53,25 +53,9 @@ static void ioctl_table_fill() {
   _(FIONBIO, READ, sizeof(int));
   _(FIONCLEX, NONE, 0);
   _(FIOSETOWN, READ, sizeof(int));
-  _(SIOCADDMULTI, READ, struct_ifreq_sz);
   _(SIOCATMARK, WRITE, sizeof(int));
-  _(SIOCDELMULTI, READ, struct_ifreq_sz);
-  _(SIOCGIFADDR, WRITE, struct_ifreq_sz);
-  _(SIOCGIFBRDADDR, WRITE, struct_ifreq_sz);
   _(SIOCGIFCONF, CUSTOM, 0);
-  _(SIOCGIFDSTADDR, WRITE, struct_ifreq_sz);
-  _(SIOCGIFFLAGS, WRITE, struct_ifreq_sz);
-  _(SIOCGIFMETRIC, WRITE, struct_ifreq_sz);
-  _(SIOCGIFMTU, WRITE, struct_ifreq_sz);
-  _(SIOCGIFNETMASK, WRITE, struct_ifreq_sz);
   _(SIOCGPGRP, WRITE, sizeof(int));
-  _(SIOCSIFADDR, READ, struct_ifreq_sz);
-  _(SIOCSIFBRDADDR, READ, struct_ifreq_sz);
-  _(SIOCSIFDSTADDR, READ, struct_ifreq_sz);
-  _(SIOCSIFFLAGS, READ, struct_ifreq_sz);
-  _(SIOCSIFMETRIC, READ, struct_ifreq_sz);
-  _(SIOCSIFMTU, READ, struct_ifreq_sz);
-  _(SIOCSIFNETMASK, READ, struct_ifreq_sz);
   _(SIOCSPGRP, READ, sizeof(int));
   _(TIOCCONS, NONE, 0);
   _(TIOCEXCL, NONE, 0);
@@ -91,6 +75,25 @@ static void ioctl_table_fill() {
   _(TIOCSPGRP, READ, pid_t_sz);
   _(TIOCSTI, READ, sizeof(char));
   _(TIOCSWINSZ, READ, struct_winsize_sz);
+
+#if !SANITIZER_IOS
+  _(SIOCADDMULTI, READ, struct_ifreq_sz);
+  _(SIOCDELMULTI, READ, struct_ifreq_sz);
+  _(SIOCGIFADDR, WRITE, struct_ifreq_sz);
+  _(SIOCGIFBRDADDR, WRITE, struct_ifreq_sz);
+  _(SIOCGIFDSTADDR, WRITE, struct_ifreq_sz);
+  _(SIOCGIFFLAGS, WRITE, struct_ifreq_sz);
+  _(SIOCGIFMETRIC, WRITE, struct_ifreq_sz);
+  _(SIOCGIFMTU, WRITE, struct_ifreq_sz);
+  _(SIOCGIFNETMASK, WRITE, struct_ifreq_sz);
+  _(SIOCSIFADDR, READ, struct_ifreq_sz);
+  _(SIOCSIFBRDADDR, READ, struct_ifreq_sz);
+  _(SIOCSIFDSTADDR, READ, struct_ifreq_sz);
+  _(SIOCSIFFLAGS, READ, struct_ifreq_sz);
+  _(SIOCSIFMETRIC, READ, struct_ifreq_sz);
+  _(SIOCSIFMTU, READ, struct_ifreq_sz);
+  _(SIOCSIFNETMASK, READ, struct_ifreq_sz);
+#endif
 
 #if (SANITIZER_LINUX && !SANITIZER_ANDROID)
   _(SIOCGETSGCNT, WRITE, struct_sioc_sg_req_sz);
@@ -520,7 +523,7 @@ static const ioctl_desc *ioctl_table_lookup(unsigned req) {
   if (left == right && ioctl_table[left].req == req)
     return ioctl_table + left;
   else
-    return 0;
+    return nullptr;
 }
 
 static bool ioctl_decode(unsigned req, ioctl_desc *desc) {
@@ -567,7 +570,7 @@ static const ioctl_desc *ioctl_lookup(unsigned req) {
       (desc->type == ioctl_desc::READWRITE || desc->type == ioctl_desc::WRITE ||
        desc->type == ioctl_desc::READ))
     return desc;
-  return 0;
+  return nullptr;
 }
 
 static void ioctl_common_pre(void *ctx, const ioctl_desc *desc, int d,
@@ -578,14 +581,11 @@ static void ioctl_common_pre(void *ctx, const ioctl_desc *desc, int d,
   }
   if (desc->type != ioctl_desc::CUSTOM)
     return;
-  switch (request) {
-    case 0x00008912: {  // SIOCGIFCONF
-      struct __sanitizer_ifconf *ifc = (__sanitizer_ifconf *)arg;
-      COMMON_INTERCEPTOR_READ_RANGE(ctx, &ifc->ifc_len, sizeof(ifc->ifc_len));
-      break;
-    }
+  if (request == IOCTL_SIOCGIFCONF) {
+    struct __sanitizer_ifconf *ifc = (__sanitizer_ifconf *)arg;
+    COMMON_INTERCEPTOR_READ_RANGE(ctx, (char*)&ifc->ifc_len,
+                                  sizeof(ifc->ifc_len));
   }
-  return;
 }
 
 static void ioctl_common_post(void *ctx, const ioctl_desc *desc, int res, int d,
@@ -597,12 +597,8 @@ static void ioctl_common_post(void *ctx, const ioctl_desc *desc, int res, int d,
   }
   if (desc->type != ioctl_desc::CUSTOM)
     return;
-  switch (request) {
-    case 0x00008912: {  // SIOCGIFCONF
-      struct __sanitizer_ifconf *ifc = (__sanitizer_ifconf *)arg;
-      COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ifc->ifc_ifcu.ifcu_req, ifc->ifc_len);
-      break;
-    }
+  if (request == IOCTL_SIOCGIFCONF) {
+    struct __sanitizer_ifconf *ifc = (__sanitizer_ifconf *)arg;
+    COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ifc->ifc_ifcu.ifcu_req, ifc->ifc_len);
   }
-  return;
 }

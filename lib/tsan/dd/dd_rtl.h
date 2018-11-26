@@ -18,8 +18,7 @@
 
 namespace __dsan {
 
-struct Flags : CommonFlags, DDFlags {
-};
+typedef DDFlags Flags;
 
 struct Mutex {
   DDMutex dd;
@@ -36,7 +35,7 @@ struct Callback : DDCallback {
   Thread *thr;
 
   Callback(Thread *thr);
-  virtual u32 Unwind();
+  u32 Unwind() override;
 };
 
 typedef AddrHashMap<Mutex, 31051> MutexHashMap;

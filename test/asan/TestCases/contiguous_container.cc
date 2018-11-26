@@ -1,4 +1,4 @@
-// RUN: %clangxx_asan -O %s -o %t && %run %t
+// RUN: %clangxx_asan -fexceptions -O %s -o %t && %run %t
 //
 // Test __sanitizer_annotate_contiguous_container.
 
@@ -26,10 +26,18 @@ void TestContainer(size_t capacity) {
     for (size_t idx = size; idx < capacity; idx++)
         assert(__asan_address_is_poisoned(beg + idx));
     assert(__sanitizer_verify_contiguous_container(beg, mid, end));
-    if (mid != beg)
+    assert(NULL ==
+           __sanitizer_contiguous_container_find_bad_address(beg, mid, end));
+    if (mid != beg) {
       assert(!__sanitizer_verify_contiguous_container(beg, mid - 1, end));
-    if (mid != end)
+      assert(mid - 1 == __sanitizer_contiguous_container_find_bad_address(
+                            beg, mid - 1, end));
+    }
+    if (mid != end) {
       assert(!__sanitizer_verify_contiguous_container(beg, mid + 1, end));
+      assert(mid == __sanitizer_contiguous_container_find_bad_address(
+                        beg, mid + 1, end));
+    }
   }
 
   // Don't forget to unpoison the whole thing before destroing/reallocating.
@@ -59,7 +67,9 @@ void TestThrow() {
   assert(!__asan_address_is_poisoned(x + 13));
   // FIXME: invert the assertion below once we fix
   // https://code.google.com/p/address-sanitizer/issues/detail?id=258
-  assert(!__asan_address_is_poisoned(x + 14));
+  // This assertion works only w/o UAR.
+  if (!__asan_get_current_fake_stack())
+    assert(!__asan_address_is_poisoned(x + 14));
   __sanitizer_annotate_contiguous_container(x, x + 32, x + 14, x + 32);
   assert(!__asan_address_is_poisoned(x + 13));
   assert(!__asan_address_is_poisoned(x + 14));

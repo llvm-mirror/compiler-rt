@@ -14,7 +14,6 @@
 // inside it.
 //===----------------------------------------------------------------------===//
 
-
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_libc.h"
@@ -22,7 +21,8 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#if SANITIZER_WINDOWS && !defined(va_copy)
+#if SANITIZER_WINDOWS && defined(_MSC_VER) && _MSC_VER < 1800 &&               \
+      !defined(va_copy)
 # define va_copy(dst, src) ((dst) = (src))
 #endif
 
@@ -43,7 +43,7 @@ static int AppendChar(char **buff, const char *buff_end, char c) {
 // on the value of |pad_with_zero|.
 static int AppendNumber(char **buff, const char *buff_end, u64 absolute_value,
                         u8 base, u8 minimal_num_length, bool pad_with_zero,
-                        bool negative) {
+                        bool negative, bool uppercase) {
   uptr const kMaxLen = 30;
   RAW_CHECK(base == 10 || base == 16);
   RAW_CHECK(base == 10 || !negative);
@@ -76,28 +76,30 @@ static int AppendNumber(char **buff, const char *buff_end, u64 absolute_value,
   if (negative && !pad_with_zero) result += AppendChar(buff, buff_end, '-');
   for (; pos >= 0; pos--) {
     char digit = static_cast<char>(num_buffer[pos]);
-    result += AppendChar(buff, buff_end, (digit < 10) ? '0' + digit
-                                                      : 'a' + digit - 10);
+    digit = (digit < 10) ? '0' + digit : (uppercase ? 'A' : 'a') + digit - 10;
+    result += AppendChar(buff, buff_end, digit);
   }
   return result;
 }
 
 static int AppendUnsigned(char **buff, const char *buff_end, u64 num, u8 base,
-                          u8 minimal_num_length, bool pad_with_zero) {
+                          u8 minimal_num_length, bool pad_with_zero,
+                          bool uppercase) {
   return AppendNumber(buff, buff_end, num, base, minimal_num_length,
-                      pad_with_zero, false /* negative */);
+                      pad_with_zero, false /* negative */, uppercase);
 }
 
 static int AppendSignedDecimal(char **buff, const char *buff_end, s64 num,
                                u8 minimal_num_length, bool pad_with_zero) {
   bool negative = (num < 0);
   return AppendNumber(buff, buff_end, (u64)(negative ? -num : num), 10,
-                      minimal_num_length, pad_with_zero, negative);
+                      minimal_num_length, pad_with_zero, negative,
+                      false /* uppercase */);
 }
 
 static int AppendString(char **buff, const char *buff_end, int precision,
                         const char *s) {
-  if (s == 0)
+  if (!s)
     s = "<null>";
   int result = 0;
   for (; *s; s++) {
@@ -112,14 +114,16 @@ static int AppendPointer(char **buff, const char *buff_end, u64 ptr_value) {
   int result = 0;
   result += AppendString(buff, buff_end, -1, "0x");
   result += AppendUnsigned(buff, buff_end, ptr_value, 16,
-                           (SANITIZER_WORDSIZE == 64) ? 12 : 8, true);
+                           SANITIZER_POINTER_FORMAT_LENGTH,
+                           true /* pad_with_zero */, false /* uppercase */);
   return result;
 }
 
 int VSNPrintf(char *buff, int buff_length,
               const char *format, va_list args) {
   static const char *kPrintfFormatsHelp =
-    "Supported Printf formats: %([0-9]*)?(z|ll)?{d,u,x}; %p; %(\\.\\*)?s; %c\n";
+      "Supported Printf formats: %([0-9]*)?(z|ll)?{d,u,x,X}; %p; %(\\.\\*)?s; "
+      "%c\n";
   RAW_CHECK(format);
   RAW_CHECK(buff_length > 0);
   const char *buff_end = &buff[buff_length - 1];
@@ -164,12 +168,14 @@ int VSNPrintf(char *buff, int buff_length,
         break;
       }
       case 'u':
-      case 'x': {
+      case 'x':
+      case 'X': {
         uval = have_ll ? va_arg(args, u64)
              : have_z ? va_arg(args, uptr)
              : va_arg(args, unsigned);
-        result += AppendUnsigned(&buff, buff_end, uval,
-                                 (*cur == 'u') ? 10 : 16, width, pad_with_zero);
+        bool uppercase = (*cur == 'X');
+        result += AppendUnsigned(&buff, buff_end, uval, (*cur == 'u') ? 10 : 16,
+                                 width, pad_with_zero, uppercase);
         break;
       }
       case 'p': {
@@ -213,7 +219,7 @@ SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
 void OnPrint(const char *str) {
   (void)str;
 }
-#elif defined(SANITIZER_GO) && defined(TSAN_EXTERNAL_HOOKS)
+#elif SANITIZER_GO && defined(TSAN_EXTERNAL_HOOKS)
 void OnPrint(const char *str);
 #else
 void OnPrint(const char *str) {
@@ -250,30 +256,40 @@ static void SharedPrintfCode(bool append_pid, const char *format,
       buffer_size = kLen;
     }
     needed_length = 0;
+    // Check that data fits into the current buffer.
+#   define CHECK_NEEDED_LENGTH \
+      if (needed_length >= buffer_size) { \
+        if (!use_mmap) continue; \
+        RAW_CHECK_MSG(needed_length < kLen, \
+                      "Buffer in Report is too short!\n"); \
+      }
     if (append_pid) {
       int pid = internal_getpid();
-      needed_length += internal_snprintf(buffer, buffer_size, "==%d==", pid);
-      if (needed_length >= buffer_size) {
-        // The pid doesn't fit into the current buffer.
-        if (!use_mmap)
-          continue;
-        RAW_CHECK_MSG(needed_length < kLen, "Buffer in Report is too short!\n");
+      const char *exe_name = GetProcessName();
+      if (common_flags()->log_exe_name && exe_name) {
+        needed_length += internal_snprintf(buffer, buffer_size,
+                                           "==%s", exe_name);
+        CHECK_NEEDED_LENGTH
       }
+      needed_length += internal_snprintf(buffer + needed_length,
+                                         buffer_size - needed_length,
+                                         "==%d==", pid);
+      CHECK_NEEDED_LENGTH
     }
     needed_length += VSNPrintf(buffer + needed_length,
                                buffer_size - needed_length, format, args);
-    if (needed_length >= buffer_size) {
-      // The message doesn't fit into the current buffer.
-      if (!use_mmap)
-        continue;
-      RAW_CHECK_MSG(needed_length < kLen, "Buffer in Report is too short!\n");
-    }
+    CHECK_NEEDED_LENGTH
     // If the message fit into the buffer, print it and exit.
     break;
+#   undef CHECK_NEEDED_LENGTH
   }
   RawWrite(buffer);
-  AndroidLogWrite(buffer);
+
+  // Remove color sequences from the message.
+  RemoveANSIEscapeSequencesFromString(buffer);
   CallPrintfAndReportCallback(buffer);
+  LogMessageOnPrintf(buffer);
+
   // If we had mapped any memory, clean up.
   if (buffer != local_buffer)
     UnmapOrDie((void *)buffer, buffer_size);
@@ -321,4 +337,4 @@ void InternalScopedString::append(const char *format, ...) {
   CHECK_LT(length_, size());
 }
 
-}  // namespace __sanitizer
+} // namespace __sanitizer

@@ -11,8 +11,8 @@
 //
 // Intercept various libc functions.
 //===----------------------------------------------------------------------===//
-#include "asan_interceptors.h"
 
+#include "asan_interceptors.h"
 #include "asan_allocator.h"
 #include "asan_internal.h"
 #include "asan_mapping.h"
@@ -20,7 +20,19 @@
 #include "asan_report.h"
 #include "asan_stack.h"
 #include "asan_stats.h"
+#include "asan_suppressions.h"
+#include "lsan/lsan_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
+
+#if SANITIZER_POSIX
+#include "sanitizer_common/sanitizer_posix.h"
+#endif
+
+#if defined(__i386) && SANITIZER_LINUX
+#define ASAN_PTHREAD_CREATE_VERSION "GLIBC_2.1"
+#elif defined(__mips__) && SANITIZER_LINUX
+#define ASAN_PTHREAD_CREATE_VERSION "GLIBC_2.2"
+#endif
 
 namespace __asan {
 
@@ -34,12 +46,16 @@ static inline bool QuickCheckForUnpoisonedRegion(uptr beg, uptr size) {
   return false;
 }
 
+struct AsanInterceptorContext {
+  const char *interceptor_name;
+};
+
 // We implement ACCESS_MEMORY_RANGE, ASAN_READ_RANGE,
 // and ASAN_WRITE_RANGE as macro instead of function so
 // that no extra frames are created, and stack trace contains
 // relevant information only.
 // We check all shadow bytes.
-#define ACCESS_MEMORY_RANGE(offset, size, isWrite) do {                 \
+#define ACCESS_MEMORY_RANGE(ctx, offset, size, isWrite) do {            \
     uptr __offset = (uptr)(offset);                                     \
     uptr __size = (uptr)(size);                                         \
     uptr __bad = 0;                                                     \
@@ -49,13 +65,78 @@ static inline bool QuickCheckForUnpoisonedRegion(uptr beg, uptr size) {
     }                                                                   \
     if (!QuickCheckForUnpoisonedRegion(__offset, __size) &&             \
         (__bad = __asan_region_is_poisoned(__offset, __size))) {        \
-      GET_CURRENT_PC_BP_SP;                                             \
-      __asan_report_error(pc, bp, sp, __bad, isWrite, __size);          \
+      AsanInterceptorContext *_ctx = (AsanInterceptorContext *)ctx;     \
+      bool suppressed = false;                                          \
+      if (_ctx) {                                                       \
+        suppressed = IsInterceptorSuppressed(_ctx->interceptor_name);   \
+        if (!suppressed && HaveStackTraceBasedSuppressions()) {         \
+          GET_STACK_TRACE_FATAL_HERE;                                   \
+          suppressed = IsStackTraceSuppressed(&stack);                  \
+        }                                                               \
+      }                                                                 \
+      if (!suppressed) {                                                \
+        GET_CURRENT_PC_BP_SP;                                           \
+        ReportGenericError(pc, bp, sp, __bad, isWrite, __size, 0, false);\
+      }                                                                 \
     }                                                                   \
   } while (0)
 
-#define ASAN_READ_RANGE(offset, size) ACCESS_MEMORY_RANGE(offset, size, false)
-#define ASAN_WRITE_RANGE(offset, size) ACCESS_MEMORY_RANGE(offset, size, true)
+// memcpy is called during __asan_init() from the internals of printf(...).
+// We do not treat memcpy with to==from as a bug.
+// See http://llvm.org/bugs/show_bug.cgi?id=11763.
+#define ASAN_MEMCPY_IMPL(ctx, to, from, size)                           \
+  do {                                                                  \
+    if (UNLIKELY(!asan_inited)) return internal_memcpy(to, from, size); \
+    if (asan_init_is_running) {                                         \
+      return REAL(memcpy)(to, from, size);                              \
+    }                                                                   \
+    ENSURE_ASAN_INITED();                                               \
+    if (flags()->replace_intrin) {                                      \
+      if (to != from) {                                                 \
+        CHECK_RANGES_OVERLAP("memcpy", to, size, from, size);           \
+      }                                                                 \
+      ASAN_READ_RANGE(ctx, from, size);                                 \
+      ASAN_WRITE_RANGE(ctx, to, size);                                  \
+    }                                                                   \
+    return REAL(memcpy)(to, from, size);                                \
+  } while (0)
+
+// memset is called inside Printf.
+#define ASAN_MEMSET_IMPL(ctx, block, c, size)                           \
+  do {                                                                  \
+    if (UNLIKELY(!asan_inited)) return internal_memset(block, c, size); \
+    if (asan_init_is_running) {                                         \
+      return REAL(memset)(block, c, size);                              \
+    }                                                                   \
+    ENSURE_ASAN_INITED();                                               \
+    if (flags()->replace_intrin) {                                      \
+      ASAN_WRITE_RANGE(ctx, block, size);                               \
+    }                                                                   \
+    return REAL(memset)(block, c, size);                                \
+  } while (0)
+
+#define ASAN_MEMMOVE_IMPL(ctx, to, from, size)                           \
+  do {                                                                   \
+    if (UNLIKELY(!asan_inited)) return internal_memmove(to, from, size); \
+    ENSURE_ASAN_INITED();                                                \
+    if (flags()->replace_intrin) {                                       \
+      ASAN_READ_RANGE(ctx, from, size);                                  \
+      ASAN_WRITE_RANGE(ctx, to, size);                                   \
+    }                                                                    \
+    return internal_memmove(to, from, size);                             \
+  } while (0)
+
+#define ASAN_READ_RANGE(ctx, offset, size) \
+  ACCESS_MEMORY_RANGE(ctx, offset, size, false)
+#define ASAN_WRITE_RANGE(ctx, offset, size) \
+  ACCESS_MEMORY_RANGE(ctx, offset, size, true)
+
+#define ASAN_READ_STRING_OF_LEN(ctx, s, len, n)                 \
+  ASAN_READ_RANGE((ctx), (s),                                   \
+    common_flags()->strict_string_checks ? (len) + 1 : (n))
+
+#define ASAN_READ_STRING(ctx, s, n)                             \
+  ASAN_READ_STRING_OF_LEN((ctx), (s), REAL(strlen)(s), (n))
 
 // Behavior of functions like "memcpy" or "strcpy" is undefined
 // if memory intervals overlap. We report error in this case.
@@ -75,8 +156,8 @@ static inline bool RangesOverlap(const char *offset1, uptr length1,
 } while (0)
 
 static inline uptr MaybeRealStrnlen(const char *s, uptr maxlen) {
-#if ASAN_INTERCEPT_STRNLEN
-  if (REAL(strnlen) != 0) {
+#if SANITIZER_INTERCEPT_STRNLEN
+  if (REAL(strnlen)) {
     return REAL(strnlen)(s, maxlen);
   }
 #endif
@@ -94,7 +175,7 @@ int OnExit() {
   return 0;
 }
 
-}  // namespace __asan
+} // namespace __asan
 
 // ---------------------- Wrappers ---------------- {{{1
 using namespace __asan;  // NOLINT
@@ -102,30 +183,29 @@ using namespace __asan;  // NOLINT
 DECLARE_REAL_AND_INTERCEPTOR(void *, malloc, uptr)
 DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
 
-#if !SANITIZER_MAC
-#define ASAN_INTERCEPT_FUNC(name)                                        \
-  do {                                                                   \
-    if ((!INTERCEPT_FUNCTION(name) || !REAL(name)))                      \
-      VReport(1, "AddressSanitizer: failed to intercept '" #name "'\n"); \
-  } while (0)
-#else
-// OS X interceptors don't need to be initialized with INTERCEPT_FUNCTION.
-#define ASAN_INTERCEPT_FUNC(name)
-#endif  // SANITIZER_MAC
+#define ASAN_INTERCEPTOR_ENTER(ctx, func)                                      \
+  AsanInterceptorContext _ctx = {#func};                                       \
+  ctx = (void *)&_ctx;                                                         \
+  (void) ctx;                                                                  \
 
 #define COMMON_INTERCEPT_FUNCTION(name) ASAN_INTERCEPT_FUNC(name)
+#define COMMON_INTERCEPT_FUNCTION_VER(name, ver)                          \
+  ASAN_INTERCEPT_FUNC_VER(name, ver)
 #define COMMON_INTERCEPTOR_WRITE_RANGE(ctx, ptr, size) \
-  ASAN_WRITE_RANGE(ptr, size)
-#define COMMON_INTERCEPTOR_READ_RANGE(ctx, ptr, size) ASAN_READ_RANGE(ptr, size)
+  ASAN_WRITE_RANGE(ctx, ptr, size)
+#define COMMON_INTERCEPTOR_READ_RANGE(ctx, ptr, size) \
+  ASAN_READ_RANGE(ctx, ptr, size)
 #define COMMON_INTERCEPTOR_ENTER(ctx, func, ...)                               \
+  ASAN_INTERCEPTOR_ENTER(ctx, func);                                           \
   do {                                                                         \
     if (asan_init_is_running)                                                  \
       return REAL(func)(__VA_ARGS__);                                          \
-    ctx = 0;                                                                   \
-    (void) ctx;                                                                \
     if (SANITIZER_MAC && UNLIKELY(!asan_inited))                               \
       return REAL(func)(__VA_ARGS__);                                          \
     ENSURE_ASAN_INITED();                                                      \
+  } while (false)
+#define COMMON_INTERCEPTOR_DIR_ACQUIRE(ctx, path) \
+  do {                                            \
   } while (false)
 #define COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd) \
   do {                                         \
@@ -145,13 +225,49 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
   do {                                                         \
   } while (false)
 #define COMMON_INTERCEPTOR_BLOCK_REAL(name) REAL(name)
+// Strict init-order checking is dlopen-hostile:
+// https://github.com/google/sanitizers/issues/178
+#define COMMON_INTERCEPTOR_ON_DLOPEN(filename, flag)                           \
+  if (flags()->strict_init_order) {                                            \
+    StopInitOrderChecking();                                                   \
+  }
 #define COMMON_INTERCEPTOR_ON_EXIT(ctx) OnExit()
-#define COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, res) CovUpdateMapping()
-#define COMMON_INTERCEPTOR_LIBRARY_UNLOADED() CovUpdateMapping()
+#define COMMON_INTERCEPTOR_LIBRARY_LOADED(filename, handle) \
+  CoverageUpdateMapping()
+#define COMMON_INTERCEPTOR_LIBRARY_UNLOADED() CoverageUpdateMapping()
+#define COMMON_INTERCEPTOR_NOTHING_IS_INITIALIZED (!asan_inited)
+#define COMMON_INTERCEPTOR_GET_TLS_RANGE(begin, end)                           \
+  if (AsanThread *t = GetCurrentThread()) {                                    \
+    *begin = t->tls_begin();                                                   \
+    *end = t->tls_end();                                                       \
+  } else {                                                                     \
+    *begin = *end = 0;                                                         \
+  }
+
+#define COMMON_INTERCEPTOR_MEMMOVE_IMPL(ctx, to, from, size) \
+  do {                                                       \
+    ASAN_INTERCEPTOR_ENTER(ctx, memmove);                    \
+    ASAN_MEMMOVE_IMPL(ctx, to, from, size);                  \
+  } while (false)
+
+#define COMMON_INTERCEPTOR_MEMCPY_IMPL(ctx, to, from, size) \
+  do {                                                      \
+    ASAN_INTERCEPTOR_ENTER(ctx, memcpy);                    \
+    ASAN_MEMCPY_IMPL(ctx, to, from, size);                  \
+  } while (false)
+
+#define COMMON_INTERCEPTOR_MEMSET_IMPL(ctx, block, c, size) \
+  do {                                                      \
+    ASAN_INTERCEPTOR_ENTER(ctx, memset);                    \
+    ASAN_MEMSET_IMPL(ctx, block, c, size);                  \
+  } while (false)
+
 #include "sanitizer_common/sanitizer_common_interceptors.inc"
 
-#define COMMON_SYSCALL_PRE_READ_RANGE(p, s) ASAN_READ_RANGE(p, s)
-#define COMMON_SYSCALL_PRE_WRITE_RANGE(p, s) ASAN_WRITE_RANGE(p, s)
+// Syscall interceptors don't have contexts, we don't support suppressions
+// for them.
+#define COMMON_SYSCALL_PRE_READ_RANGE(p, s) ASAN_READ_RANGE(nullptr, p, s)
+#define COMMON_SYSCALL_PRE_WRITE_RANGE(p, s) ASAN_WRITE_RANGE(nullptr, p, s)
 #define COMMON_SYSCALL_POST_READ_RANGE(p, s) \
   do {                                       \
     (void)(p);                               \
@@ -164,55 +280,93 @@ DECLARE_REAL_AND_INTERCEPTOR(void, free, void *)
   } while (false)
 #include "sanitizer_common/sanitizer_common_syscalls.inc"
 
-static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
-  AsanThread *t = (AsanThread*)arg;
-  SetCurrentThread(t);
-  return t->ThreadStart(GetTid());
-}
+struct ThreadStartParam {
+  atomic_uintptr_t t;
+  atomic_uintptr_t is_registered;
+};
 
 #if ASAN_INTERCEPT_PTHREAD_CREATE
+static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
+  ThreadStartParam *param = reinterpret_cast<ThreadStartParam *>(arg);
+  AsanThread *t = nullptr;
+  while ((t = reinterpret_cast<AsanThread *>(
+              atomic_load(&param->t, memory_order_acquire))) == nullptr)
+    internal_sched_yield();
+  SetCurrentThread(t);
+  return t->ThreadStart(GetTid(), &param->is_registered);
+}
+
 INTERCEPTOR(int, pthread_create, void *thread,
     void *attr, void *(*start_routine)(void*), void *arg) {
   EnsureMainThreadIDIsCorrect();
-  // Strict init-order checking in thread-hostile.
+  // Strict init-order checking is thread-hostile.
   if (flags()->strict_init_order)
     StopInitOrderChecking();
   GET_STACK_TRACE_THREAD;
   int detached = 0;
-  if (attr != 0)
+  if (attr)
     REAL(pthread_attr_getdetachstate)(attr, &detached);
-
-  u32 current_tid = GetCurrentTidOrInvalid();
-  AsanThread *t = AsanThread::Create(start_routine, arg);
-  CreateThreadContextArgs args = { t, &stack };
-  asanThreadRegistry().CreateThread(*(uptr*)t, detached, current_tid, &args);
-  return REAL(pthread_create)(thread, attr, asan_thread_start, t);
+  ThreadStartParam param;
+  atomic_store(&param.t, 0, memory_order_relaxed);
+  atomic_store(&param.is_registered, 0, memory_order_relaxed);
+  int result;
+  {
+    // Ignore all allocations made by pthread_create: thread stack/TLS may be
+    // stored by pthread for future reuse even after thread destruction, and
+    // the linked list it's stored in doesn't even hold valid pointers to the
+    // objects, the latter are calculated by obscure pointer arithmetic.
+#if CAN_SANITIZE_LEAKS
+    __lsan::ScopedInterceptorDisabler disabler;
+#endif
+    result = REAL(pthread_create)(thread, attr, asan_thread_start, &param);
+  }
+  if (result == 0) {
+    u32 current_tid = GetCurrentTidOrInvalid();
+    AsanThread *t =
+        AsanThread::Create(start_routine, arg, current_tid, &stack, detached);
+    atomic_store(&param.t, reinterpret_cast<uptr>(t), memory_order_release);
+    // Wait until the AsanThread object is initialized and the ThreadRegistry
+    // entry is in "started" state. One reason for this is that after this
+    // interceptor exits, the child thread's stack may be the only thing holding
+    // the |arg| pointer. This may cause LSan to report a leak if leak checking
+    // happens at a point when the interceptor has already exited, but the stack
+    // range for the child thread is not yet known.
+    while (atomic_load(&param.is_registered, memory_order_acquire) == 0)
+      internal_sched_yield();
+  }
+  return result;
 }
+
+INTERCEPTOR(int, pthread_join, void *t, void **arg) {
+  return real_pthread_join(t, arg);
+}
+
+DEFINE_REAL_PTHREAD_FUNCTIONS
 #endif  // ASAN_INTERCEPT_PTHREAD_CREATE
 
 #if ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
 
 #if SANITIZER_ANDROID
 INTERCEPTOR(void*, bsd_signal, int signum, void *handler) {
-  if (!AsanInterceptsSignal(signum) ||
+  if (!IsHandledDeadlySignal(signum) ||
       common_flags()->allow_user_segv_handler) {
     return REAL(bsd_signal)(signum, handler);
   }
   return 0;
 }
-#else
+#endif
+
 INTERCEPTOR(void*, signal, int signum, void *handler) {
-  if (!AsanInterceptsSignal(signum) ||
+  if (!IsHandledDeadlySignal(signum) ||
       common_flags()->allow_user_segv_handler) {
     return REAL(signal)(signum, handler);
   }
-  return 0;
+  return nullptr;
 }
-#endif
 
 INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
                             struct sigaction *oldact) {
-  if (!AsanInterceptsSignal(signum) ||
+  if (!IsHandledDeadlySignal(signum) ||
       common_flags()->allow_user_segv_handler) {
     return REAL(sigaction)(signum, act, oldact);
   }
@@ -221,10 +375,10 @@ INTERCEPTOR(int, sigaction, int signum, const struct sigaction *act,
 
 namespace __sanitizer {
 int real_sigaction(int signum, const void *act, void *oldact) {
-  return REAL(sigaction)(signum,
-                         (struct sigaction *)act, (struct sigaction *)oldact);
+  return REAL(sigaction)(signum, (const struct sigaction *)act,
+                         (struct sigaction *)oldact);
 }
-}  // namespace __sanitizer
+} // namespace __sanitizer
 
 #elif SANITIZER_POSIX
 // We need to have defined REAL(sigaction) on posix systems.
@@ -240,7 +394,7 @@ static void ClearShadowMemoryForContextStack(uptr stack, uptr ssize) {
   ssize += stack - bottom;
   ssize = RoundUpTo(ssize, PageSize);
   static const uptr kMaxSaneContextStackSize = 1 << 22;  // 4 Mb
-  if (ssize && ssize <= kMaxSaneContextStackSize) {
+  if (AddrIsInMem(bottom) && ssize && ssize <= kMaxSaneContextStackSize) {
     PoisonShadow(bottom, ssize, 0);
   }
 }
@@ -295,152 +449,16 @@ INTERCEPTOR(void, __cxa_throw, void *a, void *b, void *c) {
 }
 #endif
 
-#if ASAN_INTERCEPT_MLOCKX
-// intercept mlock and friends.
-// Since asan maps 16T of RAM, mlock is completely unfriendly to asan.
-// All functions return 0 (success).
-static void MlockIsUnsupported() {
-  static bool printed = false;
-  if (printed) return;
-  printed = true;
-  VPrintf(1,
-          "INFO: AddressSanitizer ignores "
-          "mlock/mlockall/munlock/munlockall\n");
-}
-
-INTERCEPTOR(int, mlock, const void *addr, uptr len) {
-  MlockIsUnsupported();
-  return 0;
-}
-
-INTERCEPTOR(int, munlock, const void *addr, uptr len) {
-  MlockIsUnsupported();
-  return 0;
-}
-
-INTERCEPTOR(int, mlockall, int flags) {
-  MlockIsUnsupported();
-  return 0;
-}
-
-INTERCEPTOR(int, munlockall, void) {
-  MlockIsUnsupported();
-  return 0;
-}
-#endif
-
-static inline int CharCmp(unsigned char c1, unsigned char c2) {
-  return (c1 == c2) ? 0 : (c1 < c2) ? -1 : 1;
-}
-
-INTERCEPTOR(int, memcmp, const void *a1, const void *a2, uptr size) {
-  if (UNLIKELY(!asan_inited)) return internal_memcmp(a1, a2, size);
-  ENSURE_ASAN_INITED();
-  if (flags()->replace_intrin) {
-    if (flags()->strict_memcmp) {
-      // Check the entire regions even if the first bytes of the buffers are
-      // different.
-      ASAN_READ_RANGE(a1, size);
-      ASAN_READ_RANGE(a2, size);
-      // Fallthrough to REAL(memcmp) below.
-    } else {
-      unsigned char c1 = 0, c2 = 0;
-      const unsigned char *s1 = (const unsigned char*)a1;
-      const unsigned char *s2 = (const unsigned char*)a2;
-      uptr i;
-      for (i = 0; i < size; i++) {
-        c1 = s1[i];
-        c2 = s2[i];
-        if (c1 != c2) break;
-      }
-      ASAN_READ_RANGE(s1, Min(i + 1, size));
-      ASAN_READ_RANGE(s2, Min(i + 1, size));
-      return CharCmp(c1, c2);
-    }
-  }
-  return REAL(memcmp(a1, a2, size));
-}
-
 void *__asan_memcpy(void *to, const void *from, uptr size) {
-  if (UNLIKELY(!asan_inited)) return internal_memcpy(to, from, size);
-  // memcpy is called during __asan_init() from the internals
-  // of printf(...).
-  if (asan_init_is_running) {
-    return REAL(memcpy)(to, from, size);
-  }
-  ENSURE_ASAN_INITED();
-  if (flags()->replace_intrin) {
-    if (to != from) {
-      // We do not treat memcpy with to==from as a bug.
-      // See http://llvm.org/bugs/show_bug.cgi?id=11763.
-      CHECK_RANGES_OVERLAP("memcpy", to, size, from, size);
-    }
-    ASAN_READ_RANGE(from, size);
-    ASAN_WRITE_RANGE(to, size);
-  }
-  return REAL(memcpy)(to, from, size);
+  ASAN_MEMCPY_IMPL(nullptr, to, from, size);
 }
 
 void *__asan_memset(void *block, int c, uptr size) {
-  if (UNLIKELY(!asan_inited)) return internal_memset(block, c, size);
-  // memset is called inside Printf.
-  if (asan_init_is_running) {
-    return REAL(memset)(block, c, size);
-  }
-  ENSURE_ASAN_INITED();
-  if (flags()->replace_intrin) {
-    ASAN_WRITE_RANGE(block, size);
-  }
-  return REAL(memset)(block, c, size);
+  ASAN_MEMSET_IMPL(nullptr, block, c, size);
 }
 
 void *__asan_memmove(void *to, const void *from, uptr size) {
-  if (UNLIKELY(!asan_inited))
-    return internal_memmove(to, from, size);
-  ENSURE_ASAN_INITED();
-  if (flags()->replace_intrin) {
-    ASAN_READ_RANGE(from, size);
-    ASAN_WRITE_RANGE(to, size);
-  }
-  return internal_memmove(to, from, size);
-}
-
-INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) {
-  return __asan_memmove(to, from, size);
-}
-
-INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
-#if !SANITIZER_MAC
-  return __asan_memcpy(to, from, size);
-#else
-  // At least on 10.7 and 10.8 both memcpy() and memmove() are being replaced
-  // with WRAP(memcpy). As a result, false positives are reported for memmove()
-  // calls. If we just disable error reporting with
-  // ASAN_OPTIONS=replace_intrin=0, memmove() is still replaced with
-  // internal_memcpy(), which may lead to crashes, see
-  // http://llvm.org/bugs/show_bug.cgi?id=16362.
-  return __asan_memmove(to, from, size);
-#endif  // !SANITIZER_MAC
-}
-
-INTERCEPTOR(void*, memset, void *block, int c, uptr size) {
-  return __asan_memset(block, c, size);
-}
-
-INTERCEPTOR(char*, strchr, const char *str, int c) {
-  if (UNLIKELY(!asan_inited)) return internal_strchr(str, c);
-  // strchr is called inside create_purgeable_zone() when MallocGuardEdges=1 is
-  // used.
-  if (asan_init_is_running) {
-    return REAL(strchr)(str, c);
-  }
-  ENSURE_ASAN_INITED();
-  char *result = REAL(strchr)(str, c);
-  if (flags()->replace_str) {
-    uptr bytes_read = (result ? result - str : REAL(strlen)(str)) + 1;
-    ASAN_READ_RANGE(str, bytes_read);
-  }
-  return result;
+  ASAN_MEMMOVE_IMPL(nullptr, to, from, size);
 }
 
 #if ASAN_INTERCEPT_INDEX
@@ -460,13 +478,15 @@ DEFINE_REAL(char*, index, const char *string, int c)
 // For both strcat() and strncat() we need to check the validity of |to|
 // argument irrespective of the |from| length.
 INTERCEPTOR(char*, strcat, char *to, const char *from) {  // NOLINT
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strcat);  // NOLINT
   ENSURE_ASAN_INITED();
   if (flags()->replace_str) {
     uptr from_length = REAL(strlen)(from);
-    ASAN_READ_RANGE(from, from_length + 1);
+    ASAN_READ_RANGE(ctx, from, from_length + 1);
     uptr to_length = REAL(strlen)(to);
-    ASAN_READ_RANGE(to, to_length);
-    ASAN_WRITE_RANGE(to + to_length, from_length + 1);
+    ASAN_READ_STRING_OF_LEN(ctx, to, to_length, to_length);
+    ASAN_WRITE_RANGE(ctx, to + to_length, from_length + 1);
     // If the copying actually happens, the |from| string should not overlap
     // with the resulting string starting at |to|, which has a length of
     // to_length + from_length + 1.
@@ -479,14 +499,16 @@ INTERCEPTOR(char*, strcat, char *to, const char *from) {  // NOLINT
 }
 
 INTERCEPTOR(char*, strncat, char *to, const char *from, uptr size) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strncat);
   ENSURE_ASAN_INITED();
   if (flags()->replace_str) {
     uptr from_length = MaybeRealStrnlen(from, size);
     uptr copy_length = Min(size, from_length + 1);
-    ASAN_READ_RANGE(from, copy_length);
+    ASAN_READ_RANGE(ctx, from, copy_length);
     uptr to_length = REAL(strlen)(to);
-    ASAN_READ_RANGE(to, to_length);
-    ASAN_WRITE_RANGE(to + to_length, from_length + 1);
+    ASAN_READ_STRING_OF_LEN(ctx, to, to_length, to_length);
+    ASAN_WRITE_RANGE(ctx, to + to_length, from_length + 1);
     if (from_length > 0) {
       CHECK_RANGES_OVERLAP("strncat", to, to_length + copy_length + 1,
                            from, copy_length);
@@ -496,6 +518,8 @@ INTERCEPTOR(char*, strncat, char *to, const char *from, uptr size) {
 }
 
 INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strcpy);  // NOLINT
 #if SANITIZER_MAC
   if (UNLIKELY(!asan_inited)) return REAL(strcpy)(to, from);  // NOLINT
 #endif
@@ -508,109 +532,85 @@ INTERCEPTOR(char*, strcpy, char *to, const char *from) {  // NOLINT
   if (flags()->replace_str) {
     uptr from_size = REAL(strlen)(from) + 1;
     CHECK_RANGES_OVERLAP("strcpy", to, from_size, from, from_size);
-    ASAN_READ_RANGE(from, from_size);
-    ASAN_WRITE_RANGE(to, from_size);
+    ASAN_READ_RANGE(ctx, from, from_size);
+    ASAN_WRITE_RANGE(ctx, to, from_size);
   }
   return REAL(strcpy)(to, from);  // NOLINT
 }
 
-#if ASAN_INTERCEPT_STRDUP
 INTERCEPTOR(char*, strdup, const char *s) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strdup);
   if (UNLIKELY(!asan_inited)) return internal_strdup(s);
   ENSURE_ASAN_INITED();
   uptr length = REAL(strlen)(s);
   if (flags()->replace_str) {
-    ASAN_READ_RANGE(s, length + 1);
+    ASAN_READ_RANGE(ctx, s, length + 1);
   }
   GET_STACK_TRACE_MALLOC;
   void *new_mem = asan_malloc(length + 1, &stack);
   REAL(memcpy)(new_mem, s, length + 1);
   return reinterpret_cast<char*>(new_mem);
 }
-#endif
 
-INTERCEPTOR(uptr, strlen, const char *s) {
-  if (UNLIKELY(!asan_inited)) return internal_strlen(s);
-  // strlen is called from malloc_default_purgeable_zone()
-  // in __asan::ReplaceSystemAlloc() on Mac.
-  if (asan_init_is_running) {
-    return REAL(strlen)(s);
-  }
+#if ASAN_INTERCEPT___STRDUP
+INTERCEPTOR(char*, __strdup, const char *s) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strdup);
+  if (UNLIKELY(!asan_inited)) return internal_strdup(s);
   ENSURE_ASAN_INITED();
   uptr length = REAL(strlen)(s);
   if (flags()->replace_str) {
-    ASAN_READ_RANGE(s, length + 1);
+    ASAN_READ_RANGE(ctx, s, length + 1);
   }
-  return length;
+  GET_STACK_TRACE_MALLOC;
+  void *new_mem = asan_malloc(length + 1, &stack);
+  REAL(memcpy)(new_mem, s, length + 1);
+  return reinterpret_cast<char*>(new_mem);
 }
+#endif // ASAN_INTERCEPT___STRDUP
 
-INTERCEPTOR(uptr, wcslen, const wchar_t *s) {
-  uptr length = REAL(wcslen)(s);
+INTERCEPTOR(SIZE_T, wcslen, const wchar_t *s) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, wcslen);
+  SIZE_T length = internal_wcslen(s);
   if (!asan_init_is_running) {
     ENSURE_ASAN_INITED();
-    ASAN_READ_RANGE(s, (length + 1) * sizeof(wchar_t));
+    ASAN_READ_RANGE(ctx, s, (length + 1) * sizeof(wchar_t));
   }
   return length;
 }
 
 INTERCEPTOR(char*, strncpy, char *to, const char *from, uptr size) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strncpy);
   ENSURE_ASAN_INITED();
   if (flags()->replace_str) {
     uptr from_size = Min(size, MaybeRealStrnlen(from, size) + 1);
     CHECK_RANGES_OVERLAP("strncpy", to, from_size, from, from_size);
-    ASAN_READ_RANGE(from, from_size);
-    ASAN_WRITE_RANGE(to, size);
+    ASAN_READ_RANGE(ctx, from, from_size);
+    ASAN_WRITE_RANGE(ctx, to, size);
   }
   return REAL(strncpy)(to, from, size);
 }
 
-#if ASAN_INTERCEPT_STRNLEN
-INTERCEPTOR(uptr, strnlen, const char *s, uptr maxlen) {
-  ENSURE_ASAN_INITED();
-  uptr length = REAL(strnlen)(s, maxlen);
-  if (flags()->replace_str) {
-    ASAN_READ_RANGE(s, Min(length + 1, maxlen));
-  }
-  return length;
-}
-#endif  // ASAN_INTERCEPT_STRNLEN
-
-static inline bool IsValidStrtolBase(int base) {
-  return (base == 0) || (2 <= base && base <= 36);
-}
-
-static inline void FixRealStrtolEndptr(const char *nptr, char **endptr) {
-  CHECK(endptr);
-  if (nptr == *endptr) {
-    // No digits were found at strtol call, we need to find out the last
-    // symbol accessed by strtoll on our own.
-    // We get this symbol by skipping leading blanks and optional +/- sign.
-    while (IsSpace(*nptr)) nptr++;
-    if (*nptr == '+' || *nptr == '-') nptr++;
-    *endptr = (char*)nptr;
-  }
-  CHECK(*endptr >= nptr);
-}
-
 INTERCEPTOR(long, strtol, const char *nptr,  // NOLINT
             char **endptr, int base) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strtol);
   ENSURE_ASAN_INITED();
   if (!flags()->replace_str) {
     return REAL(strtol)(nptr, endptr, base);
   }
   char *real_endptr;
   long result = REAL(strtol)(nptr, &real_endptr, base);  // NOLINT
-  if (endptr != 0) {
-    *endptr = real_endptr;
-  }
-  if (IsValidStrtolBase(base)) {
-    FixRealStrtolEndptr(nptr, &real_endptr);
-    ASAN_READ_RANGE(nptr, (real_endptr - nptr) + 1);
-  }
+  StrtolFixAndCheck(ctx, nptr, endptr, real_endptr, base);
   return result;
 }
 
 INTERCEPTOR(int, atoi, const char *nptr) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, atoi);
 #if SANITIZER_MAC
   if (UNLIKELY(!asan_inited)) return REAL(atoi)(nptr);
 #endif
@@ -625,11 +625,13 @@ INTERCEPTOR(int, atoi, const char *nptr) {
   // different from int). So, we just imitate this behavior.
   int result = REAL(strtol)(nptr, &real_endptr, 10);
   FixRealStrtolEndptr(nptr, &real_endptr);
-  ASAN_READ_RANGE(nptr, (real_endptr - nptr) + 1);
+  ASAN_READ_STRING(ctx, nptr, (real_endptr - nptr) + 1);
   return result;
 }
 
 INTERCEPTOR(long, atol, const char *nptr) {  // NOLINT
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, atol);
 #if SANITIZER_MAC
   if (UNLIKELY(!asan_inited)) return REAL(atol)(nptr);
 #endif
@@ -640,33 +642,28 @@ INTERCEPTOR(long, atol, const char *nptr) {  // NOLINT
   char *real_endptr;
   long result = REAL(strtol)(nptr, &real_endptr, 10);  // NOLINT
   FixRealStrtolEndptr(nptr, &real_endptr);
-  ASAN_READ_RANGE(nptr, (real_endptr - nptr) + 1);
+  ASAN_READ_STRING(ctx, nptr, (real_endptr - nptr) + 1);
   return result;
 }
 
 #if ASAN_INTERCEPT_ATOLL_AND_STRTOLL
 INTERCEPTOR(long long, strtoll, const char *nptr,  // NOLINT
             char **endptr, int base) {
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, strtoll);
   ENSURE_ASAN_INITED();
   if (!flags()->replace_str) {
     return REAL(strtoll)(nptr, endptr, base);
   }
   char *real_endptr;
   long long result = REAL(strtoll)(nptr, &real_endptr, base);  // NOLINT
-  if (endptr != 0) {
-    *endptr = real_endptr;
-  }
-  // If base has unsupported value, strtoll can exit with EINVAL
-  // without reading any characters. So do additional checks only
-  // if base is valid.
-  if (IsValidStrtolBase(base)) {
-    FixRealStrtolEndptr(nptr, &real_endptr);
-    ASAN_READ_RANGE(nptr, (real_endptr - nptr) + 1);
-  }
+  StrtolFixAndCheck(ctx, nptr, endptr, real_endptr, base);
   return result;
 }
 
 INTERCEPTOR(long long, atoll, const char *nptr) {  // NOLINT
+  void *ctx;
+  ASAN_INTERCEPTOR_ENTER(ctx, atoll);
   ENSURE_ASAN_INITED();
   if (!flags()->replace_str) {
     return REAL(atoll)(nptr);
@@ -674,17 +671,17 @@ INTERCEPTOR(long long, atoll, const char *nptr) {  // NOLINT
   char *real_endptr;
   long long result = REAL(strtoll)(nptr, &real_endptr, 10);  // NOLINT
   FixRealStrtolEndptr(nptr, &real_endptr);
-  ASAN_READ_RANGE(nptr, (real_endptr - nptr) + 1);
+  ASAN_READ_STRING(ctx, nptr, (real_endptr - nptr) + 1);
   return result;
 }
 #endif  // ASAN_INTERCEPT_ATOLL_AND_STRTOLL
 
+#if ASAN_INTERCEPT___CXA_ATEXIT
 static void AtCxaAtexit(void *unused) {
   (void)unused;
   StopInitOrderChecking();
 }
 
-#if ASAN_INTERCEPT___CXA_ATEXIT
 INTERCEPTOR(int, __cxa_atexit, void (*func)(void *), void *arg,
             void *dso_handle) {
 #if SANITIZER_MAC
@@ -692,7 +689,7 @@ INTERCEPTOR(int, __cxa_atexit, void (*func)(void *), void *arg,
 #endif
   ENSURE_ASAN_INITED();
   int res = REAL(__cxa_atexit)(func, arg, dso_handle);
-  REAL(__cxa_atexit)(AtCxaAtexit, 0, 0);
+  REAL(__cxa_atexit)(AtCxaAtexit, nullptr, nullptr);
   return res;
 }
 #endif  // ASAN_INTERCEPT___CXA_ATEXIT
@@ -707,61 +704,23 @@ INTERCEPTOR(int, fork, void) {
 }
 #endif  // ASAN_INTERCEPT_FORK
 
-#if SANITIZER_WINDOWS
-INTERCEPTOR_WINAPI(DWORD, CreateThread,
-                   void* security, uptr stack_size,
-                   DWORD (__stdcall *start_routine)(void*), void* arg,
-                   DWORD thr_flags, void* tid) {
-  // Strict init-order checking in thread-hostile.
-  if (flags()->strict_init_order)
-    StopInitOrderChecking();
-  GET_STACK_TRACE_THREAD;
-  u32 current_tid = GetCurrentTidOrInvalid();
-  AsanThread *t = AsanThread::Create(start_routine, arg);
-  CreateThreadContextArgs args = { t, &stack };
-  bool detached = false;  // FIXME: how can we determine it on Windows?
-  asanThreadRegistry().CreateThread(*(uptr*)t, detached, current_tid, &args);
-  return REAL(CreateThread)(security, stack_size,
-                            asan_thread_start, t, thr_flags, tid);
-}
-
-namespace __asan {
-void InitializeWindowsInterceptors() {
-  ASAN_INTERCEPT_FUNC(CreateThread);
-}
-
-}  // namespace __asan
-#endif
-
 // ---------------------- InitializeAsanInterceptors ---------------- {{{1
 namespace __asan {
 void InitializeAsanInterceptors() {
   static bool was_called_once;
-  CHECK(was_called_once == false);
+  CHECK(!was_called_once);
   was_called_once = true;
   InitializeCommonInterceptors();
 
-  // Intercept mem* functions.
-  ASAN_INTERCEPT_FUNC(memcmp);
-  ASAN_INTERCEPT_FUNC(memmove);
-  ASAN_INTERCEPT_FUNC(memset);
-  if (PLATFORM_HAS_DIFFERENT_MEMCPY_AND_MEMMOVE) {
-    ASAN_INTERCEPT_FUNC(memcpy);
-  }
-
   // Intercept str* functions.
   ASAN_INTERCEPT_FUNC(strcat);  // NOLINT
-  ASAN_INTERCEPT_FUNC(strchr);
   ASAN_INTERCEPT_FUNC(strcpy);  // NOLINT
-  ASAN_INTERCEPT_FUNC(strlen);
   ASAN_INTERCEPT_FUNC(wcslen);
   ASAN_INTERCEPT_FUNC(strncat);
   ASAN_INTERCEPT_FUNC(strncpy);
-#if ASAN_INTERCEPT_STRDUP
   ASAN_INTERCEPT_FUNC(strdup);
-#endif
-#if ASAN_INTERCEPT_STRNLEN
-  ASAN_INTERCEPT_FUNC(strnlen);
+#if ASAN_INTERCEPT___STRDUP
+  ASAN_INTERCEPT_FUNC(__strdup);
 #endif
 #if ASAN_INTERCEPT_INDEX && ASAN_USE_ALIAS_ATTRIBUTE_FOR_INDEX
   ASAN_INTERCEPT_FUNC(index);
@@ -775,23 +734,14 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(strtoll);
 #endif
 
-#if ASAN_INTERCEPT_MLOCKX
-  // Intercept mlock/munlock.
-  ASAN_INTERCEPT_FUNC(mlock);
-  ASAN_INTERCEPT_FUNC(munlock);
-  ASAN_INTERCEPT_FUNC(mlockall);
-  ASAN_INTERCEPT_FUNC(munlockall);
-#endif
-
   // Intecept signal- and jump-related functions.
   ASAN_INTERCEPT_FUNC(longjmp);
 #if ASAN_INTERCEPT_SIGNAL_AND_SIGACTION
   ASAN_INTERCEPT_FUNC(sigaction);
 #if SANITIZER_ANDROID
   ASAN_INTERCEPT_FUNC(bsd_signal);
-#else
-  ASAN_INTERCEPT_FUNC(signal);
 #endif
+  ASAN_INTERCEPT_FUNC(signal);
 #endif
 #if ASAN_INTERCEPT_SWAPCONTEXT
   ASAN_INTERCEPT_FUNC(swapcontext);
@@ -805,12 +755,17 @@ void InitializeAsanInterceptors() {
 
   // Intercept exception handling functions.
 #if ASAN_INTERCEPT___CXA_THROW
-  INTERCEPT_FUNCTION(__cxa_throw);
+  ASAN_INTERCEPT_FUNC(__cxa_throw);
 #endif
 
   // Intercept threading-related functions
 #if ASAN_INTERCEPT_PTHREAD_CREATE
+#if defined(ASAN_PTHREAD_CREATE_VERSION)
+  ASAN_INTERCEPT_FUNC_VER(pthread_create, ASAN_PTHREAD_CREATE_VERSION);
+#else
   ASAN_INTERCEPT_FUNC(pthread_create);
+#endif
+  ASAN_INTERCEPT_FUNC(pthread_join);
 #endif
 
   // Intercept atexit function.
@@ -822,12 +777,9 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(fork);
 #endif
 
-  // Some Windows-specific interceptors.
-#if SANITIZER_WINDOWS
-  InitializeWindowsInterceptors();
-#endif
+  InitializePlatformInterceptors();
 
   VReport(1, "AddressSanitizer: libc interceptors initialized\n");
 }
 
-}  // namespace __asan
+} // namespace __asan

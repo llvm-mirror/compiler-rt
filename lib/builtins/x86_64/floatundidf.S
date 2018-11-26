@@ -17,18 +17,17 @@
 
 #ifdef __x86_64__
 
-#if defined(__APPLE__)
-	.const
-#elif defined(__ELF__)
-	.rodata
-#else
-	.section .rdata,"rd"
-#endif
-	.balign 4
+CONST_SECTION
+
+	.balign 16
 twop52:
 	.quad 0x4330000000000000
+
+	.balign 16
 twop84_plus_twop52:
 	.quad 0x4530000000100000
+
+	.balign 16
 twop84:
 	.quad 0x4530000000000000
 
@@ -48,3 +47,6 @@ DEFINE_COMPILERRT_FUNCTION(__floatundidf)
 END_COMPILERRT_FUNCTION(__floatundidf)
 
 #endif // __x86_64__
+
+NO_EXEC_STACK_DIRECTIVE
+

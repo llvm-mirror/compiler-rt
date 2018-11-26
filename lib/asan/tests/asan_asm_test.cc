@@ -14,7 +14,10 @@
 
 #if defined(__linux__)
 
-#if defined(__x86_64__) || (defined(__i386__) && defined(__SSE2__))
+// Assembly instrumentation is broken on x86 Android (x86 + PIC + shared runtime
+// library). See https://github.com/google/sanitizers/issues/353
+#if defined(__x86_64__) ||                                                     \
+    (defined(__i386__) && defined(__SSE2__) && !defined(__ANDROID__))
 
 #include <emmintrin.h>
 
@@ -22,6 +25,7 @@ namespace {
 
 template<typename T> void asm_write(T *ptr, T val);
 template<typename T> T asm_read(T *ptr);
+template<typename T> void asm_rep_movs(T *dst, T *src, size_t n);
 
 } // End of anonymous namespace
 
@@ -53,14 +57,24 @@ template<> Type asm_read<Type>(Type *ptr) {        \
   return res;                                      \
 }
 
+#define DECLARE_ASM_REP_MOVS(Type, Movs)                         \
+  template <>                                                    \
+  void asm_rep_movs<Type>(Type * dst, Type * src, size_t size) { \
+    __asm__("rep " Movs " \n\t"                                  \
+            : "+D"(dst), "+S"(src), "+c"(size)                   \
+            :                                                    \
+            : "memory");                                         \
+  }
+
 DECLARE_ASM_WRITE(U8, "8", "movq", "r");
 DECLARE_ASM_READ(U8, "8", "movq", "=r");
+DECLARE_ASM_REP_MOVS(U8, "movsq");
 
 } // End of anonymous namespace
 
 #endif // defined(__x86_64__)
 
-#if defined(__i386__) && defined(__SSE2__)
+#if defined(__i386__) && defined(__SSE2__) && !defined(__ANDROID__)
 
 namespace {
 
@@ -86,11 +100,21 @@ template<> Type asm_read<Type>(Type *ptr) {        \
   return res;                                      \
 }
 
+#define DECLARE_ASM_REP_MOVS(Type, Movs)                         \
+  template <>                                                    \
+  void asm_rep_movs<Type>(Type * dst, Type * src, size_t size) { \
+    __asm__("rep " Movs " \n\t"                                  \
+            : "+D"(dst), "+S"(src), "+c"(size)                   \
+            :                                                    \
+            : "memory");                                         \
+  }
+
 } // End of anonymous namespace
 
 #endif  // defined(__i386__) && defined(__SSE2__)
 
-#if defined(__x86_64__) || (defined(__i386__) && defined(__SSE2__))
+#if defined(__x86_64__) ||                                                     \
+    (defined(__i386__) && defined(__SSE2__) && !defined(__ANDROID__))
 
 namespace {
 
@@ -103,6 +127,10 @@ DECLARE_ASM_READ(U1, "1", "movb", "=r");
 DECLARE_ASM_READ(U2, "2", "movw", "=r");
 DECLARE_ASM_READ(U4, "4", "movl", "=r");
 DECLARE_ASM_READ(__m128i, "16", "movaps", "=x");
+
+DECLARE_ASM_REP_MOVS(U1, "movsb");
+DECLARE_ASM_REP_MOVS(U2, "movsw");
+DECLARE_ASM_REP_MOVS(U4, "movsl");
 
 template<typename T> void TestAsmWrite(const char *DeathPattern) {
   T *buf = new T;
@@ -157,6 +185,28 @@ void AsmStore(U4 r, U4 *a) {
   __asm__("movl %[r], (%[a])  \n\t" : : [a] "r" (a), [r] "r" (r) : "memory");
 }
 
+template <typename T>
+void TestAsmRepMovs(const char *DeathPatternRead,
+                    const char *DeathPatternWrite) {
+  T src_good[4] = { 0x0, 0x1, 0x2, 0x3 };
+  T dst_good[4] = {};
+  asm_rep_movs(dst_good, src_good, 4);
+  ASSERT_EQ(static_cast<T>(0x0), dst_good[0]);
+  ASSERT_EQ(static_cast<T>(0x1), dst_good[1]);
+  ASSERT_EQ(static_cast<T>(0x2), dst_good[2]);
+  ASSERT_EQ(static_cast<T>(0x3), dst_good[3]);
+
+  T dst_bad[3];
+  EXPECT_DEATH(asm_rep_movs(dst_bad, src_good, 4), DeathPatternWrite);
+
+  T src_bad[3] = { 0x0, 0x1, 0x2 };
+  EXPECT_DEATH(asm_rep_movs(dst_good, src_bad, 4), DeathPatternRead);
+
+  T* dp = dst_bad + 4;
+  T* sp = src_bad + 4;
+  asm_rep_movs(dp, sp, 0);
+}
+
 } // End of anonymous namespace
 
 TEST(AddressSanitizer, asm_load_store) {
@@ -188,7 +238,7 @@ TEST(AddressSanitizer, asm_flags) {
   long magic = 0x1234;
   long r = 0x0;
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(__ILP32__)
   __asm__("xorq %%rax, %%rax  \n\t"
           "movq (%[p]), %%rax \n\t"
           "sete %%al          \n\t"
@@ -204,9 +254,18 @@ TEST(AddressSanitizer, asm_flags) {
           : [r] "=r"(r)
           : [p] "r"(&magic)
           : "eax", "memory");
-#endif // defined(__x86_64__)
+#endif // defined(__x86_64__) && !defined(__ILP32__)
 
   ASSERT_EQ(0x1, r);
+}
+
+TEST(AddressSanitizer, asm_rep_movs) {
+  TestAsmRepMovs<U1>("READ of size 1", "WRITE of size 1");
+  TestAsmRepMovs<U2>("READ of size 2", "WRITE of size 2");
+  TestAsmRepMovs<U4>("READ of size 4", "WRITE of size 4");
+#if defined(__x86_64__)
+  TestAsmRepMovs<U8>("READ of size 8", "WRITE of size 8");
+#endif  // defined(__x86_64__)
 }
 
 #endif // defined(__x86_64__) || (defined(__i386__) && defined(__SSE2__))

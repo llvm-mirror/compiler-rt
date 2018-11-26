@@ -2,9 +2,9 @@
 // XFAIL: android
 //
 // RUN: %clangxx_asan -DSHARED %s -shared -o %T/stack_trace_dlclose.so -fPIC
-// RUN: %clangxx_asan -DSO_DIR=\"%T\" %s -o %t
-// RUN: ASAN_OPTIONS=exitcode=0 %run %t 2>&1 | FileCheck %s
-// XFAIL: arm-linux-gnueabi
+// RUN: %clangxx_asan -DSO_DIR=\"%T\" %s %libdl -o %t
+// RUN: %env_asan_opts=exitcode=0 %run %t 2>&1 | FileCheck %s
+// REQUIRES: stable-runtime
 
 #include <assert.h>
 #include <dlfcn.h>
@@ -39,6 +39,6 @@ int main(int argc, char **argv) {
 }
 #endif
 
-// CHECK: {{    #0 0x.* in malloc}}
+// CHECK: {{    #0 0x.* in (__interceptor_)?malloc}}
 // CHECK: {{    #1 0x.* \(<unknown module>\)}}
 // CHECK: {{    #2 0x.* in main}}

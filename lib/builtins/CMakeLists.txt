@@ -2,6 +2,31 @@
 # generic implementations of the core runtime library along with optimized
 # architecture-specific code in various subdirectories.
 
+if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  cmake_minimum_required(VERSION 3.4.3)
+
+  project(CompilerRTBuiltins C ASM)
+  set(COMPILER_RT_STANDALONE_BUILD TRUE)
+  set(COMPILER_RT_BUILTINS_STANDALONE_BUILD TRUE)
+  list(INSERT CMAKE_MODULE_PATH 0
+    "${CMAKE_SOURCE_DIR}/../../cmake"
+    "${CMAKE_SOURCE_DIR}/../../cmake/Modules")
+  include(base-config-ix)
+  include(CompilerRTUtils)
+
+  load_llvm_config()
+  construct_compiler_rt_default_triple()
+
+  if(APPLE)
+    include(CompilerRTDarwinUtils)
+  endif()
+  include(AddCompilerRT)
+endif()
+
+include(builtin-config-ix)
+
+# TODO: Need to add a mechanism for logging errors when builtin source files are
+# added to a sub-directory and not this CMakeLists file.
 set(GENERIC_SOURCES
   absvdi2.c
   absvsi2.c
@@ -17,8 +42,6 @@ set(GENERIC_SOURCES
   ashlti3.c
   ashrdi3.c
   ashrti3.c
-  # FIXME: atomic.c may only be compiled if host compiler understands _Atomic
-  # atomic.c
   clear_cache.c
   clzdi2.c
   clzsi2.c
@@ -27,6 +50,7 @@ set(GENERIC_SOURCES
   cmpti2.c
   comparedf2.c
   comparesf2.c
+  cpu_model.c
   ctzdi2.c
   ctzsi2.c
   ctzti2.c
@@ -38,12 +62,14 @@ set(GENERIC_SOURCES
   divsc3.c
   divsf3.c
   divsi3.c
+  divtc3.c
   divti3.c
   divtf3.c
   divxc3.c
   enable_execute_stack.c
   eprintf.c
   extendsfdf2.c
+  extendhfsf2.c
   ffsdi2.c
   ffsti2.c
   fixdfdi.c
@@ -79,7 +105,6 @@ set(GENERIC_SOURCES
   floatuntidf.c
   floatuntisf.c
   floatuntixf.c
-  gcc_personality_v0.c
   int_util.c
   lshrdi3.c
   lshrti3.c
@@ -124,7 +149,9 @@ set(GENERIC_SOURCES
   subvti3.c
   subtf3.c
   trampoline_setup.c
+  truncdfhf2.c
   truncdfsf2.c
+  truncsfhf2.c
   ucmpdi2.c
   ucmpti2.c
   udivdi3.c
@@ -137,86 +164,119 @@ set(GENERIC_SOURCES
   umodsi3.c
   umodti3.c)
 
-set(x86_64_SOURCES
-  x86_64/floatdidf.c
-  x86_64/floatdisf.c
-  x86_64/floatdixf.c
-  x86_64/floatundidf.S
-  x86_64/floatundisf.S
-  x86_64/floatundixf.S
-  ${GENERIC_SOURCES})
+option(COMPILER_RT_EXCLUDE_ATOMIC_BUILTIN
+  "Skip the atomic builtin (this may be needed if system headers are unavailable)"
+  Off)
 
-set(i386_SOURCES
-  i386/ashldi3.S
-  i386/ashrdi3.S
-  i386/divdi3.S
-  i386/floatdidf.S
-  i386/floatdisf.S
-  i386/floatdixf.S
-  i386/floatundidf.S
-  i386/floatundisf.S
-  i386/floatundixf.S
-  i386/lshrdi3.S
-  i386/moddi3.S
-  i386/muldi3.S
-  i386/udivdi3.S
-  i386/umoddi3.S
-  ${GENERIC_SOURCES})
+if(COMPILER_RT_HAS_ATOMIC_KEYWORD AND NOT COMPILER_RT_EXCLUDE_ATOMIC_BUILTIN)
+  set(GENERIC_SOURCES
+    ${GENERIC_SOURCES}
+    atomic.c)
+endif()
+
+set(MSVC_SOURCES
+ divsc3.c
+ divdc3.c
+ divxc3.c
+ mulsc3.c
+ muldc3.c
+ mulxc3.c)
+
+
+if(APPLE)
+  set(GENERIC_SOURCES
+    ${GENERIC_SOURCES}
+    atomic_flag_clear.c
+    atomic_flag_clear_explicit.c
+    atomic_flag_test_and_set.c
+    atomic_flag_test_and_set_explicit.c
+    atomic_signal_fence.c
+    atomic_thread_fence.c)
+endif()
+
+if(NOT WIN32 OR MINGW)
+  set(GENERIC_SOURCES
+      ${GENERIC_SOURCES}
+      emutls.c)
+endif()
+
+if (HAVE_UNWIND_H)
+  set(GENERIC_SOURCES
+      ${GENERIC_SOURCES}
+      gcc_personality_v0.c)
+endif ()
+
+if (NOT MSVC)
+  set(x86_64_SOURCES
+      x86_64/chkstk.S
+      x86_64/chkstk2.S
+      x86_64/floatdidf.c
+      x86_64/floatdisf.c
+      x86_64/floatdixf.c
+      x86_64/floatundidf.S
+      x86_64/floatundisf.S
+      x86_64/floatundixf.S
+      ${GENERIC_SOURCES})
+  set(x86_64h_SOURCES ${x86_64_SOURCES})
+
+  if (WIN32)
+    set(x86_64_SOURCES
+        ${x86_64_SOURCES}
+        x86_64/chkstk.S
+        x86_64/chkstk2.S)
+  endif()
+
+  set(i386_SOURCES
+      i386/ashldi3.S
+      i386/ashrdi3.S
+      i386/chkstk.S
+      i386/chkstk2.S
+      i386/divdi3.S
+      i386/floatdidf.S
+      i386/floatdisf.S
+      i386/floatdixf.S
+      i386/floatundidf.S
+      i386/floatundisf.S
+      i386/floatundixf.S
+      i386/lshrdi3.S
+      i386/moddi3.S
+      i386/muldi3.S
+      i386/udivdi3.S
+      i386/umoddi3.S
+      ${GENERIC_SOURCES})
+
+  if (WIN32)
+    set(i386_SOURCES
+        ${i386_SOURCES}
+        i386/chkstk.S
+        i386/chkstk2.S)
+  endif()
+
+  set(i686_SOURCES
+      ${i386_SOURCES})
+else () # MSVC
+  # Use C versions of functions when building on MSVC
+  # MSVC's assembler takes Intel syntax, not AT&T syntax.
+  # Also use only MSVC compilable builtin implementations.
+  set(x86_64_SOURCES
+      x86_64/floatdidf.c
+      x86_64/floatdisf.c
+      x86_64/floatdixf.c
+      ${MSVC_SOURCES})
+  set(x86_64h_SOURCES ${x86_64_SOURCES})
+  set(i386_SOURCES ${MSVC_SOURCES})
+  set(i686_SOURCES ${i386_SOURCES})
+endif () # if (NOT MSVC)
 
 set(arm_SOURCES
-  arm/adddf3vfp.S
-  arm/addsf3vfp.S
-  arm/aeabi_dcmp.S
-  arm/aeabi_fcmp.S
-  arm/aeabi_idivmod.S
-  arm/aeabi_ldivmod.S
-  arm/aeabi_memcmp.S
-  arm/aeabi_memcpy.S
-  arm/aeabi_memmove.S
-  arm/aeabi_memset.S
-  arm/aeabi_uidivmod.S
-  arm/aeabi_uldivmod.S
   arm/bswapdi2.S
   arm/bswapsi2.S
+  arm/clzdi2.S
+  arm/clzsi2.S
   arm/comparesf2.S
-  arm/divdf3vfp.S
   arm/divmodsi4.S
-  arm/divsf3vfp.S
   arm/divsi3.S
-  arm/eqdf2vfp.S
-  arm/eqsf2vfp.S
-  arm/extendsfdf2vfp.S
-  arm/fixdfsivfp.S
-  arm/fixsfsivfp.S
-  arm/fixunsdfsivfp.S
-  arm/fixunssfsivfp.S
-  arm/floatsidfvfp.S
-  arm/floatsisfvfp.S
-  arm/floatunssidfvfp.S
-  arm/floatunssisfvfp.S
-  arm/gedf2vfp.S
-  arm/gesf2vfp.S
-  arm/gtdf2vfp.S
-  arm/gtsf2vfp.S
-  arm/ledf2vfp.S
-  arm/lesf2vfp.S
-  arm/ltdf2vfp.S
-  arm/ltsf2vfp.S
   arm/modsi3.S
-  arm/muldf3vfp.S
-  arm/mulsf3vfp.S
-  arm/nedf2vfp.S
-  arm/negdf2vfp.S
-  arm/negsf2vfp.S
-  arm/nesf2vfp.S
-  arm/restore_vfp_d8_d15_regs.S
-  arm/save_vfp_d8_d15_regs.S
-  arm/subdf3vfp.S
-  arm/subsf3vfp.S
-  arm/switch16.S
-  arm/switch32.S
-  arm/switch8.S
-  arm/switchu8.S
   arm/sync_fetch_and_add_4.S
   arm/sync_fetch_and_add_8.S
   arm/sync_fetch_and_and_4.S
@@ -237,26 +297,207 @@ set(arm_SOURCES
   arm/sync_fetch_and_umin_8.S
   arm/sync_fetch_and_xor_4.S
   arm/sync_fetch_and_xor_8.S
-  arm/sync_synchronize.S
-  arm/truncdfsf2vfp.S
   arm/udivmodsi4.S
   arm/udivsi3.S
   arm/umodsi3.S
-  arm/unorddf2vfp.S
-  arm/unordsf2vfp.S
   ${GENERIC_SOURCES})
 
-add_custom_target(builtins)
+set(arm_EABI_SOURCES
+  arm/aeabi_cdcmp.S
+  arm/aeabi_cdcmpeq_check_nan.c
+  arm/aeabi_cfcmp.S
+  arm/aeabi_cfcmpeq_check_nan.c
+  arm/aeabi_dcmp.S
+  arm/aeabi_div0.c
+  arm/aeabi_drsub.c
+  arm/aeabi_fcmp.S
+  arm/aeabi_frsub.c
+  arm/aeabi_idivmod.S
+  arm/aeabi_ldivmod.S
+  arm/aeabi_memcmp.S
+  arm/aeabi_memcpy.S
+  arm/aeabi_memmove.S
+  arm/aeabi_memset.S
+  arm/aeabi_uidivmod.S
+  arm/aeabi_uldivmod.S)
+set(arm_Thumb1_JT_SOURCES
+  arm/switch16.S
+  arm/switch32.S
+  arm/switch8.S
+  arm/switchu8.S)
+set(arm_Thumb1_SjLj_EH_SOURCES
+  arm/restore_vfp_d8_d15_regs.S
+  arm/save_vfp_d8_d15_regs.S)
+set(arm_Thumb1_VFPv2_SOURCES
+  arm/adddf3vfp.S
+  arm/addsf3vfp.S
+  arm/divdf3vfp.S
+  arm/divsf3vfp.S
+  arm/eqdf2vfp.S
+  arm/eqsf2vfp.S
+  arm/extendsfdf2vfp.S
+  arm/fixdfsivfp.S
+  arm/fixsfsivfp.S
+  arm/fixunsdfsivfp.S
+  arm/fixunssfsivfp.S
+  arm/floatsidfvfp.S
+  arm/floatsisfvfp.S
+  arm/floatunssidfvfp.S
+  arm/floatunssisfvfp.S
+  arm/gedf2vfp.S
+  arm/gesf2vfp.S
+  arm/gtdf2vfp.S
+  arm/gtsf2vfp.S
+  arm/ledf2vfp.S
+  arm/lesf2vfp.S
+  arm/ltdf2vfp.S
+  arm/ltsf2vfp.S
+  arm/muldf3vfp.S
+  arm/mulsf3vfp.S
+  arm/nedf2vfp.S
+  arm/negdf2vfp.S
+  arm/negsf2vfp.S
+  arm/nesf2vfp.S
+  arm/subdf3vfp.S
+  arm/subsf3vfp.S
+  arm/truncdfsf2vfp.S
+  arm/unorddf2vfp.S
+  arm/unordsf2vfp.S)
+set(arm_Thumb1_icache_SOURCES
+  arm/sync_synchronize.S)
+set(arm_Thumb1_SOURCES
+  ${arm_Thumb1_JT_SOURCES}
+  ${arm_Thumb1_SjLj_EH_SOURCES}
+  ${arm_Thumb1_VFPv2_SOURCES}
+  ${arm_Thumb1_icache_SOURCES})
 
-if (NOT WIN32)
-  foreach(arch x86_64 i386 arm)
-    if(CAN_TARGET_${arch})
-      add_compiler_rt_runtime(clang_rt.builtins-${arch} ${arch} STATIC
-        SOURCES ${${arch}_SOURCES}
-        CFLAGS "-std=c99")
-      add_dependencies(builtins clang_rt.builtins-${arch})
-    endif()
-  endforeach()
+if(MINGW)
+  set(arm_SOURCES
+      arm/aeabi_idivmod.S
+      arm/aeabi_ldivmod.S
+      arm/aeabi_uidivmod.S
+      arm/aeabi_uldivmod.S
+      divmoddi4.c
+      divmodsi4.c
+      divdi3.c
+      divsi3.c
+      fixdfdi.c
+      fixsfdi.c
+      fixunsdfdi.c
+      fixunssfdi.c
+      floatdidf.c
+      floatdisf.c
+      floatundidf.c
+      floatundisf.c
+      mingw_fixfloat.c
+      moddi3.c
+      udivmoddi4.c
+      udivmodsi4.c
+      udivsi3.c
+      umoddi3.c)
+elseif(NOT WIN32)
+  # TODO the EABI sources should only be added to EABI targets
+  set(arm_SOURCES
+    ${arm_SOURCES}
+    ${arm_EABI_SOURCES}
+    ${arm_Thumb1_SOURCES})
 endif()
+
+set(aarch64_SOURCES
+  comparetf2.c
+  extenddftf2.c
+  extendsftf2.c
+  fixtfdi.c
+  fixtfsi.c
+  fixtfti.c
+  fixunstfdi.c
+  fixunstfsi.c
+  fixunstfti.c
+  floatditf.c
+  floatsitf.c
+  floattitf.c
+  floatunditf.c
+  floatunsitf.c
+  floatuntitf.c
+  multc3.c
+  trunctfdf2.c
+  trunctfsf2.c
+  ${GENERIC_SOURCES})
+
+set(armhf_SOURCES ${arm_SOURCES})
+set(armv7_SOURCES ${arm_SOURCES})
+set(armv7s_SOURCES ${arm_SOURCES})
+set(armv7k_SOURCES ${arm_SOURCES})
+set(arm64_SOURCES ${aarch64_SOURCES})
+
+# macho_embedded archs
+set(armv6m_SOURCES ${GENERIC_SOURCES})
+set(armv7m_SOURCES ${arm_SOURCES})
+set(armv7em_SOURCES ${arm_SOURCES})
+
+set(mips_SOURCES ${GENERIC_SOURCES})
+set(mipsel_SOURCES ${mips_SOURCES})
+set(mips64_SOURCES ${mips_SOURCES})
+set(mips64el_SOURCES ${mips_SOURCES})
+
+set(wasm32_SOURCES ${GENERIC_SOURCES})
+set(wasm64_SOURCES ${GENERIC_SOURCES})
+
+add_custom_target(builtins)
+set_target_properties(builtins PROPERTIES FOLDER "Compiler-RT Misc")
+
+if (APPLE)
+  add_subdirectory(Darwin-excludes)
+  add_subdirectory(macho_embedded)
+  darwin_add_builtin_libraries(${BUILTIN_SUPPORTED_OS})
+else ()
+  set(BUILTIN_CFLAGS "")
+
+  append_list_if(COMPILER_RT_HAS_STD_C11_FLAG -std=c11 BUILTIN_CFLAGS)
+
+  # These flags would normally be added to CMAKE_C_FLAGS by the llvm
+  # cmake step. Add them manually if this is a standalone build.
+  if(COMPILER_RT_STANDALONE_BUILD)
+    append_list_if(COMPILER_RT_HAS_FPIC_FLAG -fPIC BUILTIN_CFLAGS)
+    append_list_if(COMPILER_RT_HAS_FNO_BUILTIN_FLAG -fno-builtin BUILTIN_CFLAGS)
+    append_list_if(COMPILER_RT_HAS_VISIBILITY_HIDDEN_FLAG -fvisibility=hidden BUILTIN_CFLAGS)
+    if(NOT COMPILER_RT_DEBUG)
+      append_list_if(COMPILER_RT_HAS_OMIT_FRAME_POINTER_FLAG -fomit-frame-pointer BUILTIN_CFLAGS)
+    endif()
+  endif()
+
+  set(BUILTIN_DEFS "")
+
+  append_list_if(COMPILER_RT_HAS_VISIBILITY_HIDDEN_FLAG VISIBILITY_HIDDEN BUILTIN_DEFS)
+
+  foreach (arch ${BUILTIN_SUPPORTED_ARCH})
+    if (CAN_TARGET_${arch})
+      # Filter out generic versions of routines that are re-implemented in
+      # architecture specific manner.  This prevents multiple definitions of the
+      # same symbols, making the symbol selection non-deterministic.
+      foreach (_file ${${arch}_SOURCES})
+        if (${_file} MATCHES ${arch}/*)
+          get_filename_component(_name ${_file} NAME)
+          string(REPLACE ".S" ".c" _cname "${_name}")
+          list(REMOVE_ITEM ${arch}_SOURCES ${_cname})
+        endif ()
+      endforeach ()
+
+      # Needed for clear_cache on debug mode, due to r7's usage in inline asm.
+      # Release mode already sets it via -O2/3, Debug mode doesn't.
+      if (${arch} STREQUAL "armhf")
+        list(APPEND BUILTIN_CFLAGS -fomit-frame-pointer)
+      endif()
+
+      add_compiler_rt_runtime(clang_rt.builtins
+                              STATIC
+                              ARCHS ${arch}
+                              SOURCES ${${arch}_SOURCES}
+                              DEFS ${BUILTIN_DEFS}
+                              CFLAGS ${BUILTIN_CFLAGS}
+                              PARENT_TARGET builtins)
+    endif ()
+  endforeach ()
+endif ()
 
 add_dependencies(compiler-rt builtins)
