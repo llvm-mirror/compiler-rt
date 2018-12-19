@@ -93,6 +93,7 @@ void InstallTrapHandler();
 void InstallAtExitHandler();
 
 const char *GetStackOriginDescr(u32 id, uptr *pc);
+const char *GetStackFrameDescr(uptr pc);
 
 void EnterSymbolizer();
 void ExitSymbolizer();
@@ -102,8 +103,6 @@ struct SymbolizerScope {
   SymbolizerScope() { EnterSymbolizer(); }
   ~SymbolizerScope() { ExitSymbolizer(); }
 };
-
-void PrintWarning(uptr pc, uptr bp);
 
 void GetStackTrace(BufferedStackTrace *stack, uptr max_s, uptr pc, uptr bp,
                    void *context, bool request_fast_unwind);
@@ -152,6 +151,10 @@ void HwasanTSDThreadInit();
 void HwasanOnDeadlySignal(int signo, void *info, void *context);
 
 void UpdateMemoryUsage();
+
+void AppendToErrorMessageBuffer(const char *buffer);
+
+void AndroidTestTlsSlot();
 
 }  // namespace __hwasan
 

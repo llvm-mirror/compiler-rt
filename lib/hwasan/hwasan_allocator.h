@@ -29,7 +29,8 @@
 namespace __hwasan {
 
 struct Metadata {
-  u32 requested_size;  // sizes are < 4G.
+  u32 requested_size : 31;  // sizes are < 2G.
+  u32 right_aligned  : 1;
   u32 alloc_context_id;
 };
 
@@ -54,7 +55,8 @@ struct AP32 {
   static const uptr kMetadataSize = sizeof(Metadata);
   typedef __sanitizer::CompactSizeClassMap SizeClassMap;
   static const uptr kRegionSizeLog = __hwasan::kRegionSizeLog;
-  typedef __hwasan::ByteMap ByteMap;
+  using AddressSpaceView = LocalAddressSpaceView;
+  using ByteMap = __hwasan::ByteMap;
   typedef HwasanMapUnmapCallback MapUnmapCallback;
   static const uptr kFlags = 0;
 };
@@ -76,7 +78,9 @@ class HwasanChunkView {
   uptr Beg() const;            // First byte of user memory
   uptr End() const;            // Last byte of user memory
   uptr UsedSize() const;       // Size requested by the user
+  uptr ActualSize() const;     // Size allocated by the allocator.
   u32 GetAllocStackId() const;
+  bool FromSmallHeap() const;
  private:
   uptr block_;
   Metadata *const metadata_;

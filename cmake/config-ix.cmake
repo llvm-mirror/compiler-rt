@@ -53,6 +53,7 @@ if (COMPILER_RT_HAS_NODEFAULTLIBS_FLAG)
 endif ()
 
 # CodeGen options.
+check_c_compiler_flag(-ffreestanding         COMPILER_RT_HAS_FFREESTANDING_FLAG)
 check_cxx_compiler_flag(-fPIC                COMPILER_RT_HAS_FPIC_FLAG)
 check_cxx_compiler_flag(-fPIE                COMPILER_RT_HAS_FPIE_FLAG)
 check_cxx_compiler_flag(-fno-builtin         COMPILER_RT_HAS_FNO_BUILTIN_FLAG)
@@ -64,7 +65,6 @@ check_cxx_compiler_flag(-fno-sanitize=safe-stack COMPILER_RT_HAS_FNO_SANITIZE_SA
 check_cxx_compiler_flag(-fvisibility=hidden  COMPILER_RT_HAS_FVISIBILITY_HIDDEN_FLAG)
 check_cxx_compiler_flag(-frtti               COMPILER_RT_HAS_FRTTI_FLAG)
 check_cxx_compiler_flag(-fno-rtti            COMPILER_RT_HAS_FNO_RTTI_FLAG)
-check_cxx_compiler_flag(-ffreestanding       COMPILER_RT_HAS_FFREESTANDING_FLAG)
 check_cxx_compiler_flag("-Werror -fno-function-sections" COMPILER_RT_HAS_FNO_FUNCTION_SECTIONS_FLAG)
 check_cxx_compiler_flag(-std=c++11           COMPILER_RT_HAS_STD_CXX11_FLAG)
 check_cxx_compiler_flag(-ftls-model=initial-exec COMPILER_RT_HAS_FTLS_MODEL_INITIAL_EXEC)
@@ -121,10 +121,12 @@ check_library_exists(pthread pthread_create "" COMPILER_RT_HAS_LIBPTHREAD)
 
 # Look for terminfo library, used in unittests that depend on LLVMSupport.
 if(LLVM_ENABLE_TERMINFO)
-  foreach(library tinfo terminfo curses ncurses ncursesw)
+  foreach(library terminfo tinfo curses ncurses ncursesw)
+    string(TOUPPER ${library} library_suffix)
     check_library_exists(
-      ${library} setupterm "" COMPILER_RT_HAS_TERMINFO)
-    if(COMPILER_RT_HAS_TERMINFO)
+      ${library} setupterm "" COMPILER_RT_HAS_TERMINFO_${library_suffix})
+    if(COMPILER_RT_HAS_TERMINFO_${library_suffix})
+      set(COMPILER_RT_HAS_TERMINFO TRUE)
       set(COMPILER_RT_TERMINFO_LIB "${library}")
       break()
     endif()
@@ -625,7 +627,7 @@ else()
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND ESAN_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Linux")
+    OS_NAME MATCHES "Linux|FreeBSD")
   set(COMPILER_RT_HAS_ESAN TRUE)
 else()
   set(COMPILER_RT_HAS_ESAN FALSE)
@@ -639,7 +641,7 @@ else()
 endif()
 
 if (COMPILER_RT_HAS_SANITIZER_COMMON AND XRAY_SUPPORTED_ARCH AND
-    OS_NAME MATCHES "Darwin|Linux|FreeBSD|NetBSD|OpenBSD")
+    OS_NAME MATCHES "Darwin|Linux|FreeBSD|NetBSD|OpenBSD|Fuchsia")
   set(COMPILER_RT_HAS_XRAY TRUE)
 else()
   set(COMPILER_RT_HAS_XRAY FALSE)

@@ -172,6 +172,7 @@ typedef int pid_t;
 
 #if SANITIZER_FREEBSD || SANITIZER_NETBSD || \
     SANITIZER_OPENBSD || SANITIZER_MAC || \
+    (SANITIZER_SOLARIS && (defined(_LP64) || _FILE_OFFSET_BITS == 64)) || \
     (SANITIZER_LINUX && defined(__x86_64__))
 typedef u64 OFF_T;
 #else
@@ -196,7 +197,9 @@ typedef u64 tid_t;
 // This header should NOT include any other headers to avoid portability issues.
 
 // Common defs.
+#ifndef INLINE
 #define INLINE inline
+#endif
 #define INTERFACE_ATTRIBUTE SANITIZER_INTERFACE_ATTRIBUTE
 #define SANITIZER_WEAK_DEFAULT_IMPL \
   extern "C" SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE NOINLINE

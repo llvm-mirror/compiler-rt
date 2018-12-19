@@ -25,16 +25,44 @@
 namespace __xray {
 
 /// BufferQueue implements a circular queue of fixed sized buffers (much like a
-/// freelist) but is concerned mostly with making it really quick to initialise,
-/// finalise, and get/return buffers to the queue. This is one key component of
-/// the "flight data recorder" (FDR) mode to support ongoing XRay function call
+/// freelist) but is concerned with making it quick to initialise, finalise, and
+/// get from or return buffers to the queue. This is one key component of the
+/// "flight data recorder" (FDR) mode to support ongoing XRay function call
 /// trace collection.
 class BufferQueue {
 public:
+  /// ControlBlock represents the memory layout of how we interpret the backing
+  /// store for all buffers and extents managed by a BufferQueue instance. The
+  /// ControlBlock has the reference count as the first member, sized according
+  /// to platform-specific cache-line size. We never use the Buffer member of
+  /// the union, which is only there for compiler-supported alignment and
+  /// sizing.
+  ///
+  /// This ensures that the `Data` member will be placed at least kCacheLineSize
+  /// bytes from the beginning of the structure.
+  struct ControlBlock {
+    union {
+      atomic_uint64_t RefCount;
+      char Buffer[kCacheLineSize];
+    };
+
+    /// We need to make this size 1, to conform to the C++ rules for array data
+    /// members. Typically, we want to subtract this 1 byte for sizing
+    /// information.
+    char Data[1];
+  };
+
   struct Buffer {
-    atomic_uint64_t Extents{0};
+    atomic_uint64_t *Extents = nullptr;
+    uint64_t Generation{0};
     void *Data = nullptr;
     size_t Size = 0;
+
+  private:
+    friend class BufferQueue;
+    ControlBlock *BackingStore = nullptr;
+    ControlBlock *ExtentsBackingStore = nullptr;
+    size_t Count = 0;
   };
 
   struct BufferRep {
@@ -113,9 +141,11 @@ private:
   SpinMutex Mutex;
   atomic_uint8_t Finalizing;
 
-  // A pointer to a contiguous block of memory to serve as the backing store for
-  // all the individual buffers handed out.
-  uint8_t *BackingStore;
+  // The collocated ControlBlock and buffer storage.
+  ControlBlock *BackingStore;
+
+  // The collocated ControlBlock and extents storage.
+  ControlBlock *ExtentsBackingStore;
 
   // A dynamically allocated array of BufferRep instances.
   BufferRep *Buffers;
@@ -130,6 +160,13 @@ private:
   // Count of buffers that have been handed out through 'getBuffer'.
   size_t LiveBuffers;
 
+  // We use a generation number to identify buffers and which generation they're
+  // associated with.
+  atomic_uint64_t Generation;
+
+  /// Releases references to the buffers backed by the current buffer queue.
+  void cleanupBuffers();
+
 public:
   enum class ErrorCode : unsigned {
     Ok,
@@ -137,6 +174,7 @@ public:
     QueueFinalizing,
     UnrecognizedBuffer,
     AlreadyFinalized,
+    AlreadyInitialized,
   };
 
   static const char *getErrorString(ErrorCode E) {
@@ -151,6 +189,8 @@ public:
       return "buffer being returned not owned by buffer queue";
     case ErrorCode::AlreadyFinalized:
       return "queue already finalized";
+    case ErrorCode::AlreadyInitialized:
+      return "queue already initialized";
     }
     return "unknown error";
   }
@@ -181,8 +221,21 @@ public:
   ///     the buffer being released.
   ErrorCode releaseBuffer(Buffer &Buf);
 
+  /// Initializes the buffer queue, starting a new generation. We can re-set the
+  /// size of buffers with |BS| along with the buffer count with |BC|.
+  ///
+  /// Returns:
+  ///   - ErrorCode::Ok when we successfully initialize the buffer. This
+  ///   requires that the buffer queue is previously finalized.
+  ///   - ErrorCode::AlreadyInitialized when the buffer queue is not finalized.
+  ErrorCode init(size_t BS, size_t BC);
+
   bool finalizing() const {
     return atomic_load(&Finalizing, memory_order_acquire);
+  }
+
+  uint64_t generation() const {
+    return atomic_load(&Generation, memory_order_acquire);
   }
 
   /// Returns the configured size of the buffers in the buffer queue.

@@ -86,6 +86,7 @@ void GetThreadStackTopAndBottom(bool, uptr *stack_top, uptr *stack_bottom) {
   *stack_top = *stack_bottom + size;
 }
 
+void InitializePlatformEarly() {}
 void MaybeReexec() {}
 void CheckASLR() {}
 void PlatformPrepareForSandboxing(__sanitizer_sandbox_arguments *args) {}
@@ -119,8 +120,9 @@ void BlockingMutex::Lock() {
   if (atomic_exchange(m, MtxLocked, memory_order_acquire) == MtxUnlocked)
     return;
   while (atomic_exchange(m, MtxSleeping, memory_order_acquire) != MtxUnlocked) {
-    zx_status_t status = _zx_futex_wait(reinterpret_cast<zx_futex_t *>(m),
-                                        MtxSleeping, ZX_TIME_INFINITE);
+    zx_status_t status =
+        _zx_futex_wait(reinterpret_cast<zx_futex_t *>(m), MtxSleeping,
+                       ZX_HANDLE_INVALID, ZX_TIME_INFINITE);
     if (status != ZX_ERR_BAD_STATE)  // Normal race.
       CHECK_EQ(status, ZX_OK);
   }
@@ -451,6 +453,7 @@ char **StoredArgv;
 char **StoredEnviron;
 
 char **GetArgv() { return StoredArgv; }
+char **GetEnviron() { return StoredEnviron; }
 
 const char *GetEnv(const char *name) {
   if (StoredEnviron) {
