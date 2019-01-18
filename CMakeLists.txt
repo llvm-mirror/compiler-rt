@@ -200,7 +200,7 @@ set(CXXABIS none default libstdc++ libc++)
 set_property(CACHE SANITIZER_CXX_ABI PROPERTY STRINGS ;${CXXABIS})
 
 if (SANITIZER_CXX_ABI STREQUAL "default")
-  if (APPLE)
+  if (APPLE OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
     set(SANITIZER_CXX_ABI_LIBNAME "libc++")
     set(SANITIZER_CXX_ABI_SYSTEM 1)
   elseif (FUCHSIA)
@@ -428,15 +428,19 @@ endif()
 
 add_subdirectory(include)
 
-foreach(path IN ITEMS ${LLVM_MAIN_SRC_DIR}/projects/libcxx
-                      ${LLVM_MAIN_SRC_DIR}/runtimes/libcxx
-                      ${LLVM_MAIN_SRC_DIR}/../libcxx
-                      ${LLVM_EXTERNAL_LIBCXX_SOURCE_DIR})
-  if(IS_DIRECTORY ${path})
-    set(COMPILER_RT_LIBCXX_PATH ${path})
-    break()
-  endif()
-endforeach()
+option(COMPILER_RT_USE_LIBCXX
+  "Enable compiler-rt to use libc++ from the source tree" ON)
+if(COMPILER_RT_USE_LIBCXX)
+  foreach(path IN ITEMS ${LLVM_MAIN_SRC_DIR}/projects/libcxx
+                        ${LLVM_MAIN_SRC_DIR}/runtimes/libcxx
+                        ${LLVM_MAIN_SRC_DIR}/../libcxx
+                        ${LLVM_EXTERNAL_LIBCXX_SOURCE_DIR})
+    if(IS_DIRECTORY ${path})
+      set(COMPILER_RT_LIBCXX_PATH ${path})
+      break()
+    endif()
+  endforeach()
+endif()
 
 set(COMPILER_RT_LLD_PATH ${LLVM_MAIN_SRC_DIR}/tools/lld)
 if(EXISTS ${COMPILER_RT_LLD_PATH}/ AND LLVM_TOOL_LLD_BUILD)

@@ -62,6 +62,12 @@ namespace __sanitizer {
   extern unsigned struct_rlimit_sz;
   extern unsigned struct_utimbuf_sz;
   extern unsigned struct_timespec_sz;
+  extern unsigned struct_regmatch_sz;
+  extern unsigned struct_regex_sz;
+  extern unsigned struct_FTS_sz;
+  extern unsigned struct_FTSENT_sz;
+  extern const int unvis_valid;
+  extern const int unvis_validpush;
 
   struct __sanitizer_iocb {
     u64   aio_data;
@@ -622,6 +628,9 @@ namespace __sanitizer {
 
   typedef struct __sanitizer_cap_rights __sanitizer_cap_rights_t;
   extern unsigned struct_cap_rights_sz;
+
+  extern unsigned struct_fstab_sz;
+  extern unsigned struct_StringList_sz;
 } // namespace __sanitizer
 
 #define CHECK_TYPE_SIZE(TYPE) \
