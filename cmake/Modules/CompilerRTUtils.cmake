@@ -128,7 +128,7 @@ macro(test_target_arch arch def)
     if(NOT HAS_${arch}_DEF)
       set(CAN_TARGET_${arch} FALSE)
     elseif(TEST_COMPILE_ONLY)
-      try_compile_only(CAN_TARGET_${arch} ${TARGET_${arch}_CFLAGS})
+      try_compile_only(CAN_TARGET_${arch} FLAGS ${TARGET_${arch}_CFLAGS})
     else()
       set(FLAG_NO_EXCEPTIONS "")
       if(COMPILER_RT_HAS_FNO_EXCEPTIONS_FLAG)
@@ -233,7 +233,8 @@ macro(load_llvm_config)
     execute_process(
       COMMAND ${LLVM_CONFIG_PATH} "--ldflags" "--libs" "xray"
       RESULT_VARIABLE HAD_ERROR
-      OUTPUT_VARIABLE CONFIG_OUTPUT)
+      OUTPUT_VARIABLE CONFIG_OUTPUT
+      ERROR_QUIET)
     if (HAD_ERROR)
       message(WARNING "llvm-config finding xray failed with status ${HAD_ERROR}")
       set(COMPILER_RT_HAS_LLVMXRAY FALSE)
@@ -250,7 +251,8 @@ macro(load_llvm_config)
     execute_process(
       COMMAND ${LLVM_CONFIG_PATH} "--ldflags" "--libs" "testingsupport"
       RESULT_VARIABLE HAD_ERROR
-      OUTPUT_VARIABLE CONFIG_OUTPUT)
+      OUTPUT_VARIABLE CONFIG_OUTPUT
+      ERROR_QUIET)
     if (HAD_ERROR)
       message(WARNING "llvm-config finding testingsupport failed with status ${HAD_ERROR}")
     else()

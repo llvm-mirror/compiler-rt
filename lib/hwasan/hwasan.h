@@ -1,9 +1,8 @@
 //===-- hwasan.h ------------------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -71,6 +70,7 @@ extern int hwasan_report_count;
 bool ProtectRange(uptr beg, uptr end);
 bool InitShadow();
 void InitThreads();
+void InitInstrumentation();
 void MadviseShadow();
 char *GetProcSelfMaps();
 void InitializeInterceptors();
@@ -81,6 +81,7 @@ void HwasanAllocatorThreadFinish();
 void *hwasan_malloc(uptr size, StackTrace *stack);
 void *hwasan_calloc(uptr nmemb, uptr size, StackTrace *stack);
 void *hwasan_realloc(void *ptr, uptr size, StackTrace *stack);
+void *hwasan_reallocarray(void *ptr, uptr nmemb, uptr size, StackTrace *stack);
 void *hwasan_valloc(uptr size, StackTrace *stack);
 void *hwasan_pvalloc(uptr size, StackTrace *stack);
 void *hwasan_aligned_alloc(uptr alignment, uptr size, StackTrace *stack);
@@ -104,9 +105,6 @@ struct SymbolizerScope {
   ~SymbolizerScope() { ExitSymbolizer(); }
 };
 
-void GetStackTrace(BufferedStackTrace *stack, uptr max_s, uptr pc, uptr bp,
-                   void *context, bool request_fast_unwind);
-
 // Returns a "chained" origin id, pointing to the given stack trace followed by
 // the previous origin id.
 u32 ChainOrigin(u32 id, StackTrace *stack);
@@ -115,16 +113,15 @@ const int STACK_TRACE_TAG_POISON = StackTrace::TAG_CUSTOM + 1;
 
 #define GET_MALLOC_STACK_TRACE                                            \
   BufferedStackTrace stack;                                               \
-  if (hwasan_inited)                                                       \
-  GetStackTrace(&stack, common_flags()->malloc_context_size,              \
-                StackTrace::GetCurrentPc(), GET_CURRENT_FRAME(), nullptr, \
-                common_flags()->fast_unwind_on_malloc)
+  if (hwasan_inited)                                                      \
+    stack.Unwind(StackTrace::GetCurrentPc(), GET_CURRENT_FRAME(),         \
+                 nullptr, common_flags()->fast_unwind_on_malloc,          \
+                 common_flags()->malloc_context_size)
 
 #define GET_FATAL_STACK_TRACE_PC_BP(pc, bp)              \
   BufferedStackTrace stack;                              \
-  if (hwasan_inited)                                       \
-  GetStackTrace(&stack, kStackTraceMax, pc, bp, nullptr, \
-                common_flags()->fast_unwind_on_fatal)
+  if (hwasan_inited)                                     \
+    stack.Unwind(pc, bp, nullptr, common_flags()->fast_unwind_on_fatal)
 
 #define GET_FATAL_STACK_TRACE_HERE \
   GET_FATAL_STACK_TRACE_PC_BP(StackTrace::GetCurrentPc(), GET_CURRENT_FRAME())

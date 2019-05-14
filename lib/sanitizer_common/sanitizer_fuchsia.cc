@@ -1,9 +1,8 @@
 //===-- sanitizer_fuchsia.cc ----------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -253,12 +252,14 @@ static uptr DoMmapFixedOrDie(zx_handle_t vmar, uptr fixed_addr, uptr map_size,
   return addr;
 }
 
-uptr ReservedAddressRange::Map(uptr fixed_addr, uptr map_size) {
+uptr ReservedAddressRange::Map(uptr fixed_addr, uptr map_size,
+                               const char *name) {
   return DoMmapFixedOrDie(os_handle_, fixed_addr, map_size, base_,
                           name_, false);
 }
 
-uptr ReservedAddressRange::MapOrDie(uptr fixed_addr, uptr map_size) {
+uptr ReservedAddressRange::MapOrDie(uptr fixed_addr, uptr map_size,
+                                    const char *name) {
   return DoMmapFixedOrDie(os_handle_, fixed_addr, map_size, base_,
                           name_, true);
 }

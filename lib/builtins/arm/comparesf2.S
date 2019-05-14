@@ -1,9 +1,8 @@
 //===-- comparesf2.S - Implement single-precision soft-float comparisons --===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -175,6 +174,11 @@ END_COMPILERRT_FUNCTION(__eqsf2)
 DEFINE_COMPILERRT_FUNCTION_ALIAS(__lesf2, __eqsf2)
 DEFINE_COMPILERRT_FUNCTION_ALIAS(__ltsf2, __eqsf2)
 DEFINE_COMPILERRT_FUNCTION_ALIAS(__nesf2, __eqsf2)
+
+#if defined(__ELF__)
+// Alias for libgcc compatibility
+DEFINE_COMPILERRT_FUNCTION_ALIAS(__cmpsf2, __lesf2)
+#endif
 
 @ int __gtsf2(float a, float b)
 

@@ -1,10 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #===- lib/fuzzer/scripts/merge_data_flow.py ------------------------------===#
 #
-#                     The LLVM Compiler Infrastructure
-#
-# This file is distributed under the University of Illinois Open Source
-# License. See LICENSE.TXT for details.
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #
 #===------------------------------------------------------------------------===#
 # Merge several data flow traces into one.
@@ -19,7 +18,7 @@ def Merge(a, b):
   res = array('b')
   for i in range(0, len(a)):
     res.append(ord('1' if a[i] == '1' or b[i] == '1' else '0'))
-  return res.tostring()
+  return res.tostring().decode('utf-8')
 
 def main(argv):
   D = {}
@@ -30,7 +29,11 @@ def main(argv):
     else:
       D[F] = BV;
   for F in D.keys():
-    print("%s %s" % (F, D[F]))
+    if isinstance(D[F], str):
+      value = D[F]
+    else:
+      value = D[F].decode('utf-8')
+    print("%s %s" % (F, value))
 
 if __name__ == '__main__':
   main(sys.argv)
