@@ -43,6 +43,8 @@
 #define STRINGIFY_(A) #A
 #define STRINGIFY(A) STRINGIFY_(A)
 
+#if !SANITIZER_GO
+
 // ----------------- A workaround for the absence of weak symbols --------------
 // We don't have a direct equivalent of weak symbols when using MSVC, but we can
 // use the /alternatename directive to tell the linker to default a specific
@@ -158,5 +160,13 @@
 //     return a >= b;
 //   }
 //
+
+#else // SANITIZER_GO
+
+# define WIN_WEAK_EXPORT_DEF(ReturnType, Name, ...)                            \
+  extern "C" ReturnType Name(__VA_ARGS__)
+
+#endif
+
 #endif // SANITIZER_WINDOWS
 #endif // SANITIZER_WIN_DEFS_H
