@@ -163,6 +163,7 @@
 
 #else // SANITIZER_GO
 
+// Go neither needs or wants weak references.
 # define WIN_WEAK_EXPORT_DEF(ReturnType, Name, ...)                            \
   extern "C" ReturnType Name(__VA_ARGS__)
 
