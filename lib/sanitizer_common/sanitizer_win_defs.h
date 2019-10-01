@@ -163,7 +163,8 @@
 
 #else // SANITIZER_GO
 
-// Go neither needs or wants weak references.
+// Go neither needs nor wants weak references.
+// The shenanigans above don't work for gcc.
 # define WIN_WEAK_EXPORT_DEF(ReturnType, Name, ...)                            \
   extern "C" ReturnType Name(__VA_ARGS__)
 
